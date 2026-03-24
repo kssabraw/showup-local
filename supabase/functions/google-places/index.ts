@@ -80,6 +80,7 @@ serve(async (req) => {
         'internationalPhoneNumber', 'websiteUri', 'primaryType',
         'types', 'rating', 'userRatingCount', 'currentOpeningHours',
         'regularOpeningHours', 'location', 'primaryTypeDisplayName',
+        'googleMapsUri',
       ].join(',');
 
       const response = await fetch(
@@ -97,19 +98,29 @@ serve(async (req) => {
         throw new Error(`Google Places details failed [${response.status}]: ${JSON.stringify(data)}`);
       }
 
+      // Filter out generic types
+      const genericTypes = new Set(['point_of_interest', 'establishment', 'service']);
+      const meaningfulTypes = (data.types || []).filter((t: string) => !genericTypes.has(t));
+
+      // Format type strings: "consultant" → "Consultant"
+      const formatType = (t: string) =>
+        t.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase());
+
       const details = {
         place_id: data.id,
         name: data.displayName?.text || '',
         address: data.formattedAddress || '',
         phone: data.nationalPhoneNumber || data.internationalPhoneNumber || '',
         website: data.websiteUri || '',
-        category: data.primaryTypeDisplayName?.text || data.primaryType || '',
+        category: data.primaryTypeDisplayName?.text || (data.primaryType ? formatType(data.primaryType) : ''),
+        categories: meaningfulTypes.map(formatType),
         types: data.types || [],
         rating: data.rating || null,
         review_count: data.userRatingCount || null,
         latitude: data.location?.latitude || null,
         longitude: data.location?.longitude || null,
         hours: data.regularOpeningHours?.weekdayDescriptions || null,
+        google_maps_uri: data.googleMapsUri || null,
       };
 
       return new Response(JSON.stringify({ details }), {

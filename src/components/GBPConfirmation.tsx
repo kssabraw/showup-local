@@ -76,7 +76,25 @@ const GBPConfirmation = ({ business, onConfirm, onSearchAgain }: GBPConfirmation
           <InfoRow icon={MapPin} label="Address" value={business.address} />
           <InfoRow icon={Phone} label="Phone" value={business.phone} />
           <InfoRow icon={Globe} label="Website" value={business.website} />
-          <InfoRow icon={Tag} label="Category" value={business.category} />
+          <InfoRow icon={Tag} label="Primary Category" value={business.category} />
+          {business.categories && business.categories.length > 0 && (
+            <div className="flex items-start gap-3">
+              <Tag className="w-4 h-4 text-muted-foreground mt-0.5 flex-shrink-0" />
+              <div className="min-w-0">
+                <p className="text-xs text-muted-foreground">Additional Categories</p>
+                <div className="flex flex-wrap gap-1.5 mt-1">
+                  {business.categories.map((cat, i) => (
+                    <span
+                      key={i}
+                      className="text-xs bg-secondary text-secondary-foreground px-2 py-0.5 rounded-md"
+                    >
+                      {cat}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Hours */}
