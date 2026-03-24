@@ -5,14 +5,16 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
 };
 
+const OUTSCRAPER_BASE = 'https://api.app.outscraper.com';
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
-  const apiKey = Deno.env.get('GOOGLE_PLACES_API_KEY');
+  const apiKey = Deno.env.get('OUTSCRAPER_API_KEY');
   if (!apiKey) {
-    return new Response(JSON.stringify({ error: 'Google Places API key not configured' }), {
+    return new Response(JSON.stringify({ error: 'Outscraper API key not configured' }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
@@ -36,31 +38,35 @@ serve(async (req) => {
         });
       }
 
-      const response = await fetch('https://places.googleapis.com/v1/places:autocomplete', {
-        method: 'POST',
+      // Use Outscraper maps search with limit=5 for autocomplete-like behavior
+      const params = new URLSearchParams({
+        query: input.trim(),
+        organizationsPerQueryLimit: '5',
+        language: 'en',
+        async: 'false',
+      });
+
+      const response = await fetch(`${OUTSCRAPER_BASE}/maps/search-v3?${params}`, {
         headers: {
-          'Content-Type': 'application/json',
-          'X-Goog-Api-Key': apiKey,
+          'X-API-KEY': apiKey,
+          'client': 'Lovable',
         },
-        body: JSON.stringify({
-          input: input.trim(),
-          includedPrimaryTypes: ['establishment'],
-        }),
       });
 
       const data = await response.json();
       if (!response.ok) {
-        throw new Error(`Google Places autocomplete failed [${response.status}]: ${JSON.stringify(data)}`);
+        throw new Error(`Outscraper search failed [${response.status}]: ${JSON.stringify(data)}`);
       }
 
-      const suggestions = (data.suggestions || [])
-        .filter((s: any) => s.placePrediction)
-        .map((s: any) => ({
-          place_id: s.placePrediction.placeId,
-          name: s.placePrediction.structuredFormat?.mainText?.text || '',
-          address: s.placePrediction.structuredFormat?.secondaryText?.text || '',
-          description: s.placePrediction.text?.text || '',
-        }));
+      // data.data is an array of arrays: [[place1, place2, ...]]
+      const places = (data.data && data.data[0]) || [];
+
+      const suggestions = places.map((p: any) => ({
+        place_id: p.place_id || p.google_id || '',
+        name: p.name || '',
+        address: p.full_address || p.address || '',
+        description: `${p.name || ''}, ${p.full_address || p.address || ''}`,
+      }));
 
       return new Response(JSON.stringify({ suggestions }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -75,52 +81,55 @@ serve(async (req) => {
         });
       }
 
-      const fields = [
-        'id', 'displayName', 'formattedAddress', 'nationalPhoneNumber',
-        'internationalPhoneNumber', 'websiteUri', 'primaryType',
-        'types', 'rating', 'userRatingCount', 'currentOpeningHours',
-        'regularOpeningHours', 'location', 'primaryTypeDisplayName',
-        'googleMapsUri',
-      ].join(',');
+      // Look up by place_id directly
+      const params = new URLSearchParams({
+        query: place_id,
+        organizationsPerQueryLimit: '1',
+        language: 'en',
+        async: 'false',
+      });
 
-      const response = await fetch(
-        `https://places.googleapis.com/v1/places/${place_id}`,
-        {
-          headers: {
-            'X-Goog-Api-Key': apiKey,
-            'X-Goog-FieldMask': fields,
-          },
-        }
-      );
+      const response = await fetch(`${OUTSCRAPER_BASE}/maps/search-v3?${params}`, {
+        headers: {
+          'X-API-KEY': apiKey,
+          'client': 'Lovable',
+        },
+      });
 
       const data = await response.json();
       if (!response.ok) {
-        throw new Error(`Google Places details failed [${response.status}]: ${JSON.stringify(data)}`);
+        throw new Error(`Outscraper details failed [${response.status}]: ${JSON.stringify(data)}`);
       }
 
-      // Filter out generic types
-      const genericTypes = new Set(['point_of_interest', 'establishment', 'service']);
-      const meaningfulTypes = (data.types || []).filter((t: string) => !genericTypes.has(t));
+      const places = (data.data && data.data[0]) || [];
+      const p = places[0];
 
-      // Format type strings: "consultant" → "Consultant"
-      const formatType = (t: string) =>
-        t.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase());
+      if (!p) {
+        return new Response(JSON.stringify({ error: 'Place not found' }), {
+          status: 404,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Extract categories - Outscraper returns category and subtypes
+      const primaryCategory = p.category || p.type || '';
+      const additionalCategories = (p.subtypes || []).filter((t: string) => t !== primaryCategory);
 
       const details = {
-        place_id: data.id,
-        name: data.displayName?.text || '',
-        address: data.formattedAddress || '',
-        phone: data.nationalPhoneNumber || data.internationalPhoneNumber || '',
-        website: data.websiteUri || '',
-        category: data.primaryTypeDisplayName?.text || (data.primaryType ? formatType(data.primaryType) : ''),
-        categories: meaningfulTypes.map(formatType),
-        types: data.types || [],
-        rating: data.rating || null,
-        review_count: data.userRatingCount || null,
-        latitude: data.location?.latitude || null,
-        longitude: data.location?.longitude || null,
-        hours: data.regularOpeningHours?.weekdayDescriptions || null,
-        google_maps_uri: data.googleMapsUri || null,
+        place_id: p.place_id || p.google_id || '',
+        name: p.name || '',
+        address: p.full_address || p.address || '',
+        phone: p.phone || '',
+        website: p.site || '',
+        category: primaryCategory,
+        categories: additionalCategories,
+        types: p.type ? [p.type, ...(p.subtypes || [])] : (p.subtypes || []),
+        rating: p.rating ?? null,
+        review_count: p.reviews ?? null,
+        latitude: p.latitude ?? null,
+        longitude: p.longitude ?? null,
+        hours: p.working_hours ? Object.entries(p.working_hours).map(([day, hrs]) => `${day}: ${hrs}`) : null,
+        google_maps_uri: p.location_link || p.google_maps_url || null,
       };
 
       return new Response(JSON.stringify({ details }), {
@@ -133,7 +142,7 @@ serve(async (req) => {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   } catch (error) {
-    console.error('google-places error:', error);
+    console.error('outscraper error:', error);
     const message = error instanceof Error ? error.message : 'Unknown error';
     return new Response(JSON.stringify({ error: message }), {
       status: 500,
