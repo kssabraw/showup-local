@@ -124,7 +124,7 @@ serve(async (req) => {
         website: p.site || '',
         category: primaryCategory,
         categories: additionalCategories,
-        types: p.type ? [p.type, ...(p.subtypes || [])] : (p.subtypes || []),
+        types: p.type ? [p.type, ...rawSubtypes] : rawSubtypes,
         rating: p.rating ?? null,
         review_count: p.reviews ?? null,
         latitude: p.latitude ?? null,
