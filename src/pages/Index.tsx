@@ -2,6 +2,7 @@ import { useState } from "react";
 import AppSidebar from "@/components/AppSidebar";
 import DashboardView from "@/components/DashboardView";
 import NewContentView from "@/components/NewContentView";
+import BusinessSearchView, { type BusinessDetails } from "@/components/BusinessSearchView";
 import { cn } from "@/lib/utils";
 
 const Index = () => {
@@ -36,7 +37,15 @@ const Index = () => {
         </header>
         <div className="p-6">
           {activeItem === "dashboard" && <DashboardView />}
-          {activeItem === "new" && <NewContentView onBack={() => setActiveItem("dashboard")} />}
+          {activeItem === "new" && (
+            <BusinessSearchView
+              onBack={() => setActiveItem("dashboard")}
+              onConfirm={(business: BusinessDetails) => {
+                console.log("Business confirmed:", business);
+                setActiveItem("dashboard");
+              }}
+            />
+          )}
           {activeItem === "content" && (
             <div>
               <h1 className="text-2xl font-display font-bold text-foreground">Content Library</h1>
