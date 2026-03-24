@@ -14,9 +14,12 @@ interface PlaceSuggestion {
 export interface BusinessDetails {
   place_id: string;
   name: string;
+  description: string;
   address: string;
   phone: string;
   website: string;
+  logo: string;
+  photo: string;
   category: string;
   categories: string[];
   types: string[];

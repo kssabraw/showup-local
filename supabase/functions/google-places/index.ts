@@ -119,9 +119,12 @@ serve(async (req) => {
       const details = {
         place_id: p.place_id || p.google_id || '',
         name: p.name || '',
+        description: p.description || '',
         address: p.full_address || p.address || '',
         phone: p.phone || '',
         website: p.site || '',
+        logo: p.logo || '',
+        photo: p.photo || '',
         category: primaryCategory,
         categories: additionalCategories,
         types: p.type ? [p.type, ...rawSubtypes] : rawSubtypes,
