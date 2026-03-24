@@ -18,12 +18,14 @@ export interface BusinessDetails {
   phone: string;
   website: string;
   category: string;
+  categories: string[];
   types: string[];
   rating: number | null;
   review_count: number | null;
   latitude: number | null;
   longitude: number | null;
   hours: string[] | null;
+  google_maps_uri: string | null;
 }
 
 interface BusinessSearchViewProps {
