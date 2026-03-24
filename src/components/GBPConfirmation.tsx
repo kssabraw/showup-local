@@ -53,24 +53,40 @@ const GBPConfirmation = ({ business, onConfirm, onSearchAgain }: GBPConfirmation
       </div>
 
       <div className="bg-card rounded-xl border border-border p-6 space-y-5">
-        {/* Business Name + Rating Header */}
-        <div className="flex items-start justify-between gap-4">
-          <h2 className="text-lg font-display font-bold text-foreground">
-            {business.name}
-          </h2>
-          {business.rating != null && (
-            <div className="flex items-center gap-1.5 flex-shrink-0">
-              <Star className="w-4 h-4 text-warning fill-warning" />
-              <span className="text-sm font-semibold text-foreground">
-                {business.rating}
-              </span>
-              {business.review_count != null && (
-                <span className="text-xs text-muted-foreground">
-                  ({business.review_count})
-                </span>
+        {/* Business Name + Logo + Rating Header */}
+        <div className="flex items-start gap-4">
+          {(business.logo || business.photo) && (
+            <img
+              src={business.logo || business.photo}
+              alt={`${business.name} logo`}
+              className="w-14 h-14 rounded-lg object-cover border border-border flex-shrink-0"
+            />
+          )}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-start justify-between gap-4">
+              <h2 className="text-lg font-display font-bold text-foreground">
+                {business.name}
+              </h2>
+              {business.rating != null && (
+                <div className="flex items-center gap-1.5 flex-shrink-0">
+                  <Star className="w-4 h-4 text-warning fill-warning" />
+                  <span className="text-sm font-semibold text-foreground">
+                    {business.rating}
+                  </span>
+                  {business.review_count != null && (
+                    <span className="text-xs text-muted-foreground">
+                      ({business.review_count})
+                    </span>
+                  )}
+                </div>
               )}
             </div>
-          )}
+            {business.description && (
+              <p className="text-sm text-muted-foreground mt-1">
+                {business.description}
+              </p>
+            )}
+          </div>
         </div>
 
         <div className="space-y-3">
