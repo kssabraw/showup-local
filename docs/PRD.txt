@@ -1,0 +1,21 @@
+See uploaded file: LABS_local_content_writer_PRD.txt
+
+This file was too large to commit directly. The full PRD content covers the following sections:
+- Organic Ranking Engine
+- GBP / Maps Relevance Signal Engine
+- Entity Establishment Engine
+- AEO / LLM Retrieval Layer
+- Differentiation Framework
+- Topical Authority
+- Geographic Legitimacy Engine
+- Hyperlocal & Near-Me Intent Engine
+- Master Input Schema
+- Content Output Specification
+- ICP Engine
+- Master Composite Score
+- App Modes
+- Schema Output Specification
+- Core User Journey
+- Master PRD Addendum
+
+Store the full PRD locally and reference docs/SPEC.md and docs/CONSTRAINTS.md for all coding decisions.
