@@ -1,6 +1,6 @@
 # Keyword Analysis Pipeline
-> Purpose: Step-by-step implementation guide for SERP scraping, page scraping, and Google NLP entity analysis using Supabase Edge Functions.
-> Decision: POP API not used — entity salience analysis via Google NLP + DataForSEO PAA covers the requirement. LLM handles LSI vocabulary naturally.
+> Purpose: Step-by-step implementation guide for SERP scraping, page scraping, Google NLP entity analysis, and Python NLP microservice.
+> Decision: POP API not used — entity salience via Google NLP + LSI/related/quadgrams via Python microservice on Railway.
 
 ---
 
@@ -14,7 +14,8 @@ User enters keyword
     → Edge Function: fetch-serp-data (DataForSEO)
     → Edge Function: scrape-pages (ScrapeOwl)
     → Edge Function: analyze-entities (Google NLP)
-    → Store in keyword_analysis table
+    → Python microservice on Railway (LSI + related keywords + quadgrams)
+    → Store all results in keyword_analysis table
 → Pass enriched data to LLM generation prompt
 ```
 
@@ -27,7 +28,8 @@ User enters keyword
 | DataForSEO (20 results, live) | ~$0.04 |
 | ScrapeOwl (20 pages) | ~$0.04–0.10 |
 | Google NLP (5,000 chars × 20 pages) | ~$0.13 |
-| **Total per unique keyword** | **~$0.21–0.27** |
+| Python microservice (Railway) | ~$5/month flat — no per-request cost |
+| **Total per unique keyword** | **~$0.21–0.27 + flat $5/mo** |
 
 With caching, each keyword is only analyzed once. Subsequent generations for the same keyword cost $0.
 
@@ -42,6 +44,8 @@ DATAFORSEO_LOGIN
 DATAFORSEO_PASSWORD
 SCRAPEOWL_API_KEY
 GOOGLE_NLP_API_KEY
+NLP_SERVICE_URL        ← your Railway deployment URL
+NLP_SERVICE_SECRET     ← a secret token you set to protect the endpoint
 ```
 
 ---
@@ -56,6 +60,9 @@ create table keyword_analysis (
   paa jsonb,
   related_searches jsonb,
   entities jsonb,
+  lsi_keywords jsonb,
+  related_keywords jsonb,
+  top_quadgrams jsonb,
   created_at timestamp default now()
 );
 
@@ -274,9 +281,62 @@ function average(arr: number[]): number {
 
 ---
 
-## Step 6: Edge Function — run-keyword-analysis (Orchestrator)
+## Step 6: Python Microservice (Railway)
 
-The frontend only calls this one function. It handles caching and coordinates the other three.
+See `services/nlp/` in this repo for the full code.
+
+**What it returns:**
+
+```json
+{
+  "lsi_keywords": [
+    { "term": "drain cleaning", "score": 0.0842, "type": "lsi" },
+    { "term": "water heater repair anaheim", "score": 0.0731, "type": "lsi" }
+  ],
+  "related_keywords": [
+    { "term": "emergency plumbing service", "score": 0.7821, "type": "related" },
+    { "term": "licensed plumber anaheim", "score": 0.7654, "type": "related" }
+  ],
+  "top_quadgrams": [
+    { "phrase": "licensed insured plumbing service", "count": 8, "type": "quadgram" },
+    { "phrase": "emergency plumbing anaheim available", "count": 6, "type": "quadgram" }
+  ]
+}
+```
+
+**Call it from your orchestrator Edge Function:**
+
+```typescript
+const nlpRes = await fetch(`${Deno.env.get('NLP_SERVICE_URL')}/analyze`, {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${Deno.env.get('NLP_SERVICE_SECRET')}`
+  },
+  body: JSON.stringify({
+    keyword,
+    pages: pageData.pages.map(p => p.text).filter(Boolean)
+  })
+})
+const nlpData = await nlpRes.json()
+```
+
+**Deploy to Railway:**
+
+```bash
+cd services/nlp
+railway login
+railway init
+railway up
+```
+
+Then copy the Railway URL into your Supabase secret as `NLP_SERVICE_URL`.
+
+---
+
+## Step 7: Orchestrator Edge Function — run-keyword-analysis
+
+Calls all services in sequence, checks cache first, stores everything.
 
 ```typescript
 // supabase/functions/run-keyword-analysis/index.ts
@@ -323,20 +383,38 @@ Deno.serve(async (req) => {
   })
   const pageData = await scrapeRes.json()
 
-  // 4. Analyze entities
-  const entityRes = await fetch(`${baseUrl}/analyze-entities`, {
-    method: 'POST', headers,
-    body: JSON.stringify({ pages: pageData.pages })
-  })
-  const entityData = await entityRes.json()
+  // 4. Analyze entities (Google NLP) + Python NLP — run in parallel
+  const [entityRes, nlpRes] = await Promise.all([
+    fetch(`${baseUrl}/analyze-entities`, {
+      method: 'POST', headers,
+      body: JSON.stringify({ pages: pageData.pages })
+    }),
+    fetch(`${Deno.env.get('NLP_SERVICE_URL')}/analyze`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${Deno.env.get('NLP_SERVICE_SECRET')}`
+      },
+      body: JSON.stringify({
+        keyword,
+        pages: pageData.pages.map(p => p.text).filter(Boolean)
+      })
+    })
+  ])
 
-  // 5. Cache result
+  const entityData = await entityRes.json()
+  const nlpData = await nlpRes.json()
+
+  // 5. Store everything in cache
   const result = {
     keyword,
     urls: serpData.urls,
     paa: serpData.paa,
     related_searches: serpData.related_searches,
-    entities: entityData.entities
+    entities: entityData.entities,
+    lsi_keywords: nlpData.lsi_keywords,
+    related_keywords: nlpData.related_keywords,
+    top_quadgrams: nlpData.top_quadgrams
   }
 
   await supabase.from('keyword_analysis').insert(result)
@@ -347,32 +425,51 @@ Deno.serve(async (req) => {
 })
 ```
 
+Note: entity analysis and Python NLP run in **parallel** (`Promise.all`) since they both only depend on the scraped pages — this saves several seconds of latency.
+
 ---
 
-## Step 7: Using the Data in Your LLM Prompt
-
-Pass entity salience and PAA data into your generation prompt server-side:
+## Step 8: Using the Data in Your LLM Prompt
 
 ```typescript
 const topEntities = analysisData.entities
   .slice(0, 10)
-  .map(e => `${e.name} (type: ${e.type}, salience: ${e.avg_salience}, ~${e.avg_mentions} mentions avg)`)
+  .map(e => `${e.name} (salience: ${e.avg_salience}, ~${e.avg_mentions}x mentions)`)
   .join('\n')
 
-const paaList = analysisData.paa.join('\n')
+const topLsi = analysisData.lsi_keywords
+  .slice(0, 15)
+  .map(k => k.term)
+  .join(', ')
+
+const topRelated = analysisData.related_keywords
+  .slice(0, 10)
+  .map(k => k.term)
+  .join(', ')
+
+const topQuadgrams = analysisData.top_quadgrams
+  .slice(0, 10)
+  .map(q => `"${q.phrase}" (used ${q.count}x)`)
+  .join('\n')
 
 const prompt = `
-You are writing a local SEO page for the keyword: "${keyword}".
+You are writing a local SEO page for: "${keyword}".
 
-ENTITY PROMINENCE REQUIREMENTS:
-The following entities appear consistently across the top 20 ranking pages.
-Mirror these salience proportions — higher salience = more prominent placement
-(headings, opening paragraphs) and higher mention frequency.
-
+ENTITY PROMINENCE — mirror these salience levels in your content:
 ${topEntities}
 
-PEOPLE ALSO ASK — address all of these in your FAQ section:
-${paaList}
+LSI TERMS — weave these naturally into the content:
+${topLsi}
+
+RELATED KEYPHRASES — use these where contextually appropriate:
+${topRelated}
+
+HIGH-FREQUENCY PHRASES — these exact 4-word patterns appear repeatedly
+across top-ranking pages. Use them naturally where relevant:
+${topQuadgrams}
+
+PEOPLE ALSO ASK — address every one of these in your FAQ:
+${analysisData.paa.join('\n')}
 
 [rest of generation prompt from SPEC.md]
 `
@@ -380,29 +477,39 @@ ${paaList}
 
 ---
 
-## Deployment
+## Deployment Checklist
 
 ```bash
-# Deploy all four edge functions
-supabase functions deploy fetch-serp-data
-supabase functions deploy scrape-pages
-supabase functions deploy analyze-entities
-supabase functions deploy run-keyword-analysis
+# 1. Deploy Python microservice to Railway
+cd services/nlp
+railway login && railway init && railway up
 
-# Set secrets
+# 2. Add Railway URL to Supabase secrets
+supabase secrets set NLP_SERVICE_URL=https://your-service.railway.app
+supabase secrets set NLP_SERVICE_SECRET=your_secret_token
 supabase secrets set DATAFORSEO_LOGIN=your_login
 supabase secrets set DATAFORSEO_PASSWORD=your_password
 supabase secrets set SCRAPEOWL_API_KEY=your_key
 supabase secrets set GOOGLE_NLP_API_KEY=your_key
+
+# 3. Run the DB migration
+# (paste Step 2 SQL into Supabase SQL editor)
+
+# 4. Deploy Edge Functions
+supabase functions deploy fetch-serp-data
+supabase functions deploy scrape-pages
+supabase functions deploy analyze-entities
+supabase functions deploy run-keyword-analysis
 ```
 
 ---
 
 ## Key Decisions
 
-- **No POP API** — LLM handles LSI vocabulary naturally; entity salience + PAA covers what matters
-- **5,000 char truncation** per page for NLP — controls cost, captures enough for entity detection
-- **30% frequency filter** — only entities appearing in 30%+ of pages are included
-- **render_js: false** in ScrapeOwl — faster and cheaper; JS rendering not needed for text extraction
-- **Batch size of 5** for ScrapeOwl — avoids rate limit errors
-- **Cache by keyword** — each unique keyword analyzed once only, results reused indefinitely
+- **No POP API** — Python TF-IDF + KeyBERT covers the same ground
+- **Python on Railway** — can't run Python on Supabase; Railway is $5/month flat, no per-request cost
+- **Entity analysis + Python NLP run in parallel** — saves latency since both only need scraped page text
+- **5,000 char truncation** per page for Google NLP — controls cost, enough for entity detection
+- **30% frequency filter** on entities — only include entities appearing in 30%+ of pages
+- **render_js: false** in ScrapeOwl — faster and cheaper for text extraction
+- **Cache by keyword** — each unique keyword analyzed once, results reused indefinitely
