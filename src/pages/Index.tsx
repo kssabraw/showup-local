@@ -3,6 +3,8 @@ import AppSidebar from "@/components/AppSidebar";
 import DashboardView from "@/components/DashboardView";
 import NewContentView from "@/components/NewContentView";
 import BusinessSearchView, { type BusinessDetails } from "@/components/BusinessSearchView";
+import LocationsView from "@/components/LocationsView";
+import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
 
 const Index = () => {
@@ -11,6 +13,36 @@ const Index = () => {
 
   const handleItemClick = (item: string) => {
     setActiveItem(item);
+  };
+
+  const handleBusinessConfirm = async (business: BusinessDetails) => {
+    try {
+      const { error } = await supabase.from("business_profiles").upsert(
+        {
+          gbp_place_id: business.place_id,
+          business_name: business.name,
+          description: business.description || null,
+          address: business.address,
+          phone: business.phone || null,
+          website: business.website || null,
+          logo: business.logo || null,
+          photo: business.photo || null,
+          gbp_category: business.category,
+          gbp_categories: business.categories,
+          gbp_rating: business.rating,
+          gbp_review_count: business.review_count,
+          latitude: business.latitude,
+          longitude: business.longitude,
+          hours: business.hours,
+          google_maps_uri: business.google_maps_uri,
+        } as any,
+        { onConflict: "gbp_place_id" }
+      );
+      if (error) throw error;
+      setActiveItem("locations");
+    } catch (err) {
+      console.error("Error saving business:", err);
+    }
   };
 
   return (
@@ -40,10 +72,7 @@ const Index = () => {
           {activeItem === "new" && (
             <BusinessSearchView
               onBack={() => setActiveItem("dashboard")}
-              onConfirm={(business: BusinessDetails) => {
-                console.log("Business confirmed:", business);
-                setActiveItem("dashboard");
-              }}
+              onConfirm={handleBusinessConfirm}
             />
           )}
           {activeItem === "content" && (
@@ -52,12 +81,7 @@ const Index = () => {
               <p className="text-muted-foreground text-sm mt-1">Manage all your local SEO content pieces.</p>
             </div>
           )}
-          {activeItem === "locations" && (
-            <div>
-              <h1 className="text-2xl font-display font-bold text-foreground">Locations</h1>
-              <p className="text-muted-foreground text-sm mt-1">Manage your target locations and service areas.</p>
-            </div>
-          )}
+          {activeItem === "locations" && <LocationsView />}
           {activeItem === "analytics" && (
             <div>
               <h1 className="text-2xl font-display font-bold text-foreground">Analytics</h1>
