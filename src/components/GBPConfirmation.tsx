@@ -8,6 +8,7 @@ import {
   MessageSquare,
   CheckCircle2,
   RotateCcw,
+  FileText,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { BusinessDetails } from "@/components/BusinessSearchView";
