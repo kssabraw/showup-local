@@ -1,7 +1,6 @@
 fastapi==0.115.0
 uvicorn==0.30.6
 scikit-learn==1.5.2
-keybert==0.8.5
 nltk==3.9.1
 pydantic==2.9.2
 numpy==1.26.4
