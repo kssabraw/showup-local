@@ -113,7 +113,8 @@ serve(async (req) => {
 
       // Extract categories - Outscraper returns category and subtypes
       const primaryCategory = p.category || p.type || '';
-      const additionalCategories = (p.subtypes || []).filter((t: string) => t !== primaryCategory);
+      const rawSubtypes = Array.isArray(p.subtypes) ? p.subtypes : (typeof p.subtypes === 'string' ? [p.subtypes] : []);
+      const additionalCategories = rawSubtypes.filter((t: string) => t !== primaryCategory);
 
       const details = {
         place_id: p.place_id || p.google_id || '',
@@ -123,7 +124,7 @@ serve(async (req) => {
         website: p.site || '',
         category: primaryCategory,
         categories: additionalCategories,
-        types: p.type ? [p.type, ...(p.subtypes || [])] : (p.subtypes || []),
+        types: p.type ? [p.type, ...rawSubtypes] : rawSubtypes,
         rating: p.rating ?? null,
         review_count: p.reviews ?? null,
         latitude: p.latitude ?? null,
