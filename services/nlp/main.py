@@ -180,14 +180,17 @@ def get_related_keywords_for_zone(zone_docs: List[str], keyword: str, top_n: int
     return results[:top_n]
 
 
-def get_top_quadgrams(pages: List[str], top_n: int = 20) -> List[dict]:
+def get_top_quadgrams(body_docs: List[str], top_n: int = 20) -> List[dict]:
+    """
+    Finds the most common 4-word phrases in body text only.
+    Excludes title, h1, h2, and h3 content.
+    """
     all_quadgrams = []
-    for page in pages:
-        text = clean_text(page)
+    for doc in body_docs:
+        text = clean_text(doc)
         tokens = word_tokenize(text)
         filtered = [t for t in tokens if t.isalpha() and t not in STOP_WORDS and len(t) > 2]
-        page_quadgrams = list(ngrams(filtered, 4))
-        all_quadgrams.extend(page_quadgrams)
+        all_quadgrams.extend(ngrams(filtered, 4))
     counter = Counter(all_quadgrams)
     top = counter.most_common(top_n)
     return [
@@ -228,8 +231,8 @@ async def analyze(request: AnalysisRequest):
         body=get_related_keywords_for_zone(zone_buckets["body"], request.keyword),
     )
 
-    # Quadgrams run on full page text
-    quadgrams = get_top_quadgrams(pages)
+    # Quadgrams restricted to body text only (excludes title, h1, h2, h3)
+    quadgrams = get_top_quadgrams(zone_buckets["body"])
 
     return AnalysisResponse(lsi_keywords=lsi, related_keywords=related, top_quadgrams=quadgrams)
 
