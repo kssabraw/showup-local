@@ -20,6 +20,7 @@ export type Database = {
           business_name: string
           created_at: string
           description: string | null
+          external_synced: boolean
           gbp_categories: Json
           gbp_category: string
           gbp_place_id: string
@@ -41,6 +42,7 @@ export type Database = {
           business_name: string
           created_at?: string
           description?: string | null
+          external_synced?: boolean
           gbp_categories?: Json
           gbp_category?: string
           gbp_place_id: string
@@ -62,6 +64,7 @@ export type Database = {
           business_name?: string
           created_at?: string
           description?: string | null
+          external_synced?: boolean
           gbp_categories?: Json
           gbp_category?: string
           gbp_place_id?: string

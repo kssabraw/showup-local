@@ -1,0 +1,1 @@
+ALTER TABLE public.business_profiles ADD COLUMN external_synced boolean NOT NULL DEFAULT false;
