@@ -19,7 +19,7 @@ logger.info(f"Files in cwd: {os.listdir('.')}")
 try:
     from fastapi import FastAPI, HTTPException
     from pydantic import BaseModel
-    from typing import List
+    from typing import List, Dict
     import re
     from collections import Counter
     logger.info("Basic imports done")
@@ -34,6 +34,9 @@ try:
     from nltk.util import ngrams
     from nltk.tokenize import word_tokenize
     logger.info("nltk imports done")
+
+    from bs4 import BeautifulSoup
+    logger.info("bs4 imports done")
 except Exception as e:
     logger.error(f"Import failed: {e}")
     raise
@@ -53,16 +56,54 @@ STOP_WORDS = set(stopwords.words('english'))
 
 logger.info("App initialized, ready to serve")
 
+ZONES = ["title", "h1", "h2_h3", "body"]
+
 
 class AnalysisRequest(BaseModel):
     keyword: str
     pages: List[str]
 
 
+class ZoneKeywords(BaseModel):
+    title: List[dict]
+    h1: List[dict]
+    h2_h3: List[dict]
+    body: List[dict]
+
+
 class AnalysisResponse(BaseModel):
-    lsi_keywords: List[dict]
-    related_keywords: List[dict]
+    lsi_keywords: ZoneKeywords
+    related_keywords: ZoneKeywords
     top_quadgrams: List[dict]
+
+
+def extract_zones(html: str) -> Dict[str, str]:
+    """Parse HTML and return text extracted per zone."""
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Title
+    title_tag = soup.find("title")
+    title_text = title_tag.get_text(separator=" ", strip=True) if title_tag else ""
+
+    # H1
+    h1_tags = soup.find_all("h1")
+    h1_text = " ".join(t.get_text(separator=" ", strip=True) for t in h1_tags)
+
+    # H2 + H3
+    h2h3_tags = soup.find_all(["h2", "h3"])
+    h2h3_text = " ".join(t.get_text(separator=" ", strip=True) for t in h2h3_tags)
+
+    # Body: everything else (strip scripts/styles)
+    for tag in soup(["script", "style", "noscript", "title", "h1", "h2", "h3"]):
+        tag.decompose()
+    body_text = soup.get_text(separator=" ", strip=True)
+
+    return {
+        "title": title_text,
+        "h1": h1_text,
+        "h2_h3": h2h3_text,
+        "body": body_text,
+    }
 
 
 def clean_text(text: str) -> str:
@@ -72,8 +113,10 @@ def clean_text(text: str) -> str:
     return text.strip().lower()
 
 
-def get_lsi_keywords(pages: List[str], top_n: int = 30) -> List[dict]:
-    cleaned = [clean_text(p) for p in pages if p]
+def get_lsi_keywords_for_zone(zone_docs: List[str], top_n: int = 30) -> List[dict]:
+    cleaned = [clean_text(d) for d in zone_docs if d and len(d.strip()) > 5]
+    if len(cleaned) < 2:
+        return []
     vectorizer = TfidfVectorizer(
         ngram_range=(1, 3),
         stop_words='english',
@@ -94,8 +137,10 @@ def get_lsi_keywords(pages: List[str], top_n: int = 30) -> List[dict]:
     ]
 
 
-def get_related_keywords(pages: List[str], keyword: str, top_n: int = 20) -> List[dict]:
-    cleaned = [clean_text(p) for p in pages if p]
+def get_related_keywords_for_zone(zone_docs: List[str], keyword: str, top_n: int = 20) -> List[dict]:
+    cleaned = [clean_text(d) for d in zone_docs if d and len(d.strip()) > 5]
+    if not cleaned:
+        return []
     vectorizer = TfidfVectorizer(
         ngram_range=(1, 3),
         stop_words='english',
@@ -146,12 +191,37 @@ def get_top_quadgrams(pages: List[str], top_n: int = 20) -> List[dict]:
 async def analyze(request: AnalysisRequest):
     if not request.pages:
         raise HTTPException(status_code=400, detail='No pages provided')
+
     pages = [p for p in request.pages if p and len(p.strip()) > 100]
     if len(pages) < 2:
         raise HTTPException(status_code=400, detail='Not enough valid pages to analyze')
-    lsi = get_lsi_keywords(pages)
-    related = get_related_keywords(pages, request.keyword)
+
+    # Extract per-zone text from each page
+    zone_buckets: Dict[str, List[str]] = {z: [] for z in ZONES}
+    for page in pages:
+        zones = extract_zones(page)
+        for z in ZONES:
+            zone_buckets[z].append(zones[z])
+
+    # LSI keywords per zone
+    lsi = ZoneKeywords(
+        title=get_lsi_keywords_for_zone(zone_buckets["title"]),
+        h1=get_lsi_keywords_for_zone(zone_buckets["h1"]),
+        h2_h3=get_lsi_keywords_for_zone(zone_buckets["h2_h3"]),
+        body=get_lsi_keywords_for_zone(zone_buckets["body"]),
+    )
+
+    # Related keywords per zone
+    related = ZoneKeywords(
+        title=get_related_keywords_for_zone(zone_buckets["title"], request.keyword),
+        h1=get_related_keywords_for_zone(zone_buckets["h1"], request.keyword),
+        h2_h3=get_related_keywords_for_zone(zone_buckets["h2_h3"], request.keyword),
+        body=get_related_keywords_for_zone(zone_buckets["body"], request.keyword),
+    )
+
+    # Quadgrams still run on full page text
     quadgrams = get_top_quadgrams(pages)
+
     return AnalysisResponse(lsi_keywords=lsi, related_keywords=related, top_quadgrams=quadgrams)
 
 
