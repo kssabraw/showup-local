@@ -70,7 +70,7 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
 
   const handleRunAnalysis = async (e: React.MouseEvent, b: BusinessProfile) => {
     e.stopPropagation();
-    if (!b.website || analyzingIds.has(b.id)) return;
+    if (analyzingIds.has(b.id)) return;
 
     setAnalyzingIds((prev) => new Set(prev).add(b.id));
     setBusinesses((prev) =>
@@ -78,6 +78,25 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
     );
 
     try {
+      // If no website stored, try fetching it from GBP
+      let website = b.website;
+      if (!website) {
+        const { data } = await supabase.functions.invoke("google-places", {
+          body: { action: "details", place_id: b.gbp_place_id },
+        });
+        website = data?.details?.website || null;
+        if (website) {
+          await supabase.from("business_profiles").update({ website }).eq("id", b.id);
+          setBusinesses((prev) =>
+            prev.map((x) => x.id === b.id ? { ...x, website } : x)
+          );
+        }
+      }
+
+      if (!website) {
+        throw new Error("No website URL available for this business");
+      }
+
       await supabase
         .from("business_profiles")
         .update({ analysis_status: "running" })
@@ -87,7 +106,7 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          website_url: b.website,
+          website_url: website,
           business_name: b.business_name,
           gbp_category: b.gbp_category,
           gbp_categories: b.gbp_categories || [],
@@ -230,7 +249,7 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
                   <p className="text-xs text-muted-foreground mt-2 line-clamp-2">{b.description}</p>
                 )}
 
-                {b.website && (() => {
+                {(() => {
                   const isRunning = analyzingIds.has(b.id) || b.analysis_status === "running";
                   const isDone = !isRunning && b.analysis_status === "complete";
                   const isFailed = !isRunning && b.analysis_status === "failed";
