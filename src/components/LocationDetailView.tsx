@@ -486,7 +486,19 @@ const LocationDetailView = ({
         <div className="space-y-5">
           {/* ICP */}
           <div className="bg-card border border-border rounded-xl p-5">
-            <h2 className="text-sm font-semibold text-foreground mb-3">Ideal Customer Profile (ICP)</h2>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-semibold text-foreground">Ideal Customer Profile (ICP)</h2>
+              {analysisStatus !== "running" && (
+                <button
+                  onClick={() => runAnalysis(business)}
+                  disabled={rescanning}
+                  className="flex items-center gap-1.5 text-xs font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {rescanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                  {rescanning ? "Scanning..." : icp ? "Re-run" : "Scan Website"}
+                </button>
+              )}
+            </div>
             {icp ? (
               <div className="space-y-3">
                 <div className="flex items-center gap-3">
@@ -526,23 +538,11 @@ const LocationDetailView = ({
                 )}
               </div>
             ) : (
-              <div className="text-center py-4 space-y-3">
-                <p className="text-sm text-muted-foreground">
-                  {analysisStatus === "running"
-                    ? "Detecting ICP…"
-                    : "Run the website scan to auto-detect ICP."}
-                </p>
-                {analysisStatus !== "running" && business.website && (
-                  <button
-                    onClick={() => runAnalysis(business)}
-                    disabled={rescanning}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-accent-foreground text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
-                  >
-                    {rescanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                    {rescanning ? "Scanning..." : "Scan Website"}
-                  </button>
-                )}
-              </div>
+              <p className="text-sm text-muted-foreground text-center py-4">
+                {analysisStatus === "running"
+                  ? "Detecting ICP…"
+                  : "Click Scan Website above to auto-detect ICP."}
+              </p>
             )}
           </div>
 
