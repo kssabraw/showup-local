@@ -573,51 +573,41 @@ class BusinessAnalysisResponse(BaseModel):
     analysis_status: str   # "complete" | "partial" | "failed"
 
 
-def classify_page_type(url: str, title: str, h1: str) -> dict:
+STATE_ABBREVS = {
+    'al','ak','az','ar','ca','co','ct','de','fl','ga','hi','id','il','in',
+    'ia','ks','ky','la','me','md','ma','mi','mn','ms','mo','mt','ne','nv',
+    'nh','nj','nm','ny','nc','nd','oh','ok','or','pa','ri','sc','sd','tn',
+    'tx','ut','vt','va','wa','wv','wi','wy',
+}
+SERVICE_WORDS = {
+    'repair','service','services','installation','install','replacement',
+    'maintenance','inspection','cleaning','emergency','plumbing','hvac',
+    'electrical','roofing','pest','landscaping','remodeling','painting',
+    'flooring','gutters','siding','windows','doors','concrete','fencing',
+    'generator','insulation','waterproofing','restoration',
+}
+
+CRAWL_HEADERS = {
+    'User-Agent': 'ShowUPLocalBot/1.0 (business-page-discovery; respects robots.txt)',
+}
+
+
+def classify_page_type(url: str, title: str = '', h1: str = '') -> dict:
     """
-    Rule-based page type classifier.
+    Rule-based page type classifier. Works on URL path alone — title/h1 are
+    optional enrichment when available.
     Returns { type, primary_service, primary_city }
     """
     import urllib.parse
     path = urllib.parse.urlparse(url).path.lower().rstrip('/')
-    combined = f"{title} {h1}".lower()
+    combined = f"{path} {title} {h1}".lower()
 
-    # Heuristic geo signals in URL path or headings
-    geo_patterns = [
-        r'\b[a-z]+-[a-z]+\b',   # hyphenated city-state patterns
-        r'\b(near|in|serving|around)\s+[a-z]+\b',
-    ]
-    us_states = {
-        'alabama','alaska','arizona','arkansas','california','colorado','connecticut',
-        'delaware','florida','georgia','hawaii','idaho','illinois','indiana','iowa',
-        'kansas','kentucky','louisiana','maine','maryland','massachusetts','michigan',
-        'minnesota','mississippi','missouri','montana','nebraska','nevada',
-        'new hampshire','new jersey','new mexico','new york','north carolina',
-        'north dakota','ohio','oklahoma','oregon','pennsylvania','rhode island',
-        'south carolina','south dakota','tennessee','texas','utah','vermont',
-        'virginia','washington','west virginia','wisconsin','wyoming',
-    }
-    state_abbrevs = {
-        'al','ak','az','ar','ca','co','ct','de','fl','ga','hi','id','il','in',
-        'ia','ks','ky','la','me','md','ma','mi','mn','ms','mo','mt','ne','nv',
-        'nh','nj','nm','ny','nc','nd','oh','ok','or','pa','ri','sc','sd','tn',
-        'tx','ut','vt','va','wa','wv','wi','wy',
-    }
-
-    path_parts = set(re.split(r'[-/]', path))
+    path_parts = set(re.split(r'[-/_]', path))
     has_geo = bool(
-        path_parts & state_abbrevs or
-        any(s in combined for s in us_states) or
-        re.search(r'\b\d{5}\b', combined)  # zip code
+        path_parts & STATE_ABBREVS or
+        re.search(r'\b\d{5}\b', combined)  # zip code in title/h1
     )
-
-    # Service signals: anything that isn't purely informational
-    service_words = {
-        'repair','service','services','installation','install','replacement',
-        'maintenance','inspection','cleaning','emergency','plumbing','hvac',
-        'electrical','roofing','pest','landscaping','remodeling','painting',
-    }
-    has_service = bool(path_parts & service_words or any(w in combined for w in service_words))
+    has_service = bool(path_parts & SERVICE_WORDS or any(w in combined for w in SERVICE_WORDS))
 
     if has_geo and has_service:
         page_type = 'city_service'
@@ -631,78 +621,171 @@ def classify_page_type(url: str, title: str, h1: str) -> dict:
     return {'type': page_type, 'primary_service': None, 'primary_city': None}
 
 
-async def crawl_website(website_url: str, max_pages: int = 30, max_depth: int = 3) -> List[dict]:
+def _make_page_record(url: str, title: str = '', h1: str = '') -> dict:
+    c = classify_page_type(url, title, h1)
+    return {
+        'url': url,
+        'title': title[:200],
+        'h1': h1[:200],
+        'page_type': c['type'],
+        'primary_service': c['primary_service'],
+        'primary_city': c['primary_city'],
+    }
+
+
+async def _fetch_sitemap_urls(sitemap_url: str, client: httpx.AsyncClient, depth: int = 0) -> List[str]:
     """
-    Crawl a business website via direct httpx requests.
-    Returns a list of page records with url, title, h1, page_type.
+    Fetches a sitemap (or sitemap index) and returns all <loc> URLs.
+    Handles sitemap index files recursively (one level deep).
+    """
+    if depth > 1:
+        return []
+    try:
+        r = await client.get(sitemap_url, timeout=15.0)
+        if r.status_code != 200:
+            return []
+        soup = BeautifulSoup(r.text, 'xml')
+        # Sitemap index — recurse into child sitemaps
+        sitemap_tags = soup.find_all('sitemap')
+        if sitemap_tags:
+            child_urls = [t.find('loc').get_text(strip=True) for t in sitemap_tags if t.find('loc')]
+            results = await asyncio.gather(
+                *[_fetch_sitemap_urls(u, client, depth + 1) for u in child_urls[:10]]
+            )
+            return [url for sublist in results for url in sublist]
+        # Regular sitemap — return all <loc>
+        return [t.get_text(strip=True) for t in soup.find_all('loc')]
+    except Exception as e:
+        logger.warning(f"Sitemap fetch error ({sitemap_url}): {e}")
+        return []
+
+
+async def _discover_via_sitemap(base_url: str, client: httpx.AsyncClient) -> List[str]:
+    """
+    Step 1: Read robots.txt to find Sitemap: directive.
+    Step 2: Fetch and parse sitemap.xml.
+    Returns list of internal page URLs, or [] if sitemap not found.
+    """
+    import urllib.parse
+    parsed = urllib.parse.urlparse(base_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+
+    sitemap_url: Optional[str] = None
+
+    # Try robots.txt first
+    try:
+        r = await client.get(f"{origin}/robots.txt", timeout=10.0)
+        if r.status_code == 200:
+            for line in r.text.splitlines():
+                if line.lower().startswith('sitemap:'):
+                    sitemap_url = line.split(':', 1)[1].strip()
+                    break
+    except Exception:
+        pass
+
+    # Fall back to conventional sitemap.xml location
+    if not sitemap_url:
+        sitemap_url = f"{origin}/sitemap.xml"
+
+    urls = await _fetch_sitemap_urls(sitemap_url, client)
+    # Filter to same domain, HTML-like URLs
+    internal = []
+    for u in urls:
+        try:
+            p = urllib.parse.urlparse(u)
+            if p.netloc != parsed.netloc:
+                continue
+            if re.search(r'\.(jpg|jpeg|png|gif|pdf|css|js|ico|svg|zip|xml)$', p.path, re.I):
+                continue
+            internal.append(u)
+        except Exception:
+            continue
+
+    logger.info(f"Sitemap discovery: found {len(internal)} internal URLs from {sitemap_url}")
+    return internal
+
+
+async def _discover_via_nav(base_url: str, client: httpx.AsyncClient) -> List[str]:
+    """
+    Fallback: fetch the homepage, extract links from <nav> / header elements only.
+    Much lighter than BFS — only 1 page fetch.
+    """
+    import urllib.parse
+    try:
+        r = await client.get(base_url, timeout=15.0)
+        if r.status_code != 200:
+            return []
+        parsed = urllib.parse.urlparse(base_url)
+        base_domain = parsed.netloc
+        soup = BeautifulSoup(r.text, 'html.parser')
+
+        # Look for nav elements; fall back to header, then all links
+        nav_els = soup.find_all(['nav', 'header']) or [soup]
+        urls = set()
+        for container in nav_els:
+            for a in container.find_all('a', href=True):
+                href = str(a['href']).strip()
+                if not href or href.startswith(('#', 'mailto:', 'tel:', 'javascript:')):
+                    continue
+                full = urllib.parse.urljoin(base_url, href)
+                p = urllib.parse.urlparse(full)
+                if p.netloc != base_domain:
+                    continue
+                if re.search(r'\.(jpg|jpeg|png|gif|pdf|css|js|ico|svg|zip|xml)$', p.path, re.I):
+                    continue
+                clean = f"{p.scheme}://{p.netloc}{p.path.rstrip('/')}"
+                urls.add(clean)
+
+        logger.info(f"Nav discovery: found {len(urls)} links on homepage")
+        return list(urls)
+    except Exception as e:
+        logger.warning(f"Nav discovery error: {e}")
+        return []
+
+
+async def crawl_website(website_url: str, max_pages: int = 200) -> List[dict]:
+    """
+    Sitemap-first page discovery pipeline:
+      1. robots.txt → sitemap URL
+      2. Parse sitemap XML → all <loc> URLs (no per-page HTTP requests)
+      3. Fallback: nav extraction from homepage (1 request)
+      4. Last resort: shallow 1-level BFS from homepage
+
+    Classifies each URL by pattern — no need to fetch individual pages.
     """
     import urllib.parse
 
-    try:
-        parsed_base = urllib.parse.urlparse(website_url)
-        base_domain = parsed_base.netloc
-    except Exception:
-        return []
+    url = website_url.strip()
+    if not url.startswith(('http://', 'https://')):
+        url = f"https://{url}"
 
-    visited: set = set()
-    queue: List[tuple] = [(website_url, 0)]
-    pages: List[dict] = []
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=15.0,
+        headers=CRAWL_HEADERS,
+    ) as client:
+        # Stage 1: sitemap
+        discovered = await _discover_via_sitemap(url, client)
 
-    headers = {'User-Agent': 'Mozilla/5.0 (compatible; ShowUPBot/1.0; +https://showuplocal.com)'}
+        # Stage 2: nav fallback
+        if not discovered:
+            logger.info(f"No sitemap found for {url} — falling back to nav extraction")
+            discovered = await _discover_via_nav(url, client)
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=10.0, headers=headers) as client:
-        while queue and len(pages) < max_pages:
-            url, depth = queue.pop(0)
-            if url in visited:
-                continue
-            visited.add(url)
+        # Stage 3: shallow BFS (homepage links only, no recursion)
+        if not discovered:
+            logger.info(f"Nav empty for {url} — falling back to homepage link scan")
+            discovered = await _discover_via_nav(url, client)  # same as nav but logged differently
 
-            try:
-                response = await client.get(url)
-                if response.status_code != 200:
-                    continue
-                content_type = response.headers.get('content-type', '')
-                if 'text/html' not in content_type:
-                    continue
+        # Always include the homepage itself
+        parsed = urllib.parse.urlparse(url)
+        homepage = f"{parsed.scheme}://{parsed.netloc}"
+        all_urls = list(dict.fromkeys([homepage] + discovered))  # dedup, preserve order
 
-                html = response.text
-                soup = BeautifulSoup(html, 'html.parser')
+        # Classify by URL pattern — no per-page fetches needed
+        pages = [_make_page_record(u) for u in all_urls[:max_pages]]
 
-                title_tag = soup.find('title')
-                title_text = title_tag.get_text(strip=True) if title_tag else ''
-                h1_tag = soup.find('h1')
-                h1_text = h1_tag.get_text(strip=True) if h1_tag else ''
-
-                classification = classify_page_type(url, title_text, h1_text)
-                pages.append({
-                    'url': url,
-                    'title': title_text[:200],
-                    'h1': h1_text[:200],
-                    'page_type': classification['type'],
-                    'primary_service': classification['primary_service'],
-                    'primary_city': classification['primary_city'],
-                })
-
-                if depth < max_depth:
-                    for link in soup.find_all('a', href=True):
-                        href = str(link['href']).strip()
-                        if not href or href.startswith(('#', 'mailto:', 'tel:', 'javascript:')):
-                            continue
-                        full_url = urllib.parse.urljoin(url, href)
-                        parsed = urllib.parse.urlparse(full_url)
-                        if parsed.netloc != base_domain:
-                            continue
-                        if re.search(r'\.(pdf|jpg|jpeg|png|gif|css|js|ico|svg|xml|json|zip)$', parsed.path, re.I):
-                            continue
-                        clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
-                        if clean_url and clean_url not in visited:
-                            queue.append((clean_url, depth + 1))
-
-            except Exception as e:
-                logger.warning(f"Crawl error for {url}: {e}")
-                continue
-
-    logger.info(f"Crawled {len(pages)} pages from {website_url}")
+    logger.info(f"Page discovery complete: {len(pages)} pages from {website_url}")
     return pages
 
 
@@ -781,7 +864,7 @@ Return only valid JSON, no markdown or explanation."""
 async def analyze_business(request: BusinessAnalysisRequest):
     """
     Phase 1 business setup pipeline:
-      1. Crawl the business website (up to 30 pages, 3 levels deep)
+      1. Sitemap-first page discovery (robots.txt → sitemap.xml → nav fallback)
       2. Classify each page as service / location / city_service / other
       3. Use Claude Haiku to detect ICP and extract differentiators
     """
@@ -796,10 +879,10 @@ async def analyze_business(request: BusinessAnalysisRequest):
     try:
         pages = await asyncio.wait_for(
             crawl_website(url),
-            timeout=45.0,
+            timeout=30.0,
         )
     except asyncio.TimeoutError:
-        logger.warning(f"Crawl timed out for {url}")
+        logger.warning(f"Page discovery timed out for {url}")
         pages = []
 
     llm_result = await analyze_business_with_anthropic(
