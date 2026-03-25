@@ -84,7 +84,6 @@ class ZoneKeywords(BaseModel):
 
 
 class AnalysisResponse(BaseModel):
-    lsi_keywords: ZoneKeywords
     related_keywords: ZoneKeywords
     top_quadgrams: List[dict]
 
@@ -130,34 +129,6 @@ def clean_text(text: str) -> str:
     return text.strip().lower()
 
 
-def get_lsi_keywords_for_zone(zone_docs: List[str], top_n: int = 30) -> List[dict]:
-    """
-    Returns the top TF-IDF terms actually present in this zone across competitor pages.
-    Score = mean TF-IDF across all pages — no blending, no external weighting.
-    """
-    cleaned = [clean_text(d) for d in zone_docs if d and len(d.strip()) > 5]
-    if len(cleaned) < 2:
-        return []
-    vectorizer = TfidfVectorizer(
-        ngram_range=(1, 3),
-        stop_words='english',
-        max_features=500,
-        min_df=2,
-        max_df=0.95
-    )
-    try:
-        tfidf_matrix = vectorizer.fit_transform(cleaned)
-    except ValueError:
-        return []
-    feature_names = vectorizer.get_feature_names_out()
-    mean_scores = tfidf_matrix.toarray().mean(axis=0)
-    top_indices = mean_scores.argsort()[-top_n:][::-1]
-    return [
-        {"term": feature_names[i], "score": round(float(mean_scores[i]), 4), "type": "lsi"}
-        for i in top_indices if mean_scores[i] > 0
-    ]
-
-
 def get_related_keywords_for_zone(
     zone_docs: List[str],
     keyword: str,
@@ -188,11 +159,10 @@ def get_related_keywords_for_zone(
         ngram_range=(1, 3),
         stop_words='english',
         max_features=1000,
-        min_df=2,  # must appear in at least 2 pages
+        min_df=2,
         max_df=0.95,
     )
     try:
-        # Fit on zone docs only, then transform keyword separately
         tfidf_matrix = vectorizer.fit_transform(cleaned)
         keyword_vec = vectorizer.transform([clean_text(keyword)])
     except ValueError:
@@ -331,14 +301,6 @@ async def analyze(request: AnalysisRequest):
         for z in ZONES + ["paragraphs"]:
             zone_buckets[z].append(zones[z])
 
-    # LSI keywords per zone
-    lsi = ZoneKeywords(
-        title=get_lsi_keywords_for_zone(zone_buckets["title"]),
-        h1=get_lsi_keywords_for_zone(zone_buckets["h1"]),
-        h2_h3=get_lsi_keywords_for_zone(zone_buckets["h2_h3"]),
-        body=get_lsi_keywords_for_zone(zone_buckets["body"]),
-    )
-
     # Related keywords per zone — page-similarity scoring + 49% spread gate
     related = ZoneKeywords(
         title=get_related_keywords_for_zone(zone_buckets["title"], request.keyword),
@@ -350,7 +312,7 @@ async def analyze(request: AnalysisRequest):
     # Quadgrams: <p> tag text only, filtered by page spread + keyword similarity
     quadgrams = get_top_quadgrams(zone_buckets["paragraphs"], request.keyword)
 
-    return AnalysisResponse(lsi_keywords=lsi, related_keywords=related, top_quadgrams=quadgrams)
+    return AnalysisResponse(related_keywords=related, top_quadgrams=quadgrams)
 
 
 @app.get('/health')
