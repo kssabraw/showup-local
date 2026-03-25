@@ -11,6 +11,5 @@ RUN python -c "import nltk; nltk.download('stopwords'); nltk.download('punkt'); 
 
 COPY . .
 
-EXPOSE 8080
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+# Use shell form so Railway's $PORT variable is expanded at runtime
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}
