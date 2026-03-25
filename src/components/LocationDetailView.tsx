@@ -6,6 +6,7 @@ const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-
 
 interface BusinessProfile {
   id: string;
+  gbp_place_id: string;
   business_name: string;
   address: string;
   phone: string | null;
@@ -89,9 +90,32 @@ const LocationDetailView = ({
     }
   };
 
+  const fetchWebsiteFromGBP = async (b: BusinessProfile): Promise<string | null> => {
+    try {
+      const { data, error } = await supabase.functions.invoke("google-places", {
+        body: { action: "details", place_id: b.gbp_place_id },
+      });
+      if (error || !data?.details?.website) return null;
+      const website = data.details.website;
+      await supabase.from("business_profiles").update({ website }).eq("id", b.id);
+      setBusiness((prev) => prev ? { ...prev, website } : prev);
+      return website;
+    } catch {
+      return null;
+    }
+  };
+
   const runAnalysis = async (b: BusinessProfile) => {
-    if (!b.website) return;
     setRescanning(true);
+
+    let website = b.website;
+    if (!website) {
+      website = await fetchWebsiteFromGBP(b);
+    }
+    if (!website) {
+      setRescanning(false);
+      return;
+    }
 
     // Set status to running
     await supabase
@@ -104,7 +128,7 @@ const LocationDetailView = ({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          website_url: b.website,
+          website_url: website,
           business_name: b.business_name,
           gbp_category: b.gbp_category,
           gbp_categories: b.gbp_categories || [],
@@ -379,20 +403,16 @@ const LocationDetailView = ({
               <p className="text-xs text-muted-foreground mt-1 mb-4">
                 {analysisStatus === "failed"
                   ? "The website could not be reached or crawled."
-                  : business.website
-                  ? "Scan the website to discover service, location, and city+service pages."
-                  : "No website URL found for this business. Add one to enable scanning."}
+                  : "Scan the website to discover service, location, and city+service pages."}
               </p>
-              {business.website ? (
-                <button
-                  onClick={() => runAnalysis(business)}
-                  disabled={rescanning}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-accent-foreground text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
-                >
-                  {rescanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                  {rescanning ? "Scanning..." : analysisStatus === "failed" ? "Retry Scan" : "Scan Website"}
-                </button>
-              ) : null}
+              <button
+                onClick={() => runAnalysis(business)}
+                disabled={rescanning}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-accent-foreground text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+              >
+                {rescanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                {rescanning ? "Scanning..." : analysisStatus === "failed" ? "Retry Scan" : "Scan Website"}
+              </button>
             </div>
           )}
         </div>
