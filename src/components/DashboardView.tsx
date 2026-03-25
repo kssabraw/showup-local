@@ -1,10 +1,9 @@
-import { FileText, MapPin, TrendingUp, Eye, Clock } from "lucide-react";
+import { FileText, MapPin, TrendingUp, Clock } from "lucide-react";
 
 const stats = [
   { label: "Total Content", value: "24", icon: FileText, change: "+3 this week" },
   { label: "Locations", value: "8", icon: MapPin, change: "2 cities" },
   { label: "Avg. SEO Score", value: "87", icon: TrendingUp, change: "+5 pts" },
-  { label: "Total Views", value: "12.4k", icon: Eye, change: "+18% MoM" },
 ];
 
 const recentContent = [
@@ -23,7 +22,7 @@ const DashboardView = () => {
       </div>
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {stats.map((stat) => {
           const Icon = stat.icon;
           return (
