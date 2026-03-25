@@ -93,12 +93,12 @@ GOOGLE_NLP_MAX_BYTES     = 100_000
 SERP_RESULT_COUNT = 10
 
 # Domains to skip — directories, aggregators, social, video
-# reddit.com and linkedin.com are intentionally whitelisted
+# Intentionally whitelisted: reddit.com, linkedin.com, facebook.com, quora.com
 SKIP_DOMAINS = {
     "yelp.com", "yellowpages.com", "bbb.org", "angi.com", "thumbtack.com",
-    "homeadvisor.com", "houzz.com", "facebook.com", "instagram.com",
+    "homeadvisor.com", "houzz.com", "instagram.com",
     "twitter.com", "x.com", "youtube.com", "tiktok.com",
-    "wikipedia.org", "quora.com", "amazon.com", "ebay.com",
+    "wikipedia.org", "amazon.com", "ebay.com",
     "angieslist.com", "nextdoor.com", "mapquest.com", "maps.google.com",
 }
 
