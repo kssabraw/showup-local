@@ -21,7 +21,7 @@ try:
     from pydantic import BaseModel
     from typing import List, Dict
     import re
-    from collections import Counter
+    from collections import defaultdict
     logger.info("Basic imports done")
 
     from sklearn.feature_extraction.text import TfidfVectorizer
@@ -58,6 +58,12 @@ logger.info("App initialized, ready to serve")
 
 ZONES = ["title", "h1", "h2_h3", "body"]
 
+# Minimum fraction of pages a quadgram must appear in to be considered signal
+QUADGRAM_MIN_PAGE_SPREAD = 0.3
+
+# Minimum cosine similarity to the target keyword for a quadgram to be returned
+QUADGRAM_MIN_SIMILARITY = 0.1
+
 
 class AnalysisRequest(BaseModel):
     keyword: str
@@ -93,6 +99,10 @@ def extract_zones(html: str) -> Dict[str, str]:
     h2h3_tags = soup.find_all(["h2", "h3"])
     h2h3_text = " ".join(t.get_text(separator=" ", strip=True) for t in h2h3_tags)
 
+    # Paragraphs: only <p> tags — clean prose content for quadgrams
+    p_tags = soup.find_all("p")
+    paragraph_text = " ".join(t.get_text(separator=" ", strip=True) for t in p_tags)
+
     # Body: everything else (strip scripts/styles/headings)
     for tag in soup(["script", "style", "noscript", "title", "h1", "h2", "h3"]):
         tag.decompose()
@@ -103,6 +113,7 @@ def extract_zones(html: str) -> Dict[str, str]:
         "h1": h1_text,
         "h2_h3": h2h3_text,
         "body": body_text,
+        "paragraphs": paragraph_text,
     }
 
 
@@ -180,23 +191,85 @@ def get_related_keywords_for_zone(zone_docs: List[str], keyword: str, top_n: int
     return results[:top_n]
 
 
-def get_top_quadgrams(body_docs: List[str], top_n: int = 20) -> List[dict]:
+def get_top_quadgrams(
+    paragraph_docs: List[str],
+    keyword: str,
+    min_page_spread: float = QUADGRAM_MIN_PAGE_SPREAD,
+    min_similarity: float = QUADGRAM_MIN_SIMILARITY,
+) -> List[dict]:
     """
-    Finds the most common 4-word phrases in body text only.
-    Excludes title, h1, h2, and h3 content.
+    Extracts meaningful quadgrams from <p> tag content only.
+
+    Scoring:
+    - Page spread: quadgram must appear in >= min_page_spread fraction of pages
+      (e.g. 0.3 = at least 30% of competitor pages). Eliminates single-page noise.
+    - Keyword relevance: cosine similarity between the quadgram phrase and the
+      target keyword in TF-IDF space must be >= min_similarity. Ensures topical fit.
+
+    No fixed top N — returns everything that passes both filters,
+    sorted by page spread descending then similarity descending.
     """
-    all_quadgrams = []
-    for doc in body_docs:
+    total_pages = len(paragraph_docs)
+    min_pages_required = max(2, int(np.ceil(total_pages * min_page_spread)))
+
+    # Step 1: collect quadgrams per page and track which pages each appears in
+    quadgram_pages: Dict[tuple, set] = defaultdict(set)
+    for page_idx, doc in enumerate(paragraph_docs):
         text = clean_text(doc)
         tokens = word_tokenize(text)
         filtered = [t for t in tokens if t.isalpha() and t not in STOP_WORDS and len(t) > 2]
-        all_quadgrams.extend(ngrams(filtered, 4))
-    counter = Counter(all_quadgrams)
-    top = counter.most_common(top_n)
-    return [
-        {"phrase": ' '.join(gram), "count": count, "type": "quadgram"}
-        for gram, count in top if count >= 2
-    ]
+        seen_this_page = set()
+        for gram in ngrams(filtered, 4):
+            if gram not in seen_this_page:
+                quadgram_pages[gram].add(page_idx)
+                seen_this_page.add(gram)
+
+    # Step 2: filter by page spread
+    spread_qualified = {
+        gram: pages
+        for gram, pages in quadgram_pages.items()
+        if len(pages) >= min_pages_required
+    }
+
+    if not spread_qualified:
+        return []
+
+    # Step 3: score remaining quadgrams by cosine similarity to the keyword
+    # Build a TF-IDF space from paragraph text + keyword
+    cleaned_docs = [clean_text(d) for d in paragraph_docs if d and len(d.strip()) > 5]
+    if not cleaned_docs:
+        return []
+
+    candidate_phrases = [' '.join(gram) for gram in spread_qualified]
+
+    try:
+        vectorizer = TfidfVectorizer(ngram_range=(1, 4), stop_words='english', min_df=1)
+        all_texts = cleaned_docs + candidate_phrases + [keyword]
+        tfidf_matrix = vectorizer.fit_transform(all_texts)
+    except ValueError:
+        return []
+
+    # Keyword vector is the last document
+    keyword_vec = np.asarray(tfidf_matrix[-1].todense())
+
+    # Candidate phrase vectors start after cleaned_docs
+    phrase_start_idx = len(cleaned_docs)
+    results = []
+    for i, (gram, pages) in enumerate(spread_qualified.items()):
+        phrase_vec = np.asarray(tfidf_matrix[phrase_start_idx + i].todense())
+        sim = float(cosine_similarity(keyword_vec, phrase_vec)[0][0])
+        if sim >= min_similarity:
+            results.append({
+                "phrase": ' '.join(gram),
+                "page_spread": len(pages),
+                "page_spread_pct": round(len(pages) / total_pages, 2),
+                "similarity_score": round(sim, 4),
+                "type": "quadgram",
+            })
+
+    # Sort by page spread descending, then similarity descending
+    results.sort(key=lambda x: (x["page_spread"], x["similarity_score"]), reverse=True)
+    return results
 
 
 @app.post('/analyze', response_model=AnalysisResponse)
@@ -209,10 +282,10 @@ async def analyze(request: AnalysisRequest):
         raise HTTPException(status_code=400, detail='Not enough valid pages to analyze')
 
     # Extract per-zone text from each page
-    zone_buckets: Dict[str, List[str]] = {z: [] for z in ZONES}
+    zone_buckets: Dict[str, List[str]] = {z: [] for z in ZONES + ["paragraphs"]}
     for page in pages:
         zones = extract_zones(page)
-        for z in ZONES:
+        for z in ZONES + ["paragraphs"]:
             zone_buckets[z].append(zones[z])
 
     # LSI keywords per zone
@@ -231,8 +304,8 @@ async def analyze(request: AnalysisRequest):
         body=get_related_keywords_for_zone(zone_buckets["body"], request.keyword),
     )
 
-    # Quadgrams restricted to body text only (excludes title, h1, h2, h3)
-    quadgrams = get_top_quadgrams(zone_buckets["body"])
+    # Quadgrams: <p> tag text only, filtered by page spread + keyword similarity
+    quadgrams = get_top_quadgrams(zone_buckets["paragraphs"], request.keyword)
 
     return AnalysisResponse(lsi_keywords=lsi, related_keywords=related, top_quadgrams=quadgrams)
 
