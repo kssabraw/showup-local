@@ -847,7 +847,7 @@ Extract differentiators only from the page titles and H1s above. Look for speed 
 Return only valid JSON, no markdown or explanation."""
 
         message = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-3-5-haiku-20241022",
             max_tokens=1024,
             messages=[{'role': 'user', 'content': prompt}],
         )
@@ -856,8 +856,8 @@ Return only valid JSON, no markdown or explanation."""
         return result
 
     except Exception as e:
-        logger.warning(f"Anthropic analysis error: {e}")
-        return {'detected_icp': None, 'differentiators': []}
+        logger.error(f"Anthropic analysis error: {e}")
+        raise
 
 
 @app.post('/analyze-business', response_model=BusinessAnalysisResponse)
@@ -885,12 +885,15 @@ async def analyze_business(request: BusinessAnalysisRequest):
         logger.warning(f"Page discovery timed out for {url}")
         pages = []
 
-    llm_result = await analyze_business_with_anthropic(
-        pages,
-        request.business_name,
-        request.gbp_category,
-        request.gbp_categories,
-    )
+    try:
+        llm_result = await analyze_business_with_anthropic(
+            pages,
+            request.business_name,
+            request.gbp_category,
+            request.gbp_categories,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Anthropic analysis failed: {e}")
 
     status = 'complete' if pages else 'partial'
 
