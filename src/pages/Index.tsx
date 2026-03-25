@@ -17,32 +17,28 @@ const Index = () => {
 
   const handleBusinessConfirm = async (business: BusinessDetails) => {
     try {
-      const { data, error } = await supabase.functions.invoke("dual-write-business", {
-        body: {
-          record: {
-            gbp_place_id: business.place_id,
-            business_name: business.name,
-            description: business.description || null,
-            address: business.address,
-            phone: business.phone || null,
-            website: business.website || null,
-            logo: business.logo || null,
-            photo: business.photo || null,
-            gbp_category: business.category,
-            gbp_categories: business.categories,
-            gbp_rating: business.rating,
-            gbp_review_count: business.review_count,
-            latitude: business.latitude,
-            longitude: business.longitude,
-            hours: business.hours,
-            google_maps_uri: business.google_maps_uri,
-          },
-        },
-      });
+      const { error } = await supabase.from("business_profiles").upsert(
+        {
+          gbp_place_id: business.place_id,
+          business_name: business.name,
+          description: business.description || null,
+          address: business.address,
+          phone: business.phone || null,
+          website: business.website || null,
+          logo: business.logo || null,
+          photo: business.photo || null,
+          gbp_category: business.category,
+          gbp_categories: business.categories,
+          gbp_rating: business.rating,
+          gbp_review_count: business.review_count,
+          latitude: business.latitude,
+          longitude: business.longitude,
+          hours: business.hours,
+          google_maps_uri: business.google_maps_uri,
+        } as any,
+        { onConflict: "gbp_place_id" }
+      );
       if (error) throw error;
-      if (data?.external_error) {
-        console.warn("External sync warning:", data.external_error);
-      }
       setActiveItem("locations");
     } catch (err) {
       console.error("Error saving business:", err);
@@ -80,10 +76,7 @@ const Index = () => {
             />
           )}
           {activeItem === "content" && (
-            <div>
-              <h1 className="text-2xl font-display font-bold text-foreground">Content Library</h1>
-              <p className="text-muted-foreground text-sm mt-1">Manage all your local SEO content pieces.</p>
-            </div>
+            <NewContentView onBack={() => setActiveItem("dashboard")} />
           )}
           {activeItem === "locations" && <LocationsView />}
           {activeItem === "analytics" && (
