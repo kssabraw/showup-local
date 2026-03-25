@@ -346,12 +346,12 @@ const LocationDetailView = ({
             <button
               onClick={refreshFromGBP}
               disabled={refreshingGBP}
-              className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-border bg-background text-sm font-medium text-foreground hover:bg-muted transition-colors disabled:opacity-50"
             >
               {refreshingGBP
-                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                : <RefreshCw className="w-3.5 h-3.5" />}
-              {refreshingGBP ? "Refreshing..." : "Refresh from GBP"}
+                ? <Loader2 className="w-4 h-4 animate-spin" />
+                : <RefreshCw className="w-4 h-4" />}
+              {refreshingGBP ? "Updating..." : "Update"}
             </button>
           </div>
         </div>
