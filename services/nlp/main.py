@@ -58,8 +58,14 @@ logger.info("App initialized, ready to serve")
 
 ZONES = ["title", "h1", "h2_h3", "body"]
 
+# Minimum fraction of pages a term must appear in to be considered signal
+RELATED_MIN_PAGE_SPREAD = 0.49
+
+# Minimum mean page-similarity score for a related keyword to be returned
+RELATED_MIN_SIMILARITY = 0.1
+
 # Minimum fraction of pages a quadgram must appear in to be considered signal
-QUADGRAM_MIN_PAGE_SPREAD = 0.3
+QUADGRAM_MIN_PAGE_SPREAD = 0.49
 
 # Minimum cosine similarity to the target keyword for a quadgram to be returned
 QUADGRAM_MIN_SIMILARITY = 0.1
@@ -152,43 +158,81 @@ def get_lsi_keywords_for_zone(zone_docs: List[str], top_n: int = 30) -> List[dic
     ]
 
 
-def get_related_keywords_for_zone(zone_docs: List[str], keyword: str, top_n: int = 20) -> List[dict]:
+def get_related_keywords_for_zone(
+    zone_docs: List[str],
+    keyword: str,
+    min_page_spread: float = RELATED_MIN_PAGE_SPREAD,
+    min_similarity: float = RELATED_MIN_SIMILARITY,
+) -> List[dict]:
     """
-    Returns terms from this zone that are most semantically related to the target keyword.
-    Score = pure cosine similarity between the keyword vector and each feature term
-    in the zone's TF-IDF space. No blending with page frequency.
+    Returns terms from this zone that are both:
+      1. Present in >= 49% of competitor pages (page spread gate)
+      2. Appearing on pages that are topically close to the keyword
+
+    Scoring approach:
+      - Fit TF-IDF on all zone docs
+      - Compute cosine similarity of each page to the keyword vector
+      - A term's score = mean keyword-similarity of pages that contain it
+        (i.e. terms that appear on topically on-point pages score highest)
+      - Drop terms below min_similarity threshold
+      - Return all passing terms sorted by score, no fixed top N
     """
     cleaned = [clean_text(d) for d in zone_docs if d and len(d.strip()) > 5]
-    if not cleaned:
+    if len(cleaned) < 2:
         return []
+
+    total_pages = len(cleaned)
+    min_pages_required = max(2, int(np.ceil(total_pages * min_page_spread)))
+
     vectorizer = TfidfVectorizer(
         ngram_range=(1, 3),
         stop_words='english',
         max_features=1000,
-        min_df=1
+        min_df=2,  # must appear in at least 2 pages
+        max_df=0.95,
     )
     try:
-        # Include the keyword as a document so it lands in the same vector space
-        tfidf_matrix = vectorizer.fit_transform(cleaned + [keyword])
+        # Fit on zone docs only, then transform keyword separately
+        tfidf_matrix = vectorizer.fit_transform(cleaned)
+        keyword_vec = vectorizer.transform([clean_text(keyword)])
     except ValueError:
         return []
+
     feature_names = vectorizer.get_feature_names_out()
+    tfidf_array = tfidf_matrix.toarray()  # shape: (n_pages, n_features)
 
-    # Vector for the keyword document
-    keyword_vec = np.asarray(tfidf_matrix[-1].todense())
+    # Cosine similarity of each page to the keyword vector
+    page_keyword_sims = cosine_similarity(keyword_vec, tfidf_matrix)[0]  # shape: (n_pages,)
 
-    # Cosine similarity between the keyword and each individual feature term
-    feature_matrix = np.eye(len(feature_names))
-    similarities = cosine_similarity(keyword_vec, feature_matrix)[0]
-
-    top_indices = similarities.argsort()[-top_n:][::-1]
     keyword_clean = clean_text(keyword)
     results = []
-    for i in top_indices:
-        term = feature_names[i]
-        if term != keyword_clean and similarities[i] > 0:
-            results.append({"term": term, "score": round(float(similarities[i]), 4), "type": "related"})
-    return results[:top_n]
+
+    for i, term in enumerate(feature_names):
+        if term == keyword_clean:
+            continue
+
+        # Which pages contain this term?
+        pages_with_term = np.where(tfidf_array[:, i] > 0)[0]
+        page_count = len(pages_with_term)
+
+        # Page spread gate
+        if page_count < min_pages_required:
+            continue
+
+        # Score = mean keyword-similarity of pages that contain this term
+        mean_sim = float(page_keyword_sims[pages_with_term].mean())
+
+        if mean_sim >= min_similarity:
+            results.append({
+                "term": term,
+                "score": round(mean_sim, 4),
+                "page_spread": page_count,
+                "page_spread_pct": round(page_count / total_pages, 2),
+                "type": "related",
+            })
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results
 
 
 def get_top_quadgrams(
@@ -201,8 +245,8 @@ def get_top_quadgrams(
     Extracts meaningful quadgrams from <p> tag content only.
 
     Scoring:
-    - Page spread: quadgram must appear in >= min_page_spread fraction of pages
-      (e.g. 0.3 = at least 30% of competitor pages). Eliminates single-page noise.
+    - Page spread: quadgram must appear in >= 49% of competitor pages.
+      Eliminates single-page noise.
     - Keyword relevance: cosine similarity between the quadgram phrase and the
       target keyword in TF-IDF space must be >= min_similarity. Ensures topical fit.
 
@@ -235,7 +279,6 @@ def get_top_quadgrams(
         return []
 
     # Step 3: score remaining quadgrams by cosine similarity to the keyword
-    # Build a TF-IDF space from paragraph text + keyword
     cleaned_docs = [clean_text(d) for d in paragraph_docs if d and len(d.strip()) > 5]
     if not cleaned_docs:
         return []
@@ -296,7 +339,7 @@ async def analyze(request: AnalysisRequest):
         body=get_lsi_keywords_for_zone(zone_buckets["body"]),
     )
 
-    # Related keywords per zone — pure cosine similarity, no blending
+    # Related keywords per zone — page-similarity scoring + 49% spread gate
     related = ZoneKeywords(
         title=get_related_keywords_for_zone(zone_buckets["title"], request.keyword),
         h1=get_related_keywords_for_zone(zone_buckets["h1"], request.keyword),
