@@ -105,6 +105,16 @@ const LocationsView = () => {
                       )}
                     </div>
                   )}
+                  <Badge
+                    variant={b.external_synced ? "default" : "destructive"}
+                    className="flex items-center gap-1 text-[10px] px-2 py-0.5"
+                  >
+                    {b.external_synced ? (
+                      <><CheckCircle2 className="w-3 h-3" /> Synced</>
+                    ) : (
+                      <><AlertCircle className="w-3 h-3" /> Not synced</>
+                    )}
+                  </Badge>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-xs text-muted-foreground">
