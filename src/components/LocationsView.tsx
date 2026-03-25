@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
-import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink } from "lucide-react";
+import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, CheckCircle2, AlertCircle } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { Badge } from "@/components/ui/badge";
 
 interface BusinessProfile {
   id: string;
@@ -17,6 +18,7 @@ interface BusinessProfile {
   gbp_rating: number | null;
   gbp_review_count: number | null;
   google_maps_uri: string | null;
+  external_synced: boolean;
   created_at: string;
 }
 

@@ -29,15 +29,6 @@ Deno.serve(async (req) => {
     }
 
     const primary = createClient(primaryUrl, primaryKey);
-    const { data: primaryData, error: primaryError } = await primary
-      .from("business_profiles")
-      .upsert(record, { onConflict: "gbp_place_id" })
-      .select()
-      .single();
-
-    if (primaryError) {
-      throw new Error(`Primary write failed: ${primaryError.message}`);
-    }
 
     // --- Write to external Supabase ---
     const externalUrl = "https://yvdfiwabdvcpqwrmtysd.supabase.co";
@@ -53,6 +44,18 @@ Deno.serve(async (req) => {
 
     if (externalError) {
       console.error("External write failed (non-blocking):", externalError.message);
+    }
+
+    // Write to primary with sync status
+    const primaryRecord = { ...record, external_synced: !externalError };
+    const { data: primaryData, error: primaryError } = await primary
+      .from("business_profiles")
+      .upsert(primaryRecord, { onConflict: "gbp_place_id" })
+      .select()
+      .single();
+
+    if (primaryError) {
+      throw new Error(`Primary write failed: ${primaryError.message}`);
     }
 
     return new Response(
