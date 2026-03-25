@@ -67,6 +67,7 @@ const LocationDetailView = ({
   const [activeTab, setActiveTab] = useState<Tab>("Overview");
   const [rescanning, setRescanning] = useState(false);
   const [refreshingGBP, setRefreshingGBP] = useState(false);
+  const [gbpRefreshStatus, setGbpRefreshStatus] = useState<"idle" | "success" | "error">("idle");
   const [editingDifferentiators, setEditingDifferentiators] = useState(false);
   const [differentiators, setDifferentiators] = useState<any[]>([]);
 
@@ -94,11 +95,13 @@ const LocationDetailView = ({
   const refreshFromGBP = async () => {
     if (!business) return;
     setRefreshingGBP(true);
+    setGbpRefreshStatus("idle");
     try {
       const { data, error } = await supabase.functions.invoke("google-places", {
         body: { action: "details", place_id: business.gbp_place_id },
       });
-      if (error || !data?.details) throw error;
+      if (error) throw new Error(error.message || "Edge function error");
+      if (!data?.details) throw new Error(data?.error || "No details returned from GBP");
       const d = data.details;
       const updates = {
         business_name: d.name || business.business_name,
@@ -117,8 +120,12 @@ const LocationDetailView = ({
       };
       await supabase.from("business_profiles").update(updates).eq("id", business.id);
       await fetchBusiness();
+      setGbpRefreshStatus("success");
+      setTimeout(() => setGbpRefreshStatus("idle"), 3000);
     } catch (err) {
       console.error("GBP refresh error:", err);
+      setGbpRefreshStatus("error");
+      setTimeout(() => setGbpRefreshStatus("idle"), 5000);
     } finally {
       setRefreshingGBP(false);
     }
@@ -342,7 +349,17 @@ const LocationDetailView = ({
               </div>
             </div>
           )}
-          <div className="border-t border-border pt-4 flex justify-end">
+          <div className="border-t border-border pt-4 flex items-center justify-end gap-3">
+            {gbpRefreshStatus === "success" && (
+              <span className="text-xs text-green-600 flex items-center gap-1">
+                <CheckCircle2 className="w-3.5 h-3.5" /> Updated successfully
+              </span>
+            )}
+            {gbpRefreshStatus === "error" && (
+              <span className="text-xs text-destructive flex items-center gap-1">
+                <AlertCircle className="w-3.5 h-3.5" /> Update failed — check console
+              </span>
+            )}
             <button
               onClick={refreshFromGBP}
               disabled={refreshingGBP}
