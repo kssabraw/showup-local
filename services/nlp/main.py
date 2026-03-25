@@ -80,8 +80,11 @@ QUADGRAM_MIN_PAGE_SPREAD = 0.49
 # Minimum cosine similarity to the target keyword for a quadgram to be returned
 QUADGRAM_MIN_SIMILARITY = 0.1
 
-# Minimum fraction of pages an entity must appear in to be returned
+# Minimum fraction of pages an entity must appear in
 ENTITY_MIN_PAGE_SPREAD = 0.49
+
+# Only return entities Google considers highly central to the content
+ENTITY_MIN_SALIENCE = 0.40
 
 # Google NLP API max content size (bytes)
 GOOGLE_NLP_MAX_BYTES = 100_000
@@ -161,7 +164,6 @@ def get_related_keywords_for_zone(
       - Fit TF-IDF on all zone docs
       - Compute cosine similarity of each page to the keyword vector
       - A term's score = mean keyword-similarity of pages that contain it
-        (i.e. terms that appear on topically on-point pages score highest)
       - Drop terms below min_similarity threshold
       - Return all passing terms sorted by score, no fixed top N
     """
@@ -186,10 +188,9 @@ def get_related_keywords_for_zone(
         return []
 
     feature_names = vectorizer.get_feature_names_out()
-    tfidf_array = tfidf_matrix.toarray()  # shape: (n_pages, n_features)
+    tfidf_array = tfidf_matrix.toarray()
 
-    # Cosine similarity of each page to the keyword vector
-    page_keyword_sims = cosine_similarity(keyword_vec, tfidf_matrix)[0]  # shape: (n_pages,)
+    page_keyword_sims = cosine_similarity(keyword_vec, tfidf_matrix)[0]
 
     keyword_clean = clean_text(keyword)
     results = []
@@ -198,15 +199,12 @@ def get_related_keywords_for_zone(
         if term == keyword_clean:
             continue
 
-        # Which pages contain this term?
         pages_with_term = np.where(tfidf_array[:, i] > 0)[0]
         page_count = len(pages_with_term)
 
-        # Page spread gate
         if page_count < min_pages_required:
             continue
 
-        # Score = mean keyword-similarity of pages that contain this term
         mean_sim = float(page_keyword_sims[pages_with_term].mean())
 
         if mean_sim >= min_similarity:
@@ -230,20 +228,12 @@ def get_top_quadgrams(
 ) -> List[dict]:
     """
     Extracts meaningful quadgrams from <p> tag content only.
-
-    Scoring:
-    - Page spread: quadgram must appear in >= 49% of competitor pages.
-      Eliminates single-page noise.
-    - Keyword relevance: cosine similarity between the quadgram phrase and the
-      target keyword in TF-IDF space must be >= min_similarity. Ensures topical fit.
-
-    No fixed top N — returns everything that passes both filters,
-    sorted by page spread descending then similarity descending.
+    Filtered by page spread (>= 49%) and keyword cosine similarity.
+    No fixed top N — returns everything that passes both filters.
     """
     total_pages = len(paragraph_docs)
     min_pages_required = max(2, int(np.ceil(total_pages * min_page_spread)))
 
-    # Step 1: collect quadgrams per page and track which pages each appears in
     quadgram_pages: Dict[tuple, set] = defaultdict(set)
     for page_idx, doc in enumerate(paragraph_docs):
         text = clean_text(doc)
@@ -255,7 +245,6 @@ def get_top_quadgrams(
                 quadgram_pages[gram].add(page_idx)
                 seen_this_page.add(gram)
 
-    # Step 2: filter by page spread
     spread_qualified = {
         gram: pages
         for gram, pages in quadgram_pages.items()
@@ -265,7 +254,6 @@ def get_top_quadgrams(
     if not spread_qualified:
         return []
 
-    # Step 3: score remaining quadgrams by cosine similarity to the keyword
     cleaned_docs = [clean_text(d) for d in paragraph_docs if d and len(d.strip()) > 5]
     if not cleaned_docs:
         return []
@@ -279,12 +267,10 @@ def get_top_quadgrams(
     except ValueError:
         return []
 
-    # Keyword vector is the last document
     keyword_vec = np.asarray(tfidf_matrix[-1].todense())
-
-    # Candidate phrase vectors start after cleaned_docs
     phrase_start_idx = len(cleaned_docs)
     results = []
+
     for i, (gram, pages) in enumerate(spread_qualified.items()):
         phrase_vec = np.asarray(tfidf_matrix[phrase_start_idx + i].todense())
         sim = float(cosine_similarity(keyword_vec, phrase_vec)[0][0])
@@ -297,7 +283,6 @@ def get_top_quadgrams(
                 "type": "quadgram",
             })
 
-    # Sort by page spread descending, then similarity descending
     results.sort(key=lambda x: (x["page_spread"], x["similarity_score"]), reverse=True)
     return results
 
@@ -305,14 +290,12 @@ def get_top_quadgrams(
 async def fetch_google_entities(text: str, client: httpx.AsyncClient) -> List[dict]:
     """
     Calls the Google Natural Language API analyzeEntities endpoint for a single
-    document. Returns a list of raw entity dicts from the API response.
-    Truncates text to GOOGLE_NLP_MAX_BYTES to stay within API limits.
-    Returns [] on any error so one bad page doesn't abort the whole analysis.
+    document. Returns raw entity dicts including mention counts.
+    Truncates to GOOGLE_NLP_MAX_BYTES. Returns [] on any error.
     """
     if not GOOGLE_NLP_API_KEY or not text.strip():
         return []
 
-    # Truncate to API byte limit
     encoded = text.encode("utf-8")[:GOOGLE_NLP_MAX_BYTES]
     safe_text = encoded.decode("utf-8", errors="ignore")
 
@@ -337,19 +320,21 @@ async def fetch_google_entities(text: str, client: httpx.AsyncClient) -> List[di
 async def get_google_entities(
     paragraph_docs: List[str],
     min_page_spread: float = ENTITY_MIN_PAGE_SPREAD,
+    min_salience: float = ENTITY_MIN_SALIENCE,
 ) -> List[dict]:
     """
     Runs Google NLP entity analysis across all competitor paragraph texts.
 
-    For each entity that passes the 49% page spread gate:
-      - mean_salience: average salience score across pages where it appears
-        (salience = how central Google considers this entity to the document)
-      - page_spread / page_spread_pct: how many competitor pages mention it
-      - entity_type: Google's classification (PERSON, LOCATION, ORGANIZATION,
-        CONSUMER_GOOD, OTHER, etc.)
+    Filters:
+      - mean_salience >= 0.40: only entities Google considers highly central
+      - page spread >= 49%: must appear on majority of competitor pages
 
-    All API calls are made concurrently per page to minimise latency.
-    Returns [] gracefully if the API key is missing or all calls fail.
+    recommended_mentions: the average number of times competitors mention this
+    entity on pages where it appears — derived from the API's mentions array,
+    which counts every occurrence in the document. This becomes the target
+    mention count for your own page.
+
+    All API calls run concurrently. Returns [] if API key is missing.
     Sorted by mean_salience descending.
     """
     if not GOOGLE_NLP_API_KEY:
@@ -358,14 +343,18 @@ async def get_google_entities(
     total_pages = len(paragraph_docs)
     min_pages_required = max(2, int(np.ceil(total_pages * min_page_spread)))
 
-    # Fire all page requests concurrently
+    # Concurrent API calls across all pages
     async with httpx.AsyncClient() as client:
         tasks = [fetch_google_entities(doc, client) for doc in paragraph_docs]
         per_page_entities = await asyncio.gather(*tasks)
 
-    # Aggregate: track salience scores and page indices per entity name
+    # Aggregate per entity: salience, mention counts, page spread
     # Key: (normalized_name, entity_type)
-    entity_data: Dict[tuple, Dict] = defaultdict(lambda: {"saliences": [], "pages": set()})
+    entity_data: Dict[tuple, Dict] = defaultdict(lambda: {
+        "saliences": [],
+        "mention_counts": [],  # how many times entity was mentioned on each page
+        "pages": set(),
+    })
 
     for page_idx, entities in enumerate(per_page_entities):
         seen_this_page = set()
@@ -373,6 +362,8 @@ async def get_google_entities(
             name = entity.get("name", "").strip()
             etype = entity.get("type", "UNKNOWN")
             salience = entity.get("salience", 0.0)
+            # mentions is a list of occurrence objects — its length is the count
+            mention_count = len(entity.get("mentions", []))
 
             if not name:
                 continue
@@ -380,25 +371,36 @@ async def get_google_entities(
             key = (name.lower(), etype)
             if key not in seen_this_page:
                 entity_data[key]["saliences"].append(salience)
+                entity_data[key]["mention_counts"].append(mention_count)
                 entity_data[key]["pages"].add(page_idx)
                 entity_data[key]["name"] = name  # preserve original casing
                 entity_data[key]["entity_type"] = etype
                 seen_this_page.add(key)
 
-    # Filter by page spread and build results
     results = []
     for key, data in entity_data.items():
         page_count = len(data["pages"])
+
+        # Page spread gate
         if page_count < min_pages_required:
             continue
 
         mean_salience = float(np.mean(data["saliences"]))
+
+        # Salience gate — only highly central entities
+        if mean_salience < min_salience:
+            continue
+
+        # Average mention count across pages where this entity appears
+        recommended_mentions = int(round(float(np.mean(data["mention_counts"]))))
+
         results.append({
             "name": data["name"],
             "entity_type": data["entity_type"],
             "mean_salience": round(mean_salience, 4),
             "page_spread": page_count,
             "page_spread_pct": round(page_count / total_pages, 2),
+            "recommended_mentions": max(1, recommended_mentions),
             "type": "google_entity",
         })
 
@@ -433,7 +435,7 @@ async def analyze(request: AnalysisRequest):
     # Quadgrams: <p> tag text only, filtered by page spread + keyword similarity
     quadgrams = get_top_quadgrams(zone_buckets["paragraphs"], request.keyword)
 
-    # Google NLP entity analysis: concurrent calls per page, filtered by page spread
+    # Google NLP entity analysis: concurrent calls, salience >= 0.40, spread >= 49%
     google_entities = await get_google_entities(zone_buckets["paragraphs"])
 
     return AnalysisResponse(
