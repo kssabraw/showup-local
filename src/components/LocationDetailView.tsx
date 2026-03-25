@@ -66,6 +66,7 @@ const LocationDetailView = ({
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<Tab>("Overview");
   const [rescanning, setRescanning] = useState(false);
+  const [refreshingGBP, setRefreshingGBP] = useState(false);
   const [editingDifferentiators, setEditingDifferentiators] = useState(false);
   const [differentiators, setDifferentiators] = useState<any[]>([]);
 
@@ -87,6 +88,39 @@ const LocationDetailView = ({
       console.error("Error fetching business:", err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const refreshFromGBP = async () => {
+    if (!business) return;
+    setRefreshingGBP(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("google-places", {
+        body: { action: "details", place_id: business.gbp_place_id },
+      });
+      if (error || !data?.details) throw error;
+      const d = data.details;
+      const updates = {
+        business_name: d.name || business.business_name,
+        description: d.description || business.description,
+        address: d.address || business.address,
+        phone: d.phone || business.phone,
+        website: d.website || business.website,
+        logo: d.logo || business.logo,
+        photo: d.photo || business.photo,
+        gbp_category: d.category || business.gbp_category,
+        gbp_categories: d.categories ?? business.gbp_categories,
+        gbp_rating: d.rating ?? business.gbp_rating,
+        gbp_review_count: d.review_count ?? business.gbp_review_count,
+        google_maps_uri: d.google_maps_uri || business.google_maps_uri,
+        hours: d.hours ?? business.hours,
+      };
+      await supabase.from("business_profiles").update(updates).eq("id", business.id);
+      await fetchBusiness();
+    } catch (err) {
+      console.error("GBP refresh error:", err);
+    } finally {
+      setRefreshingGBP(false);
     }
   };
 
@@ -308,6 +342,18 @@ const LocationDetailView = ({
               </div>
             </div>
           )}
+          <div className="border-t border-border pt-4 flex justify-end">
+            <button
+              onClick={refreshFromGBP}
+              disabled={refreshingGBP}
+              className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+            >
+              {refreshingGBP
+                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                : <RefreshCw className="w-3.5 h-3.5" />}
+              {refreshingGBP ? "Refreshing..." : "Refresh from GBP"}
+            </button>
+          </div>
         </div>
       )}
 
