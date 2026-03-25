@@ -77,11 +77,12 @@ logger.info(f"CORS origins: {CORS_ORIGINS}")
 
 STOP_WORDS = set(stopwords.words('english'))
 
-# ── API credentials (set all four in Railway environment variables) ────────────
+# ── API credentials (set all in Railway environment variables) ────────────────
 GOOGLE_NLP_API_KEY   = os.environ.get("GOOGLE_NLP_API_KEY", "")
 DATAFORSEO_LOGIN     = os.environ.get("DATAFORSEO_LOGIN", "")
 DATAFORSEO_PASSWORD  = os.environ.get("DATAFORSEO_PASSWORD", "")
 SCRAPEOWL_API_KEY    = os.environ.get("SCRAPEOWL_API_KEY", "")
+ANTHROPIC_API_KEY    = os.environ.get("ANTHROPIC_API_KEY", "")
 
 GOOGLE_NLP_ENDPOINT  = "https://language.googleapis.com/v1/documents:analyzeEntities"
 DATAFORSEO_ENDPOINT  = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced"
@@ -553,3 +554,267 @@ async def analyze(request: AnalysisRequest):
 @app.get('/health')
 async def health():
     return {'status': 'ok'}
+
+
+# ── Business Analysis: website crawl + ICP/differentiator extraction ──────────
+
+class BusinessAnalysisRequest(BaseModel):
+    website_url: str
+    business_name: str
+    gbp_category: str
+    gbp_categories: List[str] = []
+
+
+class BusinessAnalysisResponse(BaseModel):
+    existing_pages: List[dict]
+    detected_icp: Optional[dict]
+    differentiators: List[dict]
+    pages_crawled: int
+    analysis_status: str   # "complete" | "partial" | "failed"
+
+
+def classify_page_type(url: str, title: str, h1: str) -> dict:
+    """
+    Rule-based page type classifier.
+    Returns { type, primary_service, primary_city }
+    """
+    import urllib.parse
+    path = urllib.parse.urlparse(url).path.lower().rstrip('/')
+    combined = f"{title} {h1}".lower()
+
+    # Heuristic geo signals in URL path or headings
+    geo_patterns = [
+        r'\b[a-z]+-[a-z]+\b',   # hyphenated city-state patterns
+        r'\b(near|in|serving|around)\s+[a-z]+\b',
+    ]
+    us_states = {
+        'alabama','alaska','arizona','arkansas','california','colorado','connecticut',
+        'delaware','florida','georgia','hawaii','idaho','illinois','indiana','iowa',
+        'kansas','kentucky','louisiana','maine','maryland','massachusetts','michigan',
+        'minnesota','mississippi','missouri','montana','nebraska','nevada',
+        'new hampshire','new jersey','new mexico','new york','north carolina',
+        'north dakota','ohio','oklahoma','oregon','pennsylvania','rhode island',
+        'south carolina','south dakota','tennessee','texas','utah','vermont',
+        'virginia','washington','west virginia','wisconsin','wyoming',
+    }
+    state_abbrevs = {
+        'al','ak','az','ar','ca','co','ct','de','fl','ga','hi','id','il','in',
+        'ia','ks','ky','la','me','md','ma','mi','mn','ms','mo','mt','ne','nv',
+        'nh','nj','nm','ny','nc','nd','oh','ok','or','pa','ri','sc','sd','tn',
+        'tx','ut','vt','va','wa','wv','wi','wy',
+    }
+
+    path_parts = set(re.split(r'[-/]', path))
+    has_geo = bool(
+        path_parts & state_abbrevs or
+        any(s in combined for s in us_states) or
+        re.search(r'\b\d{5}\b', combined)  # zip code
+    )
+
+    # Service signals: anything that isn't purely informational
+    service_words = {
+        'repair','service','services','installation','install','replacement',
+        'maintenance','inspection','cleaning','emergency','plumbing','hvac',
+        'electrical','roofing','pest','landscaping','remodeling','painting',
+    }
+    has_service = bool(path_parts & service_words or any(w in combined for w in service_words))
+
+    if has_geo and has_service:
+        page_type = 'city_service'
+    elif has_geo:
+        page_type = 'location'
+    elif has_service:
+        page_type = 'service'
+    else:
+        page_type = 'other'
+
+    return {'type': page_type, 'primary_service': None, 'primary_city': None}
+
+
+async def crawl_website(website_url: str, max_pages: int = 30, max_depth: int = 3) -> List[dict]:
+    """
+    Crawl a business website via direct httpx requests.
+    Returns a list of page records with url, title, h1, page_type.
+    """
+    import urllib.parse
+
+    try:
+        parsed_base = urllib.parse.urlparse(website_url)
+        base_domain = parsed_base.netloc
+    except Exception:
+        return []
+
+    visited: set = set()
+    queue: List[tuple] = [(website_url, 0)]
+    pages: List[dict] = []
+
+    headers = {'User-Agent': 'Mozilla/5.0 (compatible; ShowUPBot/1.0; +https://showuplocal.com)'}
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=10.0, headers=headers) as client:
+        while queue and len(pages) < max_pages:
+            url, depth = queue.pop(0)
+            if url in visited:
+                continue
+            visited.add(url)
+
+            try:
+                response = await client.get(url)
+                if response.status_code != 200:
+                    continue
+                content_type = response.headers.get('content-type', '')
+                if 'text/html' not in content_type:
+                    continue
+
+                html = response.text
+                soup = BeautifulSoup(html, 'html.parser')
+
+                title_tag = soup.find('title')
+                title_text = title_tag.get_text(strip=True) if title_tag else ''
+                h1_tag = soup.find('h1')
+                h1_text = h1_tag.get_text(strip=True) if h1_tag else ''
+
+                classification = classify_page_type(url, title_text, h1_text)
+                pages.append({
+                    'url': url,
+                    'title': title_text[:200],
+                    'h1': h1_text[:200],
+                    'page_type': classification['type'],
+                    'primary_service': classification['primary_service'],
+                    'primary_city': classification['primary_city'],
+                })
+
+                if depth < max_depth:
+                    for link in soup.find_all('a', href=True):
+                        href = str(link['href']).strip()
+                        if not href or href.startswith(('#', 'mailto:', 'tel:', 'javascript:')):
+                            continue
+                        full_url = urllib.parse.urljoin(url, href)
+                        parsed = urllib.parse.urlparse(full_url)
+                        if parsed.netloc != base_domain:
+                            continue
+                        if re.search(r'\.(pdf|jpg|jpeg|png|gif|css|js|ico|svg|xml|json|zip)$', parsed.path, re.I):
+                            continue
+                        clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
+                        if clean_url and clean_url not in visited:
+                            queue.append((clean_url, depth + 1))
+
+            except Exception as e:
+                logger.warning(f"Crawl error for {url}: {e}")
+                continue
+
+    logger.info(f"Crawled {len(pages)} pages from {website_url}")
+    return pages
+
+
+async def analyze_business_with_anthropic(
+    pages: List[dict],
+    business_name: str,
+    gbp_category: str,
+    gbp_categories: List[str],
+) -> dict:
+    """
+    Use Claude Haiku to detect ICP and extract differentiators from crawled page data.
+    Returns { detected_icp, differentiators }
+    """
+    if not ANTHROPIC_API_KEY:
+        logger.warning("ANTHROPIC_API_KEY not set — skipping LLM analysis")
+        return {'detected_icp': None, 'differentiators': []}
+
+    try:
+        import anthropic
+        import json as json_lib
+
+        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+        page_lines = []
+        for p in pages[:25]:
+            page_lines.append(
+                f"  [{p['page_type']}] {p['url']}\n"
+                f"    Title: {p['title']}\n"
+                f"    H1: {p['h1']}"
+            )
+        pages_text = '\n'.join(page_lines) if page_lines else '  (no pages discovered)'
+
+        prompt = f"""Analyze this local service business and return a JSON object.
+
+Business Name: {business_name}
+GBP Primary Category: {gbp_category}
+All GBP Categories: {', '.join(gbp_categories) if gbp_categories else 'N/A'}
+
+Discovered website pages:
+{pages_text}
+
+Return a JSON object with exactly this structure:
+{{
+  "detected_icp": {{
+    "primary": "<icp_type>",
+    "confidence": <0.0-1.0>,
+    "all": [{{"type": "<icp_type>", "confidence": <0.0-1.0>}}],
+    "reasoning": "<1-2 sentences>"
+  }},
+  "differentiators": [
+    {{"claim": "<specific claim>", "mechanism": "<how achieved>", "type": "<speed|cost|guarantee|specialization|availability|other>"}}
+  ]
+}}
+
+ICP types: emergency_homeowner, general_homeowner, commercial, property_manager, vulnerable_homeowner, trade_contractor, landlord
+
+Extract differentiators only from the page titles and H1s above. Look for speed claims, pricing models, guarantees, specializations. If none are evident, return an empty array.
+
+Return only valid JSON, no markdown or explanation."""
+
+        message = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            messages=[{'role': 'user', 'content': prompt}],
+        )
+
+        result = json_lib.loads(message.content[0].text)
+        return result
+
+    except Exception as e:
+        logger.warning(f"Anthropic analysis error: {e}")
+        return {'detected_icp': None, 'differentiators': []}
+
+
+@app.post('/analyze-business', response_model=BusinessAnalysisResponse)
+async def analyze_business(request: BusinessAnalysisRequest):
+    """
+    Phase 1 business setup pipeline:
+      1. Crawl the business website (up to 30 pages, 3 levels deep)
+      2. Classify each page as service / location / city_service / other
+      3. Use Claude Haiku to detect ICP and extract differentiators
+    """
+    if not request.website_url:
+        raise HTTPException(status_code=400, detail="website_url is required")
+
+    # Normalize URL
+    url = request.website_url.strip()
+    if not url.startswith(('http://', 'https://')):
+        url = f"https://{url}"
+
+    try:
+        pages = await asyncio.wait_for(
+            crawl_website(url),
+            timeout=45.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"Crawl timed out for {url}")
+        pages = []
+
+    llm_result = await analyze_business_with_anthropic(
+        pages,
+        request.business_name,
+        request.gbp_category,
+        request.gbp_categories,
+    )
+
+    status = 'complete' if pages else 'partial'
+
+    return BusinessAnalysisResponse(
+        existing_pages=pages,
+        detected_icp=llm_result.get('detected_icp'),
+        differentiators=llm_result.get('differentiators', []),
+        pages_crawled=len(pages),
+        analysis_status=status,
+    )
