@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
-import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, CheckCircle2, AlertCircle, Trash2 } from "lucide-react";
+import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, Trash2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { Badge } from "@/components/ui/badge";
 
 interface BusinessProfile {
   id: string;
@@ -18,7 +17,6 @@ interface BusinessProfile {
   gbp_rating: number | null;
   gbp_review_count: number | null;
   google_maps_uri: string | null;
-  external_synced: boolean;
   created_at: string;
 }
 
@@ -128,16 +126,6 @@ const LocationsView = () => {
                         )}
                       </div>
                     )}
-                    <Badge
-                      variant={b.external_synced ? "default" : "destructive"}
-                      className="flex items-center gap-1 text-[10px] px-2 py-0.5"
-                    >
-                      {b.external_synced ? (
-                        <><CheckCircle2 className="w-3 h-3" /> Synced</>
-                      ) : (
-                        <><AlertCircle className="w-3 h-3" /> Not synced</>
-                      )}
-                    </Badge>
                     <button
                       onClick={() => setConfirmId(b.id)}
                       className="p-1.5 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
