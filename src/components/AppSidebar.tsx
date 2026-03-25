@@ -45,7 +45,7 @@ const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarPro
         )}
       </div>
 
-      {/* New Content Button */}
+      {/* New Location Button */}
       <div className="px-3 pt-4 pb-2">
         <button
           onClick={() => onItemClick("new")}
@@ -55,7 +55,7 @@ const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarPro
           )}
         >
           <Plus className="w-4 h-4 flex-shrink-0" />
-          {!collapsed && "New Content"}
+          {!collapsed && "New Location"}
         </button>
       </div>
 
