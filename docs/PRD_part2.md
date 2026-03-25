@@ -208,6 +208,37 @@ Pass ≥ 80 | Needs Improvement 60–79 | Fail < 60
 
 **Business Identity:** brand name, NAP, email, primary CTA type, secondary CTA type
 
+**Existing Page Inventory (scraped from website):** catalogued automatically when a new location is added. Used to avoid duplicating existing content and to inform internal linking opportunities.
+
+Three page types are identified and stored:
+
+| Page Type | Definition | Detection Signal |
+|---|---|---|
+| Service pages | Pages targeting a single service with no geo modifier | URL pattern + H1 containing service name, no city |
+| Location pages | Pages targeting a city/region with no specific service | URL pattern + H1 containing city name, no service |
+| City + service pages | Pages targeting a specific service in a specific city | URL pattern + H1 containing both service and city |
+
+**Scrape behavior:**
+- Triggered automatically on new location save (after GBP import)
+- Crawls all internal links from the homepage up to 3 levels deep
+- For each discovered page: records URL, page title, H1, detected page type, primary service (if any), primary city (if any)
+- Results stored in `business_profiles` as `existing_pages` (JSONB array)
+- User can review, re-classify, or dismiss individual pages from the UI
+- Re-scan available manually at any time from the location profile
+
+**ICP Detection (auto, once per business):**
+- Triggered immediately after website scrape completes
+- LLM infers ICP from: GBP primary category + website service list + brand voice signals + detected page types
+- ICP stored on `business_profiles` as `detected_icp` — user can override per page at generation time
+- If multiple ICPs are plausible, all are listed with confidence scores; highest confidence is used as default
+
+**UVP / Differentiator Extraction (auto, once per business):**
+- Triggered alongside ICP detection
+- LLM extracts differentiators from website copy: speed claims, pricing model, guarantees, specializations, service area, certifications
+- Minimum 3 differentiators required before generation is unlocked; user prompted to add manually if fewer are found
+- Stored on `business_profiles` as `differentiators` (JSONB array of `{ claim, mechanism, type }`)
+- User can edit, add, or remove at any time from the location profile
+
 ### Phase 2: Per-Page Generation
 
 **Required:** Primary keyword, Target city, Main service
