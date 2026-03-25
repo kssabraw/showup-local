@@ -20,7 +20,7 @@ interface BusinessProfile {
   created_at: string;
 }
 
-const LocationsView = () => {
+const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) => void }) => {
   const [businesses, setBusinesses] = useState<BusinessProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [confirmId, setConfirmId] = useState<string | null>(null);
@@ -95,7 +95,8 @@ const LocationsView = () => {
           {businesses.map((b) => (
             <div
               key={b.id}
-              className="bg-card rounded-xl border border-border p-5 flex items-start gap-4 hover:border-accent/40 transition-colors"
+              onClick={() => onSelectBusiness(b.id)}
+              className="bg-card rounded-xl border border-border p-5 flex items-start gap-4 hover:border-accent/40 transition-colors cursor-pointer"
             >
               {(b.logo || b.photo) && (
                 <img
@@ -127,7 +128,7 @@ const LocationsView = () => {
                       </div>
                     )}
                     <button
-                      onClick={() => setConfirmId(b.id)}
+                      onClick={(e) => { e.stopPropagation(); setConfirmId(b.id); }}
                       className="p-1.5 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
                       title="Remove location"
                     >

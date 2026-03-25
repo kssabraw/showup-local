@@ -4,15 +4,20 @@ import DashboardView from "@/components/DashboardView";
 import NewContentView from "@/components/NewContentView";
 import BusinessSearchView, { type BusinessDetails } from "@/components/BusinessSearchView";
 import LocationsView from "@/components/LocationsView";
+import LocationDetailView from "@/components/LocationDetailView";
 import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
+
+const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
 
 const Index = () => {
   const [activeItem, setActiveItem] = useState("dashboard");
   const [collapsed, setCollapsed] = useState(false);
+  const [selectedLocationId, setSelectedLocationId] = useState<string | null>(null);
 
   const handleItemClick = (item: string) => {
     setActiveItem(item);
+    setSelectedLocationId(null);
   };
 
   const handleBusinessConfirm = async (business: BusinessDetails) => {
@@ -41,9 +46,59 @@ const Index = () => {
       });
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
+
       setActiveItem("locations");
+
+      // Trigger background analysis if the business has a website
+      if (business.website) {
+        triggerBusinessAnalysis(business);
+      }
     } catch (err) {
       console.error("Error saving business:", err);
+    }
+  };
+
+  const triggerBusinessAnalysis = async (business: BusinessDetails) => {
+    try {
+      // Fetch the saved business ID
+      const { data: saved } = await supabase
+        .from("business_profiles")
+        .select("id")
+        .eq("gbp_place_id", business.place_id)
+        .single();
+      if (!saved) return;
+
+      // Mark as running
+      await supabase
+        .from("business_profiles")
+        .update({ analysis_status: "running" })
+        .eq("id", saved.id);
+
+      const response = await fetch(`${NLP_SERVICE_URL}/analyze-business`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          website_url: business.website,
+          business_name: business.name,
+          gbp_category: business.category,
+          gbp_categories: business.categories || [],
+        }),
+      });
+
+      if (!response.ok) throw new Error(`Analysis failed: ${response.status}`);
+      const result = await response.json();
+
+      await supabase
+        .from("business_profiles")
+        .update({
+          existing_pages: result.existing_pages,
+          detected_icp: result.detected_icp,
+          differentiators: result.differentiators,
+          analysis_status: result.analysis_status,
+        })
+        .eq("id", saved.id);
+    } catch (err) {
+      console.error("Background analysis error:", err);
     }
   };
 
@@ -80,7 +135,17 @@ const Index = () => {
           {activeItem === "content" && (
             <NewContentView onBack={() => setActiveItem("dashboard")} />
           )}
-          {activeItem === "locations" && <LocationsView />}
+          {activeItem === "locations" && !selectedLocationId && (
+            <LocationsView
+              onSelectBusiness={(id) => setSelectedLocationId(id)}
+            />
+          )}
+          {activeItem === "locations" && selectedLocationId && (
+            <LocationDetailView
+              businessId={selectedLocationId}
+              onBack={() => setSelectedLocationId(null)}
+            />
+          )}
           {activeItem === "analytics" && (
             <div>
               <h1 className="text-2xl font-display font-bold text-foreground">Analytics</h1>
