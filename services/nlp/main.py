@@ -1,6 +1,7 @@
 import sys
 import os
 import logging
+import asyncio
 
 # Configure logging to stderr so Railway captures it
 logging.basicConfig(
@@ -19,7 +20,7 @@ logger.info(f"Files in cwd: {os.listdir('.')}")
 try:
     from fastapi import FastAPI, HTTPException
     from pydantic import BaseModel
-    from typing import List, Dict
+    from typing import List, Dict, Optional
     import re
     from collections import defaultdict
     logger.info("Basic imports done")
@@ -37,6 +38,9 @@ try:
 
     from bs4 import BeautifulSoup
     logger.info("bs4 imports done")
+
+    import httpx
+    logger.info("httpx imports done")
 except Exception as e:
     logger.error(f"Import failed: {e}")
     raise
@@ -54,7 +58,13 @@ except Exception as e:
 app = FastAPI()
 STOP_WORDS = set(stopwords.words('english'))
 
+# Google NLP API key — set GOOGLE_NLP_API_KEY in Railway environment variables
+GOOGLE_NLP_API_KEY = os.environ.get("GOOGLE_NLP_API_KEY", "")
+GOOGLE_NLP_ENDPOINT = "https://language.googleapis.com/v1/documents:analyzeEntities"
+
 logger.info("App initialized, ready to serve")
+if not GOOGLE_NLP_API_KEY:
+    logger.warning("GOOGLE_NLP_API_KEY not set — Google entity analysis will be skipped")
 
 ZONES = ["title", "h1", "h2_h3", "body"]
 
@@ -69,6 +79,12 @@ QUADGRAM_MIN_PAGE_SPREAD = 0.49
 
 # Minimum cosine similarity to the target keyword for a quadgram to be returned
 QUADGRAM_MIN_SIMILARITY = 0.1
+
+# Minimum fraction of pages an entity must appear in to be returned
+ENTITY_MIN_PAGE_SPREAD = 0.49
+
+# Google NLP API max content size (bytes)
+GOOGLE_NLP_MAX_BYTES = 100_000
 
 
 class AnalysisRequest(BaseModel):
@@ -86,6 +102,7 @@ class ZoneKeywords(BaseModel):
 class AnalysisResponse(BaseModel):
     related_keywords: ZoneKeywords
     top_quadgrams: List[dict]
+    google_entities: List[dict]
 
 
 def extract_zones(html: str) -> Dict[str, str]:
@@ -104,7 +121,7 @@ def extract_zones(html: str) -> Dict[str, str]:
     h2h3_tags = soup.find_all(["h2", "h3"])
     h2h3_text = " ".join(t.get_text(separator=" ", strip=True) for t in h2h3_tags)
 
-    # Paragraphs: only <p> tags — clean prose content for quadgrams
+    # Paragraphs: only <p> tags — clean prose content for quadgrams and entity analysis
     p_tags = soup.find_all("p")
     paragraph_text = " ".join(t.get_text(separator=" ", strip=True) for t in p_tags)
 
@@ -285,6 +302,110 @@ def get_top_quadgrams(
     return results
 
 
+async def fetch_google_entities(text: str, client: httpx.AsyncClient) -> List[dict]:
+    """
+    Calls the Google Natural Language API analyzeEntities endpoint for a single
+    document. Returns a list of raw entity dicts from the API response.
+    Truncates text to GOOGLE_NLP_MAX_BYTES to stay within API limits.
+    Returns [] on any error so one bad page doesn't abort the whole analysis.
+    """
+    if not GOOGLE_NLP_API_KEY or not text.strip():
+        return []
+
+    # Truncate to API byte limit
+    encoded = text.encode("utf-8")[:GOOGLE_NLP_MAX_BYTES]
+    safe_text = encoded.decode("utf-8", errors="ignore")
+
+    payload = {
+        "document": {"type": "PLAIN_TEXT", "content": safe_text},
+        "encodingType": "UTF8",
+    }
+    try:
+        response = await client.post(
+            GOOGLE_NLP_ENDPOINT,
+            params={"key": GOOGLE_NLP_API_KEY},
+            json=payload,
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        return response.json().get("entities", [])
+    except Exception as e:
+        logger.warning(f"Google NLP API error: {e}")
+        return []
+
+
+async def get_google_entities(
+    paragraph_docs: List[str],
+    min_page_spread: float = ENTITY_MIN_PAGE_SPREAD,
+) -> List[dict]:
+    """
+    Runs Google NLP entity analysis across all competitor paragraph texts.
+
+    For each entity that passes the 49% page spread gate:
+      - mean_salience: average salience score across pages where it appears
+        (salience = how central Google considers this entity to the document)
+      - page_spread / page_spread_pct: how many competitor pages mention it
+      - entity_type: Google's classification (PERSON, LOCATION, ORGANIZATION,
+        CONSUMER_GOOD, OTHER, etc.)
+
+    All API calls are made concurrently per page to minimise latency.
+    Returns [] gracefully if the API key is missing or all calls fail.
+    Sorted by mean_salience descending.
+    """
+    if not GOOGLE_NLP_API_KEY:
+        return []
+
+    total_pages = len(paragraph_docs)
+    min_pages_required = max(2, int(np.ceil(total_pages * min_page_spread)))
+
+    # Fire all page requests concurrently
+    async with httpx.AsyncClient() as client:
+        tasks = [fetch_google_entities(doc, client) for doc in paragraph_docs]
+        per_page_entities = await asyncio.gather(*tasks)
+
+    # Aggregate: track salience scores and page indices per entity name
+    # Key: (normalized_name, entity_type)
+    entity_data: Dict[tuple, Dict] = defaultdict(lambda: {"saliences": [], "pages": set()})
+
+    for page_idx, entities in enumerate(per_page_entities):
+        seen_this_page = set()
+        for entity in entities:
+            name = entity.get("name", "").strip()
+            etype = entity.get("type", "UNKNOWN")
+            salience = entity.get("salience", 0.0)
+
+            if not name:
+                continue
+
+            key = (name.lower(), etype)
+            if key not in seen_this_page:
+                entity_data[key]["saliences"].append(salience)
+                entity_data[key]["pages"].add(page_idx)
+                entity_data[key]["name"] = name  # preserve original casing
+                entity_data[key]["entity_type"] = etype
+                seen_this_page.add(key)
+
+    # Filter by page spread and build results
+    results = []
+    for key, data in entity_data.items():
+        page_count = len(data["pages"])
+        if page_count < min_pages_required:
+            continue
+
+        mean_salience = float(np.mean(data["saliences"]))
+        results.append({
+            "name": data["name"],
+            "entity_type": data["entity_type"],
+            "mean_salience": round(mean_salience, 4),
+            "page_spread": page_count,
+            "page_spread_pct": round(page_count / total_pages, 2),
+            "type": "google_entity",
+        })
+
+    results.sort(key=lambda x: x["mean_salience"], reverse=True)
+    return results
+
+
 @app.post('/analyze', response_model=AnalysisResponse)
 async def analyze(request: AnalysisRequest):
     if not request.pages:
@@ -312,7 +433,14 @@ async def analyze(request: AnalysisRequest):
     # Quadgrams: <p> tag text only, filtered by page spread + keyword similarity
     quadgrams = get_top_quadgrams(zone_buckets["paragraphs"], request.keyword)
 
-    return AnalysisResponse(related_keywords=related, top_quadgrams=quadgrams)
+    # Google NLP entity analysis: concurrent calls per page, filtered by page spread
+    google_entities = await get_google_entities(zone_buckets["paragraphs"])
+
+    return AnalysisResponse(
+        related_keywords=related,
+        top_quadgrams=quadgrams,
+        google_entities=google_entities,
+    )
 
 
 @app.get('/health')
