@@ -295,13 +295,11 @@ const LocationDetailView = ({
               <p className="text-sm text-muted-foreground">
                 {pages.length > 0
                   ? `${pages.length} pages discovered`
-                  : analysisStatus === "pending"
-                  ? "Analysis not yet run"
                   : analysisStatus === "running"
                   ? "Analyzing website..."
                   : analysisStatus === "failed"
                   ? "Analysis failed"
-                  : "No pages discovered"}
+                  : "Analysis not yet run"}
               </p>
               {analysisStatus === "running" && (
                 <Loader2 className="w-4 h-4 text-accent animate-spin" />
@@ -368,29 +366,33 @@ const LocationDetailView = ({
             </>
           )}
 
-          {pages.length === 0 && analysisStatus === "pending" && business.website && (
+          {pages.length === 0 && analysisStatus !== "running" && (
             <div className="bg-card border border-border rounded-xl p-10 text-center">
-              <Sparkles className="w-8 h-8 text-muted-foreground mx-auto mb-3" />
-              <p className="text-sm font-medium text-foreground">Website not yet analyzed</p>
-              <p className="text-xs text-muted-foreground mt-1 mb-4">
-                Scan the website to discover service, location, and city+service pages.
+              {analysisStatus === "failed" ? (
+                <AlertCircle className="w-8 h-8 text-destructive mx-auto mb-3" />
+              ) : (
+                <Sparkles className="w-8 h-8 text-muted-foreground mx-auto mb-3" />
+              )}
+              <p className="text-sm font-medium text-foreground">
+                {analysisStatus === "failed" ? "Analysis failed" : "Website not yet analyzed"}
               </p>
-              <button
-                onClick={() => runAnalysis(business)}
-                disabled={rescanning}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-accent-foreground text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
-              >
-                {rescanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                {rescanning ? "Scanning..." : "Scan Website"}
-              </button>
-            </div>
-          )}
-
-          {pages.length === 0 && analysisStatus === "failed" && (
-            <div className="bg-destructive/5 border border-destructive/20 rounded-xl p-6 text-center">
-              <AlertCircle className="w-7 h-7 text-destructive mx-auto mb-2" />
-              <p className="text-sm text-destructive font-medium">Analysis failed</p>
-              <p className="text-xs text-muted-foreground mt-1">The website could not be reached or crawled. Try re-scanning.</p>
+              <p className="text-xs text-muted-foreground mt-1 mb-4">
+                {analysisStatus === "failed"
+                  ? "The website could not be reached or crawled."
+                  : business.website
+                  ? "Scan the website to discover service, location, and city+service pages."
+                  : "No website URL found for this business. Add one to enable scanning."}
+              </p>
+              {business.website ? (
+                <button
+                  onClick={() => runAnalysis(business)}
+                  disabled={rescanning}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-accent-foreground text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+                >
+                  {rescanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                  {rescanning ? "Scanning..." : analysisStatus === "failed" ? "Retry Scan" : "Scan Website"}
+                </button>
+              ) : null}
             </div>
           )}
         </div>
@@ -441,12 +443,22 @@ const LocationDetailView = ({
                 )}
               </div>
             ) : (
-              <div className="text-center py-4">
+              <div className="text-center py-4 space-y-3">
                 <p className="text-sm text-muted-foreground">
-                  {analysisStatus === "pending"
-                    ? "Run the website scan to auto-detect ICP."
-                    : "ICP could not be determined from available data."}
+                  {analysisStatus === "running"
+                    ? "Detecting ICP…"
+                    : "Run the website scan to auto-detect ICP."}
                 </p>
+                {analysisStatus !== "running" && business.website && (
+                  <button
+                    onClick={() => runAnalysis(business)}
+                    disabled={rescanning}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-accent-foreground text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+                  >
+                    {rescanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                    {rescanning ? "Scanning..." : "Scan Website"}
+                  </button>
+                )}
               </div>
             )}
           </div>
