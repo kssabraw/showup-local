@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
-import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, Trash2 } from "lucide-react";
+import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, Trash2, Sparkles, RefreshCw, CheckCircle2, AlertCircle } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+
+const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
 
 interface BusinessProfile {
   id: string;
@@ -17,6 +19,7 @@ interface BusinessProfile {
   gbp_rating: number | null;
   gbp_review_count: number | null;
   google_maps_uri: string | null;
+  analysis_status: string | null;
   created_at: string;
 }
 
@@ -25,6 +28,7 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
   const [loading, setLoading] = useState(true);
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
+  const [analyzingIds, setAnalyzingIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     fetchBusinesses();
@@ -61,6 +65,66 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
     } finally {
       setRemoving(false);
       setConfirmId(null);
+    }
+  };
+
+  const handleRunAnalysis = async (e: React.MouseEvent, b: BusinessProfile) => {
+    e.stopPropagation();
+    if (!b.website || analyzingIds.has(b.id)) return;
+
+    setAnalyzingIds((prev) => new Set(prev).add(b.id));
+    setBusinesses((prev) =>
+      prev.map((x) => x.id === b.id ? { ...x, analysis_status: "running" } : x)
+    );
+
+    try {
+      await supabase
+        .from("business_profiles")
+        .update({ analysis_status: "running" })
+        .eq("id", b.id);
+
+      const response = await fetch(`${NLP_SERVICE_URL}/analyze-business`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          website_url: b.website,
+          business_name: b.business_name,
+          gbp_category: b.gbp_category,
+          gbp_categories: b.gbp_categories || [],
+        }),
+      });
+
+      if (!response.ok) throw new Error(`Analysis failed: ${response.status}`);
+      const result = await response.json();
+
+      await supabase
+        .from("business_profiles")
+        .update({
+          existing_pages: result.existing_pages,
+          detected_icp: result.detected_icp,
+          differentiators: result.differentiators,
+          analysis_status: result.analysis_status,
+        })
+        .eq("id", b.id);
+
+      setBusinesses((prev) =>
+        prev.map((x) => x.id === b.id ? { ...x, analysis_status: result.analysis_status } : x)
+      );
+    } catch (err) {
+      console.error("Analysis error:", err);
+      await supabase
+        .from("business_profiles")
+        .update({ analysis_status: "failed" })
+        .eq("id", b.id);
+      setBusinesses((prev) =>
+        prev.map((x) => x.id === b.id ? { ...x, analysis_status: "failed" } : x)
+      );
+    } finally {
+      setAnalyzingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(b.id);
+        return next;
+      });
     }
   };
 
@@ -165,6 +229,36 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
                 {b.description && (
                   <p className="text-xs text-muted-foreground mt-2 line-clamp-2">{b.description}</p>
                 )}
+
+                {b.website && (() => {
+                  const isRunning = analyzingIds.has(b.id) || b.analysis_status === "running";
+                  const isDone = !isRunning && b.analysis_status === "complete";
+                  const isFailed = !isRunning && b.analysis_status === "failed";
+                  return (
+                    <div className="mt-3 pt-3 border-t border-border flex items-center justify-between">
+                      <div className="flex items-center gap-1.5">
+                        {isRunning && <Loader2 className="w-3.5 h-3.5 text-accent animate-spin" />}
+                        {isDone && <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />}
+                        {isFailed && <AlertCircle className="w-3.5 h-3.5 text-destructive" />}
+                        <span className="text-[11px] text-muted-foreground">
+                          {isRunning ? "Analyzing…" : isDone ? "Analysis complete" : isFailed ? "Analysis failed" : "Not analyzed"}
+                        </span>
+                      </div>
+                      <button
+                        onClick={(e) => handleRunAnalysis(e, b)}
+                        disabled={isRunning}
+                        className="flex items-center gap-1 text-[11px] font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {isRunning ? null : isDone || isFailed ? (
+                          <RefreshCw className="w-3 h-3" />
+                        ) : (
+                          <Sparkles className="w-3 h-3" />
+                        )}
+                        {isRunning ? null : isDone ? "Re-run" : isFailed ? "Retry" : "Run Analysis"}
+                      </button>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           ))}
