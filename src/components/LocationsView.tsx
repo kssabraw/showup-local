@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, CheckCircle2, AlertCircle } from "lucide-react";
+import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, CheckCircle2, AlertCircle, Trash2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Badge } from "@/components/ui/badge";
 
@@ -25,6 +25,8 @@ interface BusinessProfile {
 const LocationsView = () => {
   const [businesses, setBusinesses] = useState<BusinessProfile[]>([]);
   const [loading, setLoading] = useState(true);
+  const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [removing, setRemoving] = useState(false);
 
   useEffect(() => {
     fetchBusinesses();
@@ -45,6 +47,26 @@ const LocationsView = () => {
       setLoading(false);
     }
   };
+
+  const handleRemove = async () => {
+    if (!confirmId) return;
+    setRemoving(true);
+    try {
+      const { error } = await supabase
+        .from("business_profiles")
+        .delete()
+        .eq("id", confirmId);
+      if (error) throw error;
+      setBusinesses((prev) => prev.filter((b) => b.id !== confirmId));
+    } catch (err) {
+      console.error("Error removing business:", err);
+    } finally {
+      setRemoving(false);
+      setConfirmId(null);
+    }
+  };
+
+  const confirmBusiness = businesses.find((b) => b.id === confirmId);
 
   if (loading) {
     return (
@@ -96,25 +118,34 @@ const LocationsView = () => {
                     <h3 className="text-sm font-semibold text-foreground">{b.business_name}</h3>
                     <p className="text-xs text-muted-foreground mt-0.5">{b.gbp_category}</p>
                   </div>
-                  {b.gbp_rating != null && (
-                    <div className="flex items-center gap-1 flex-shrink-0">
-                      <Star className="w-3.5 h-3.5 text-warning fill-warning" />
-                      <span className="text-xs font-semibold text-foreground">{b.gbp_rating}</span>
-                      {b.gbp_review_count != null && (
-                        <span className="text-xs text-muted-foreground">({b.gbp_review_count})</span>
-                      )}
-                    </div>
-                  )}
-                  <Badge
-                    variant={b.external_synced ? "default" : "destructive"}
-                    className="flex items-center gap-1 text-[10px] px-2 py-0.5"
-                  >
-                    {b.external_synced ? (
-                      <><CheckCircle2 className="w-3 h-3" /> Synced</>
-                    ) : (
-                      <><AlertCircle className="w-3 h-3" /> Not synced</>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    {b.gbp_rating != null && (
+                      <div className="flex items-center gap-1">
+                        <Star className="w-3.5 h-3.5 text-warning fill-warning" />
+                        <span className="text-xs font-semibold text-foreground">{b.gbp_rating}</span>
+                        {b.gbp_review_count != null && (
+                          <span className="text-xs text-muted-foreground">({b.gbp_review_count})</span>
+                        )}
+                      </div>
                     )}
-                  </Badge>
+                    <Badge
+                      variant={b.external_synced ? "default" : "destructive"}
+                      className="flex items-center gap-1 text-[10px] px-2 py-0.5"
+                    >
+                      {b.external_synced ? (
+                        <><CheckCircle2 className="w-3 h-3" /> Synced</>
+                      ) : (
+                        <><AlertCircle className="w-3 h-3" /> Not synced</>
+                      )}
+                    </Badge>
+                    <button
+                      onClick={() => setConfirmId(b.id)}
+                      className="p-1.5 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                      title="Remove location"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-xs text-muted-foreground">
@@ -148,6 +179,34 @@ const LocationsView = () => {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Confirmation dialog */}
+      {confirmId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="bg-card border border-border rounded-xl p-6 max-w-sm w-full mx-4 shadow-xl">
+            <h2 className="text-base font-semibold text-foreground">Remove location?</h2>
+            <p className="text-sm text-muted-foreground mt-2">
+              <span className="font-medium text-foreground">{confirmBusiness?.business_name}</span> will be permanently removed from your account. This cannot be undone.
+            </p>
+            <div className="flex gap-3 mt-5">
+              <button
+                onClick={() => setConfirmId(null)}
+                disabled={removing}
+                className="flex-1 px-4 py-2 rounded-lg border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRemove}
+                disabled={removing}
+                className="flex-1 px-4 py-2 rounded-lg bg-destructive text-destructive-foreground text-sm font-medium hover:opacity-90 transition-opacity flex items-center justify-center gap-2"
+              >
+                {removing ? <Loader2 className="w-4 h-4 animate-spin" /> : "Remove"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
