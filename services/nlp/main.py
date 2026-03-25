@@ -93,7 +93,7 @@ def extract_zones(html: str) -> Dict[str, str]:
     h2h3_tags = soup.find_all(["h2", "h3"])
     h2h3_text = " ".join(t.get_text(separator=" ", strip=True) for t in h2h3_tags)
 
-    # Body: everything else (strip scripts/styles)
+    # Body: everything else (strip scripts/styles/headings)
     for tag in soup(["script", "style", "noscript", "title", "h1", "h2", "h3"]):
         tag.decompose()
     body_text = soup.get_text(separator=" ", strip=True)
@@ -114,6 +114,10 @@ def clean_text(text: str) -> str:
 
 
 def get_lsi_keywords_for_zone(zone_docs: List[str], top_n: int = 30) -> List[dict]:
+    """
+    Returns the top TF-IDF terms actually present in this zone across competitor pages.
+    Score = mean TF-IDF across all pages — no blending, no external weighting.
+    """
     cleaned = [clean_text(d) for d in zone_docs if d and len(d.strip()) > 5]
     if len(cleaned) < 2:
         return []
@@ -138,6 +142,11 @@ def get_lsi_keywords_for_zone(zone_docs: List[str], top_n: int = 30) -> List[dic
 
 
 def get_related_keywords_for_zone(zone_docs: List[str], keyword: str, top_n: int = 20) -> List[dict]:
+    """
+    Returns terms from this zone that are most semantically related to the target keyword.
+    Score = pure cosine similarity between the keyword vector and each feature term
+    in the zone's TF-IDF space. No blending with page frequency.
+    """
     cleaned = [clean_text(d) for d in zone_docs if d and len(d.strip()) > 5]
     if not cleaned:
         return []
@@ -148,26 +157,26 @@ def get_related_keywords_for_zone(zone_docs: List[str], keyword: str, top_n: int
         min_df=1
     )
     try:
-        all_docs = cleaned + [keyword]
-        tfidf_matrix = vectorizer.fit_transform(all_docs)
+        # Include the keyword as a document so it lands in the same vector space
+        tfidf_matrix = vectorizer.fit_transform(cleaned + [keyword])
     except ValueError:
         return []
     feature_names = vectorizer.get_feature_names_out()
-    keyword_vec = tfidf_matrix[-1]
-    page_matrix = tfidf_matrix[:-1]
-    mean_page_vec = page_matrix.mean(axis=0)
-    keyword_array = np.asarray(keyword_vec.todense())
+
+    # Vector for the keyword document
+    keyword_vec = np.asarray(tfidf_matrix[-1].todense())
+
+    # Cosine similarity between the keyword and each individual feature term
     feature_matrix = np.eye(len(feature_names))
-    similarities = cosine_similarity(keyword_array, feature_matrix)[0]
-    page_mean = np.asarray(mean_page_vec).flatten()
-    combined_score = similarities * 0.6 + (page_mean / (page_mean.max() + 1e-9)) * 0.4
-    top_indices = combined_score.argsort()[-top_n:][::-1]
+    similarities = cosine_similarity(keyword_vec, feature_matrix)[0]
+
+    top_indices = similarities.argsort()[-top_n:][::-1]
     keyword_clean = clean_text(keyword)
     results = []
     for i in top_indices:
         term = feature_names[i]
-        if term != keyword_clean and combined_score[i] > 0:
-            results.append({"term": term, "score": round(float(combined_score[i]), 4), "type": "related"})
+        if term != keyword_clean and similarities[i] > 0:
+            results.append({"term": term, "score": round(float(similarities[i]), 4), "type": "related"})
     return results[:top_n]
 
 
@@ -211,7 +220,7 @@ async def analyze(request: AnalysisRequest):
         body=get_lsi_keywords_for_zone(zone_buckets["body"]),
     )
 
-    # Related keywords per zone
+    # Related keywords per zone — pure cosine similarity, no blending
     related = ZoneKeywords(
         title=get_related_keywords_for_zone(zone_buckets["title"], request.keyword),
         h1=get_related_keywords_for_zone(zone_buckets["h1"], request.keyword),
@@ -219,7 +228,7 @@ async def analyze(request: AnalysisRequest):
         body=get_related_keywords_for_zone(zone_buckets["body"], request.keyword),
     )
 
-    # Quadgrams still run on full page text
+    # Quadgrams run on full page text
     quadgrams = get_top_quadgrams(pages)
 
     return AnalysisResponse(lsi_keywords=lsi, related_keywords=related, top_quadgrams=quadgrams)
