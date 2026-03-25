@@ -93,11 +93,12 @@ GOOGLE_NLP_MAX_BYTES     = 100_000
 SERP_RESULT_COUNT = 10
 
 # Domains to skip — directories, aggregators, social, video
+# reddit.com and linkedin.com are intentionally whitelisted
 SKIP_DOMAINS = {
     "yelp.com", "yellowpages.com", "bbb.org", "angi.com", "thumbtack.com",
     "homeadvisor.com", "houzz.com", "facebook.com", "instagram.com",
-    "twitter.com", "x.com", "linkedin.com", "youtube.com", "tiktok.com",
-    "wikipedia.org", "reddit.com", "quora.com", "amazon.com", "ebay.com",
+    "twitter.com", "x.com", "youtube.com", "tiktok.com",
+    "wikipedia.org", "quora.com", "amazon.com", "ebay.com",
     "angieslist.com", "nextdoor.com", "mapquest.com", "maps.google.com",
 }
 
@@ -164,10 +165,7 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
         data = response.json()
 
         urls = []
-        tasks = (
-            data.get("tasks") or []
-        )
-        for task in tasks:
+        for task in (data.get("tasks") or []):
             for result in (task.get("result") or []):
                 for item in (result.get("items") or []):
                     if item.get("type") != "organic":
@@ -178,7 +176,7 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
                     # Skip non-HTML extensions
                     if re.search(r'\.(pdf|docx?|xlsx?|pptx?|zip)$', url, re.I):
                         continue
-                    # Skip blacklisted domains
+                    # Skip blocklisted domains
                     domain = re.sub(r'^www\.', '', httpx.URL(url).host)
                     if any(domain == d or domain.endswith('.' + d) for d in SKIP_DOMAINS):
                         continue
@@ -232,8 +230,7 @@ async def scrape_urls(urls: List[str]) -> List[str]:
     Returns only non-empty HTML strings — failed pages are silently dropped.
     """
     async with httpx.AsyncClient() as client:
-        tasks = [scrape_url(url, client) for url in urls]
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*[scrape_url(url, client) for url in urls])
 
     pages = [html for html in results if html]
     logger.info(f"Successfully scraped {len(pages)}/{len(urls)} pages")
@@ -525,12 +522,10 @@ async def analyze(request: AnalysisRequest):
             detail=f"Only {len(pages)} pages scraped successfully — need at least 2"
         )
 
-    # Step 3: parse zones
+    # Step 3: parse zones — zip urls and pages in order
     zone_buckets: Dict[str, List[str]] = {z: [] for z in ZONES + ["paragraphs"]}
-    scraped_urls = []   # track which URLs produced usable HTML (order matches pages)
-    for url, html in zip(urls, [h for h in await asyncio.gather(
-        *[asyncio.coroutine(lambda h=h: h)() for h in pages]  # identity passthrough
-    )]):
+    scraped_urls: List[str] = []
+    for url, html in zip(urls, pages):
         zones = extract_zones(html)
         for z in ZONES + ["paragraphs"]:
             zone_buckets[z].append(zones[z])
