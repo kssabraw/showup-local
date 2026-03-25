@@ -116,13 +116,28 @@ serve(async (req) => {
       const rawSubtypes = Array.isArray(p.subtypes) ? p.subtypes : (typeof p.subtypes === 'string' ? [p.subtypes] : []);
       const additionalCategories = rawSubtypes.filter((t: string) => t !== primaryCategory);
 
+      // Decode and clean the website URL — Outscraper sometimes returns
+      // query strings double-encoded. Strip UTM tracking params.
+      const rawSite = p.site || p.website || '';
+      let cleanWebsite = '';
+      if (rawSite) {
+        try {
+          const decoded = decodeURIComponent(rawSite);
+          const u = new URL(decoded);
+          ['utm_source','utm_medium','utm_campaign','utm_content','utm_term'].forEach(k => u.searchParams.delete(k));
+          cleanWebsite = u.search === '' ? u.origin + u.pathname : u.href;
+        } catch {
+          cleanWebsite = rawSite;
+        }
+      }
+
       const details = {
         place_id: p.place_id || p.google_id || '',
         name: p.name || '',
         description: p.description || '',
         address: p.full_address || p.address || '',
         phone: p.phone || '',
-        website: p.site || '',
+        website: cleanWebsite,
         logo: p.logo || '',
         photo: p.photo || '',
         category: primaryCategory,
