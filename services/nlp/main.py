@@ -847,7 +847,7 @@ Extract differentiators only from the page titles and H1s above. Look for speed 
 Return only valid JSON, no markdown or explanation."""
 
         message = await client.messages.create(
-            model="claude-3-5-haiku-20241022",
+            model="claude-haiku-4-5-20251001",
             max_tokens=1024,
             messages=[{'role': 'user', 'content': prompt}],
         )
