@@ -20,6 +20,7 @@ logger.info(f"Files in cwd: {os.listdir('.')}")
 
 try:
     from fastapi import FastAPI, HTTPException
+    from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel
     from typing import List, Dict, Optional
     import re
@@ -57,6 +58,23 @@ except Exception as e:
     raise
 
 app = FastAPI()
+
+# ── CORS ──────────────────────────────────────────────────────────────────────
+# Reads allowed origins from CORS_ORIGINS env var (comma-separated).
+# Falls back to * in development. Tighten to your Railway/Vercel frontend
+# URL in production via the Railway dashboard.
+_cors_origins_env = os.environ.get("CORS_ORIGINS", "*")
+CORS_ORIGINS = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+logger.info(f"CORS origins: {CORS_ORIGINS}")
+
 STOP_WORDS = set(stopwords.words('english'))
 
 # ── API credentials (set all four in Railway environment variables) ────────────
@@ -283,13 +301,6 @@ def get_related_keywords_for_zone(
     min_page_spread: float = RELATED_MIN_PAGE_SPREAD,
     min_similarity: float = RELATED_MIN_SIMILARITY,
 ) -> List[dict]:
-    """
-    Returns terms from this zone that:
-      1. Appear on >= 49% of competitor pages
-      2. Appear on pages topically close to the keyword
-
-    Score = mean cosine similarity (page → keyword) across pages containing the term.
-    """
     cleaned = [clean_text(d) for d in zone_docs if d and len(d.strip()) > 5]
     if len(cleaned) < 2:
         return []
@@ -345,11 +356,6 @@ def get_top_quadgrams(
     min_page_spread: float = QUADGRAM_MIN_PAGE_SPREAD,
     min_similarity: float = QUADGRAM_MIN_SIMILARITY,
 ) -> List[dict]:
-    """
-    Extracts 4-word phrases from <p> content only.
-    Filtered by page spread >= 49% and keyword cosine similarity.
-    No fixed top N.
-    """
     total_pages = len(paragraph_docs)
     min_pages_required = max(2, int(np.ceil(total_pages * min_page_spread)))
 
@@ -406,7 +412,6 @@ def get_top_quadgrams(
 # ── NLP: Google entity analysis ───────────────────────────────────────────────
 
 async def fetch_google_entities(text: str, client: httpx.AsyncClient) -> List[dict]:
-    """Single-page Google NLP entity call. Returns [] on any error."""
     if not GOOGLE_NLP_API_KEY or not text.strip():
         return []
     encoded = text.encode("utf-8")[:GOOGLE_NLP_MAX_BYTES]
@@ -430,11 +435,6 @@ async def get_google_entities(
     min_page_spread: float = ENTITY_MIN_PAGE_SPREAD,
     min_salience: float = ENTITY_MIN_SALIENCE,
 ) -> List[dict]:
-    """
-    Concurrent Google NLP entity analysis across all pages.
-    Filters: mean_salience >= 0.40 AND page spread >= 49%.
-    recommended_mentions = avg mention count across pages where entity appears.
-    """
     if not GOOGLE_NLP_API_KEY:
         return []
 
@@ -501,8 +501,7 @@ async def analyze(request: AnalysisRequest):
       2. ScrapeOwl   — fetch raw HTML for each URL concurrently
       3. NLP         — related keywords, quadgrams, Google entity analysis
 
-    Accepts optional `urls` list to skip the DataForSEO SERP step entirely
-    (useful for testing or manual URL override).
+    Pass optional `urls` to skip the DataForSEO SERP step (testing / override).
     """
     # Step 1: get URLs
     if request.urls:
@@ -522,7 +521,7 @@ async def analyze(request: AnalysisRequest):
             detail=f"Only {len(pages)} pages scraped successfully — need at least 2"
         )
 
-    # Step 3: parse zones — zip urls and pages in order
+    # Step 3: parse zones
     zone_buckets: Dict[str, List[str]] = {z: [] for z in ZONES + ["paragraphs"]}
     scraped_urls: List[str] = []
     for url, html in zip(urls, pages):
