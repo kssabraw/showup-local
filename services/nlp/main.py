@@ -1,3 +1,8 @@
+import sys
+import os
+print("NLP service starting...", flush=True)
+print(f"PORT={os.environ.get('PORT', 'not set')}", flush=True)
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List
@@ -11,13 +16,19 @@ from nltk.corpus import stopwords
 from nltk.util import ngrams
 from nltk.tokenize import word_tokenize
 
+print("Imports complete", flush=True)
+
 # Download required NLTK data on startup
 nltk.download('stopwords', quiet=True)
 nltk.download('punkt', quiet=True)
 nltk.download('punkt_tab', quiet=True)
 
+print("NLTK data downloaded", flush=True)
+
 app = FastAPI()
 STOP_WORDS = set(stopwords.words('english'))
+
+print("App initialized, ready to serve", flush=True)
 
 
 class AnalysisRequest(BaseModel):
