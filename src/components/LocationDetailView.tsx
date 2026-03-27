@@ -1021,9 +1021,14 @@ const LocationDetailView = ({
                 {bv.writer_execution_guide && (
                   <div className="border-t border-border pt-4 space-y-4">
                     <p className="text-xs font-semibold text-foreground uppercase tracking-wide">Writer Execution Guide</p>
-                    {Object.entries(bv.writer_execution_guide).map(([key, val]: [string, any]) => (
+                    {(() => {
+                      const GUIDE_LABELS: Record<string, string> = {
+                        ai_writing_rules: "Content Consistency Guidelines",
+                        seo_aeo_instructions: "Search Visibility Guidelines",
+                      };
+                      return Object.entries(bv.writer_execution_guide).map(([key, val]: [string, any]) => (
                       <div key={key}>
-                        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1">{key.replace(/_/g, ' ')}</p>
+                        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1">{GUIDE_LABELS[key] || key.replace(/_/g, ' ')}</p>
                         {typeof val === 'string' && <p className="text-xs text-foreground">{val}</p>}
                         {Array.isArray(val) && (
                           <ul className="space-y-0.5">{val.map((item: any, i: number) => (
@@ -1044,7 +1049,8 @@ const LocationDetailView = ({
                           </div>
                         )}
                       </div>
-                    ))}
+                    ));
+                    })()}
                   </div>
                 )}
               </div>
