@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, RefreshCw, CheckCircle2, AlertCircle, Sparkles } from "lucide-react";
+import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, RefreshCw, CheckCircle2, AlertCircle, Sparkles, Plus, Trash2, X } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 
 const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
@@ -61,6 +61,10 @@ const LocationDetailView = ({
   const [gbpRefreshStatus, setGbpRefreshStatus] = useState<"idle" | "success" | "error">("idle");
   const [editingDifferentiators, setEditingDifferentiators] = useState(false);
   const [differentiators, setDifferentiators] = useState<any[]>([]);
+  const [editingIcp, setEditingIcp] = useState(false);
+  const [icpSegments, setIcpSegments] = useState<any[]>([]);
+  const [icpReasoning, setIcpReasoning] = useState("");
+  const [savingIcp, setSavingIcp] = useState(false);
 
   useEffect(() => {
     fetchBusiness();
@@ -205,6 +209,65 @@ const LocationDetailView = ({
       .eq("id", business.id);
     setBusiness({ ...business, differentiators });
     setEditingDifferentiators(false);
+  };
+
+  const blankSegment = () => ({
+    label: "",
+    confidence: 0.8,
+    primary: false,
+    demographics: { description: "", situation: "" },
+    psychographics: { trigger: "", fears: [""], motivations: [""], buying_behavior: "" },
+    messaging: { tone: "", hooks: [""], trust_signals: [""] },
+  });
+
+  const startEditingIcp = (icp: any) => {
+    setIcpSegments(JSON.parse(JSON.stringify(icp?.segments || [])));
+    setIcpReasoning(icp?.reasoning || "");
+    setEditingIcp(true);
+  };
+
+  const saveIcp = async () => {
+    if (!business) return;
+    setSavingIcp(true);
+    const updated = { ...business.detected_icp, segments: icpSegments, reasoning: icpReasoning };
+    await supabase.from("business_profiles").update({ detected_icp: updated }).eq("id", business.id);
+    await fetchBusiness();
+    setEditingIcp(false);
+    setSavingIcp(false);
+  };
+
+  const updateSeg = (i: number, path: string[], value: any) => {
+    setIcpSegments(prev => {
+      const next = JSON.parse(JSON.stringify(prev));
+      let obj = next[i];
+      for (let k = 0; k < path.length - 1; k++) obj = obj[path[k]];
+      obj[path[path.length - 1]] = value;
+      return next;
+    });
+  };
+
+  const updateListItem = (segIdx: number, section: string, field: string, itemIdx: number, value: string) => {
+    setIcpSegments(prev => {
+      const next = JSON.parse(JSON.stringify(prev));
+      next[segIdx][section][field][itemIdx] = value;
+      return next;
+    });
+  };
+
+  const addListItem = (segIdx: number, section: string, field: string) => {
+    setIcpSegments(prev => {
+      const next = JSON.parse(JSON.stringify(prev));
+      next[segIdx][section][field] = [...(next[segIdx][section][field] || []), ""];
+      return next;
+    });
+  };
+
+  const removeListItem = (segIdx: number, section: string, field: string, itemIdx: number) => {
+    setIcpSegments(prev => {
+      const next = JSON.parse(JSON.stringify(prev));
+      next[segIdx][section][field].splice(itemIdx, 1);
+      return next;
+    });
   };
 
   if (loading) {
@@ -482,34 +545,60 @@ const LocationDetailView = ({
           <div className="bg-card border border-border rounded-xl p-5">
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-sm font-semibold text-foreground">Ideal Customer Profile (ICP)</h2>
-              {analysisStatus !== "running" && (
-                <button
-                  onClick={() => runAnalysis(business)}
-                  disabled={rescanning}
-                  className="flex items-center gap-1.5 text-xs font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  {rescanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                  {rescanning ? "Scanning..." : icp ? "Re-run" : "Scan Website"}
-                </button>
-              )}
+              <div className="flex items-center gap-3">
+                {icp && !editingIcp && (
+                  <button
+                    onClick={() => startEditingIcp(icp)}
+                    className="text-xs font-medium text-accent hover:underline"
+                  >
+                    Edit
+                  </button>
+                )}
+                {analysisStatus !== "running" && !editingIcp && (
+                  <button
+                    onClick={() => runAnalysis(business)}
+                    disabled={rescanning}
+                    className="flex items-center gap-1.5 text-xs font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {rescanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                    {rescanning ? "Scanning..." : icp ? "Re-run" : "Scan Website"}
+                  </button>
+                )}
+                {editingIcp && (
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => setEditingIcp(false)}
+                      className="text-xs text-muted-foreground hover:text-foreground"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={saveIcp}
+                      disabled={savingIcp}
+                      className="text-xs font-medium text-accent hover:underline disabled:opacity-40"
+                    >
+                      {savingIcp ? "Saving..." : "Save"}
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
-            {icp ? (
+
+            {/* View mode */}
+            {!editingIcp && icp && (
               <div className="space-y-4">
                 {icp.reasoning && (
                   <p className="text-xs text-muted-foreground">{icp.reasoning}</p>
                 )}
                 {(icp.segments || []).map((seg: any, i: number) => (
                   <div key={i} className="border border-border rounded-lg p-4 space-y-3">
-                    {/* Segment header */}
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         {seg.primary && <CheckCircle2 className="w-4 h-4 text-success flex-shrink-0" />}
                         <span className="text-sm font-semibold text-foreground">{seg.label}</span>
                       </div>
-                      <span className="text-xs text-muted-foreground">{Math.round(seg.confidence * 100)}% confidence</span>
+                      <span className="text-xs text-muted-foreground">{Math.round((seg.confidence || 0) * 100)}% confidence</span>
                     </div>
-
-                    {/* Demographics */}
                     {seg.demographics && (
                       <div className="space-y-1">
                         <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Who They Are</p>
@@ -517,74 +606,35 @@ const LocationDetailView = ({
                         <p className="text-xs text-muted-foreground">{seg.demographics.situation}</p>
                       </div>
                     )}
-
-                    {/* Psychographics */}
                     {seg.psychographics && (
                       <div className="space-y-2 border-t border-border pt-3">
                         <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Psychographics</p>
-                        {seg.psychographics.trigger && (
-                          <div>
-                            <span className="text-xs font-medium text-foreground">Trigger: </span>
-                            <span className="text-xs text-muted-foreground">{seg.psychographics.trigger}</span>
-                          </div>
-                        )}
+                        {seg.psychographics.trigger && <p className="text-xs text-muted-foreground"><span className="font-medium text-foreground">Trigger: </span>{seg.psychographics.trigger}</p>}
                         {seg.psychographics.fears?.length > 0 && (
-                          <div>
-                            <p className="text-xs font-medium text-foreground mb-1">Fears</p>
-                            <ul className="space-y-0.5">
-                              {seg.psychographics.fears.map((f: string, j: number) => (
-                                <li key={j} className="text-xs text-muted-foreground flex gap-1.5"><span>•</span>{f}</li>
-                              ))}
-                            </ul>
+                          <div><p className="text-xs font-medium text-foreground mb-1">Fears</p>
+                            <ul className="space-y-0.5">{seg.psychographics.fears.map((f: string, j: number) => <li key={j} className="text-xs text-muted-foreground flex gap-1.5"><span>•</span>{f}</li>)}</ul>
                           </div>
                         )}
                         {seg.psychographics.motivations?.length > 0 && (
-                          <div>
-                            <p className="text-xs font-medium text-foreground mb-1">Motivations</p>
-                            <ul className="space-y-0.5">
-                              {seg.psychographics.motivations.map((m: string, j: number) => (
-                                <li key={j} className="text-xs text-muted-foreground flex gap-1.5"><span>•</span>{m}</li>
-                              ))}
-                            </ul>
+                          <div><p className="text-xs font-medium text-foreground mb-1">Motivations</p>
+                            <ul className="space-y-0.5">{seg.psychographics.motivations.map((m: string, j: number) => <li key={j} className="text-xs text-muted-foreground flex gap-1.5"><span>•</span>{m}</li>)}</ul>
                           </div>
                         )}
-                        {seg.psychographics.buying_behavior && (
-                          <div>
-                            <span className="text-xs font-medium text-foreground">Buying Behavior: </span>
-                            <span className="text-xs text-muted-foreground">{seg.psychographics.buying_behavior}</span>
-                          </div>
-                        )}
+                        {seg.psychographics.buying_behavior && <p className="text-xs text-muted-foreground"><span className="font-medium text-foreground">Buying Behavior: </span>{seg.psychographics.buying_behavior}</p>}
                       </div>
                     )}
-
-                    {/* Messaging */}
                     {seg.messaging && (
                       <div className="space-y-2 border-t border-border pt-3">
                         <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Messaging</p>
-                        {seg.messaging.tone && (
-                          <div>
-                            <span className="text-xs font-medium text-foreground">Tone: </span>
-                            <span className="text-xs text-muted-foreground">{seg.messaging.tone}</span>
-                          </div>
-                        )}
+                        {seg.messaging.tone && <p className="text-xs text-muted-foreground"><span className="font-medium text-foreground">Tone: </span>{seg.messaging.tone}</p>}
                         {seg.messaging.hooks?.length > 0 && (
-                          <div>
-                            <p className="text-xs font-medium text-foreground mb-1">Hooks</p>
-                            <ul className="space-y-0.5">
-                              {seg.messaging.hooks.map((h: string, j: number) => (
-                                <li key={j} className="text-xs text-muted-foreground flex gap-1.5"><span>•</span>{h}</li>
-                              ))}
-                            </ul>
+                          <div><p className="text-xs font-medium text-foreground mb-1">Hooks</p>
+                            <ul className="space-y-0.5">{seg.messaging.hooks.map((h: string, j: number) => <li key={j} className="text-xs text-muted-foreground flex gap-1.5"><span>•</span>{h}</li>)}</ul>
                           </div>
                         )}
                         {seg.messaging.trust_signals?.length > 0 && (
-                          <div>
-                            <p className="text-xs font-medium text-foreground mb-1">Trust Signals</p>
-                            <ul className="space-y-0.5">
-                              {seg.messaging.trust_signals.map((t: string, j: number) => (
-                                <li key={j} className="text-xs text-muted-foreground flex gap-1.5"><span>•</span>{t}</li>
-                              ))}
-                            </ul>
+                          <div><p className="text-xs font-medium text-foreground mb-1">Trust Signals</p>
+                            <ul className="space-y-0.5">{seg.messaging.trust_signals.map((t: string, j: number) => <li key={j} className="text-xs text-muted-foreground flex gap-1.5"><span>•</span>{t}</li>)}</ul>
                           </div>
                         )}
                       </div>
@@ -592,11 +642,97 @@ const LocationDetailView = ({
                   </div>
                 ))}
               </div>
-            ) : (
+            )}
+
+            {/* Edit mode */}
+            {editingIcp && (
+              <div className="space-y-4">
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide block mb-1">Reasoning</label>
+                  <textarea
+                    value={icpReasoning}
+                    onChange={e => setIcpReasoning(e.target.value)}
+                    rows={2}
+                    className="w-full text-xs rounded-md border border-border bg-background px-3 py-2 text-foreground resize-none focus:outline-none focus:ring-1 focus:ring-accent"
+                  />
+                </div>
+                {icpSegments.map((seg, i) => (
+                  <div key={i} className="border border-border rounded-lg p-4 space-y-4">
+                    {/* Segment header */}
+                    <div className="flex items-center justify-between gap-2">
+                      <input
+                        value={seg.label}
+                        onChange={e => updateSeg(i, ["label"], e.target.value)}
+                        placeholder="Segment name"
+                        className="flex-1 text-sm font-semibold rounded-md border border-border bg-background px-3 py-1.5 text-foreground focus:outline-none focus:ring-1 focus:ring-accent"
+                      />
+                      <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+                        <input type="checkbox" checked={seg.primary} onChange={e => updateSeg(i, ["primary"], e.target.checked)} className="accent-accent" />
+                        Primary
+                      </label>
+                      <button onClick={() => setIcpSegments(prev => prev.filter((_, idx) => idx !== i))} className="text-muted-foreground hover:text-destructive">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    {/* Demographics */}
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Who They Are</p>
+                      <input value={seg.demographics?.description || ""} onChange={e => updateSeg(i, ["demographics", "description"], e.target.value)} placeholder="Demographics description" className="w-full text-xs rounded-md border border-border bg-background px-3 py-1.5 text-foreground focus:outline-none focus:ring-1 focus:ring-accent" />
+                      <input value={seg.demographics?.situation || ""} onChange={e => updateSeg(i, ["demographics", "situation"], e.target.value)} placeholder="Situation" className="w-full text-xs rounded-md border border-border bg-background px-3 py-1.5 text-foreground focus:outline-none focus:ring-1 focus:ring-accent" />
+                    </div>
+
+                    {/* Psychographics */}
+                    <div className="space-y-2 border-t border-border pt-3">
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Psychographics</p>
+                      <input value={seg.psychographics?.trigger || ""} onChange={e => updateSeg(i, ["psychographics", "trigger"], e.target.value)} placeholder="Trigger (moment that causes them to search)" className="w-full text-xs rounded-md border border-border bg-background px-3 py-1.5 text-foreground focus:outline-none focus:ring-1 focus:ring-accent" />
+                      {(["fears", "motivations"] as const).map(field => (
+                        <div key={field}>
+                          <p className="text-xs font-medium text-foreground mb-1 capitalize">{field}</p>
+                          {(seg.psychographics?.[field] || []).map((val: string, j: number) => (
+                            <div key={j} className="flex gap-1.5 mb-1">
+                              <input value={val} onChange={e => updateListItem(i, "psychographics", field, j, e.target.value)} placeholder={`${field.slice(0, -1)}...`} className="flex-1 text-xs rounded-md border border-border bg-background px-3 py-1.5 text-foreground focus:outline-none focus:ring-1 focus:ring-accent" />
+                              <button onClick={() => removeListItem(i, "psychographics", field, j)} className="text-muted-foreground hover:text-destructive"><X className="w-3.5 h-3.5" /></button>
+                            </div>
+                          ))}
+                          <button onClick={() => addListItem(i, "psychographics", field)} className="text-xs text-accent hover:underline flex items-center gap-1"><Plus className="w-3 h-3" />Add {field.slice(0, -1)}</button>
+                        </div>
+                      ))}
+                      <input value={seg.psychographics?.buying_behavior || ""} onChange={e => updateSeg(i, ["psychographics", "buying_behavior"], e.target.value)} placeholder="Buying behavior" className="w-full text-xs rounded-md border border-border bg-background px-3 py-1.5 text-foreground focus:outline-none focus:ring-1 focus:ring-accent" />
+                    </div>
+
+                    {/* Messaging */}
+                    <div className="space-y-2 border-t border-border pt-3">
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Messaging</p>
+                      <input value={seg.messaging?.tone || ""} onChange={e => updateSeg(i, ["messaging", "tone"], e.target.value)} placeholder="Tone" className="w-full text-xs rounded-md border border-border bg-background px-3 py-1.5 text-foreground focus:outline-none focus:ring-1 focus:ring-accent" />
+                      {(["hooks", "trust_signals"] as const).map(field => (
+                        <div key={field}>
+                          <p className="text-xs font-medium text-foreground mb-1">{field === "hooks" ? "Hooks" : "Trust Signals"}</p>
+                          {(seg.messaging?.[field] || []).map((val: string, j: number) => (
+                            <div key={j} className="flex gap-1.5 mb-1">
+                              <input value={val} onChange={e => updateListItem(i, "messaging", field, j, e.target.value)} placeholder={field === "hooks" ? "Hook..." : "Trust signal..."} className="flex-1 text-xs rounded-md border border-border bg-background px-3 py-1.5 text-foreground focus:outline-none focus:ring-1 focus:ring-accent" />
+                              <button onClick={() => removeListItem(i, "messaging", field, j)} className="text-muted-foreground hover:text-destructive"><X className="w-3.5 h-3.5" /></button>
+                            </div>
+                          ))}
+                          <button onClick={() => addListItem(i, "messaging", field)} className="text-xs text-accent hover:underline flex items-center gap-1"><Plus className="w-3 h-3" />Add {field === "hooks" ? "hook" : "trust signal"}</button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                <button
+                  onClick={() => setIcpSegments(prev => [...prev, blankSegment()])}
+                  className="w-full flex items-center justify-center gap-2 rounded-lg border border-dashed border-border py-2.5 text-xs text-muted-foreground hover:text-foreground hover:border-accent transition-colors"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Add Segment
+                </button>
+              </div>
+            )}
+
+            {/* Empty state */}
+            {!editingIcp && !icp && (
               <p className="text-sm text-muted-foreground text-center py-4">
-                {analysisStatus === "running"
-                  ? "Detecting ICP…"
-                  : "Click Scan Website above to auto-detect ICP."}
+                {analysisStatus === "running" ? "Detecting ICP…" : "Click Scan Website above to auto-detect ICP."}
               </p>
             )}
           </div>
