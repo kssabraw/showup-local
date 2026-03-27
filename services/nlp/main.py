@@ -591,12 +591,69 @@ STATE_ABBREVS = {
     'tx','ut','vt','va','wa','wv','wi','wy',
 }
 SERVICE_WORDS = {
+    # Home services
     'repair','service','services','installation','install','replacement',
     'maintenance','inspection','cleaning','emergency','plumbing','hvac',
     'electrical','roofing','pest','landscaping','remodeling','painting',
     'flooring','gutters','siding','windows','doors','concrete','fencing',
-    'generator','insulation','waterproofing','restoration',
+    'generator','insulation','waterproofing','restoration','handyman',
+    'appliance','garage','deck','patio','pool','irrigation','sprinkler',
+    'locksmith','mold','asbestos','foundation','basement','septic','drain',
+    # IT / Tech
+    'managed','cybersecurity','cyber','cloud','network','backup','helpdesk',
+    'support','monitoring','infrastructure','security','compliance','voip',
+    'microsoft','azure','wireless','server','firewall','endpoint','siem',
+    'consulting','solutions','technology','tech','software','hardware','it',
+    # Legal
+    'attorney','lawyer','litigation','injury','divorce','criminal','estate',
+    'bankruptcy','immigration','employment','law','legal','counsel','defense',
+    # Medical / Dental / Health
+    'dental','dentist','orthodontics','medical','clinic','therapy','therapist',
+    'chiropractic','physical','wellness','cosmetic','implants','pediatric',
+    'dermatology','optometry','vision','hearing','counseling','rehabilitation',
+    # Financial
+    'accounting','bookkeeping','tax','cpa','financial','wealth','insurance',
+    'mortgage','lending','investment','payroll','audit',
+    # Other professional services
+    'marketing','seo','advertising','branding','design','photography',
+    'catering','moving','storage','towing','auto','automotive','collision',
+    'salon','spa','fitness','training','coaching','tutoring','staffing',
+    'cleaning','janitorial','security','alarm','surveillance',
 }
+
+# First URL segment patterns that indicate blog/content/editorial pages
+BLOG_SLUGS = {
+    'blog','news','insights','articles','resources','resource','post','posts',
+    'updates','press','media','events','case-studies','whitepapers','guides',
+    'tips','podcast','webinars','newsletter','stories','learn','library',
+    'knowledge-base','kb','forum','community','careers','jobs',
+}
+
+# First URL segment patterns to skip entirely
+SKIP_SLUGS = {
+    'privacy','terms','sitemap','search','tag','tags','category','categories',
+    'author','wp-content','wp-admin','wp-json','cart','checkout','account',
+    'login','register','feed','rss','cdn','admin','dashboard','portal',
+}
+
+# URL segment patterns that strongly indicate location/area pages
+LOCATION_SLUGS = {
+    'service-area','service-areas','areas-we-serve','areas-served',
+    'locations','location','cities','city','coverage','coverage-area',
+    'near-me','local','where-we-serve','our-locations',
+}
+
+# Top-level slugs that are definitely NOT service pages
+ABOUT_SLUGS = {
+    'about','about-us','contact','contact-us','team','staff','our-team',
+    'reviews','testimonials','gallery','portfolio','pricing','home','index',
+    'sitemap','accessibility','disclaimer','refund','shipping',
+}
+
+_STATE_ABBREV_PATTERN = re.compile(
+    r'(?:^|[-/])(' + '|'.join(STATE_ABBREVS) + r')(?:$|[-/])',
+    re.IGNORECASE
+)
 
 CRAWL_HEADERS = {
     'User-Agent': 'ShowUPLocalBot/1.0 (business-page-discovery; respects robots.txt)',
@@ -605,26 +662,52 @@ CRAWL_HEADERS = {
 
 def classify_page_type(url: str, title: str = '', h1: str = '') -> dict:
     """
-    Rule-based page type classifier. Works on URL path alone — title/h1 are
-    optional enrichment when available.
+    Rule-based page type classifier.
     Returns { type, primary_service, primary_city }
+    Types: service | location | city_service | blog | other
     """
     import urllib.parse
     path = urllib.parse.urlparse(url).path.lower().rstrip('/')
     combined = f"{path} {title} {h1}".lower()
+    segments = [s for s in path.split('/') if s]
+    first = segments[0] if segments else ''
+    path_words = set(re.split(r'[-_]', ' '.join(segments)))
 
-    path_parts = set(re.split(r'[-/_]', path))
+    # ── Blog / content pages ──────────────────────────────────────────────────
+    if first in BLOG_SLUGS or (len(segments) > 1 and segments[0] in BLOG_SLUGS):
+        return {'type': 'blog', 'primary_service': None, 'primary_city': None}
+
+    # ── Skip patterns (admin, privacy, etc.) ─────────────────────────────────
+    if first in SKIP_SLUGS:
+        return {'type': 'other', 'primary_service': None, 'primary_city': None}
+
+    # ── Geo detection ─────────────────────────────────────────────────────────
     has_geo = bool(
-        path_parts & STATE_ABBREVS or
-        re.search(r'\b\d{5}\b', combined)  # zip code in title/h1
+        # State abbrev as standalone path word (e.g. /dallas-tx, /services/houston-tx)
+        _STATE_ABBREV_PATTERN.search(path) or
+        # Zip code anywhere
+        re.search(r'\b\d{5}\b', combined) or
+        # Explicit location slug
+        any(s in LOCATION_SLUGS for s in segments) or
+        # "near" as a path word
+        'near' in path_words
     )
-    has_service = bool(path_parts & SERVICE_WORDS or any(w in combined for w in SERVICE_WORDS))
 
+    # ── Service detection ─────────────────────────────────────────────────────
+    has_service = bool(
+        path_words & SERVICE_WORDS or
+        any(w in combined for w in SERVICE_WORDS)
+    )
+
+    # ── Classification ────────────────────────────────────────────────────────
     if has_geo and has_service:
         page_type = 'city_service'
     elif has_geo:
         page_type = 'location'
     elif has_service:
+        page_type = 'service'
+    elif len(segments) == 1 and first not in ABOUT_SLUGS:
+        # Top-level pages not otherwise classified are likely service/product pages
         page_type = 'service'
     else:
         page_type = 'other'
@@ -793,8 +876,18 @@ async def crawl_website(website_url: str, max_pages: int = 200) -> List[dict]:
         homepage = f"{parsed.scheme}://{parsed.netloc}"
         all_urls = list(dict.fromkeys([homepage] + discovered))  # dedup, preserve order
 
-        # Classify by URL pattern — no per-page fetches needed
-        pages = [_make_page_record(u) for u in all_urls[:max_pages]]
+        # Classify all discovered URLs
+        all_pages = [_make_page_record(u) for u in all_urls]
+
+        # Prioritise: service/location/city_service first, then other, blog last
+        def _sort_key(p: dict) -> int:
+            return {'city_service': 0, 'service': 1, 'location': 2, 'other': 3, 'blog': 4}.get(p['page_type'], 3)
+
+        pages = sorted(all_pages, key=_sort_key)[:max_pages]
+        type_counts = {}
+        for p in pages:
+            type_counts[p['page_type']] = type_counts.get(p['page_type'], 0) + 1
+        logger.info(f"Page classification: {type_counts}")
 
     logger.info(f"Page discovery complete: {len(pages)} pages from {website_url}")
     return pages
