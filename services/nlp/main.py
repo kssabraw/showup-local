@@ -852,7 +852,12 @@ Return only valid JSON, no markdown or explanation."""
             messages=[{'role': 'user', 'content': prompt}],
         )
 
-        result = json_lib.loads(message.content[0].text)
+        text = message.content[0].text.strip()
+        # Strip markdown code fences if model wrapped the JSON
+        if text.startswith("```"):
+            text = re.sub(r'^```(?:json)?\s*', '', text)
+            text = re.sub(r'\s*```$', '', text.strip())
+        result = json_lib.loads(text)
         return result
 
     except Exception as e:
