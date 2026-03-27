@@ -40,6 +40,7 @@ const PAGE_TYPE_LABELS: Record<string, { label: string; color: string }> = {
   service:      { label: "Service",         color: "bg-blue-500/10 text-blue-600" },
   location:     { label: "Location",        color: "bg-green-500/10 text-green-600" },
   city_service: { label: "City + Service",  color: "bg-purple-500/10 text-purple-600" },
+  blog:         { label: "Blog / Content",  color: "bg-orange-500/10 text-orange-600" },
   other:        { label: "Other",           color: "bg-muted text-muted-foreground" },
 };
 
