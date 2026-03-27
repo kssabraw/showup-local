@@ -818,7 +818,7 @@ async def analyze_business_with_anthropic(
             )
         pages_text = '\n'.join(page_lines) if page_lines else '  (no pages discovered)'
 
-        prompt = f"""Analyze this local service business and return a JSON object.
+        prompt = f"""You are an expert marketing strategist. Analyze this local service business and identify its ideal customer profiles (ICPs) with full psychographic detail.
 
 Business Name: {business_name}
 GBP Primary Category: {gbp_category}
@@ -827,20 +827,39 @@ All GBP Categories: {', '.join(gbp_categories) if gbp_categories else 'N/A'}
 Discovered website pages:
 {pages_text}
 
+Identify 1-3 distinct customer segments this business serves. For each segment provide deep psychographic insight a marketer could use to write targeted local SEO content.
+
 Return a JSON object with exactly this structure:
 {{
   "detected_icp": {{
-    "primary": "<icp_type>",
-    "confidence": <0.0-1.0>,
-    "all": [{{"type": "<icp_type>", "confidence": <0.0-1.0>}}],
-    "reasoning": "<1-2 sentences>"
+    "segments": [
+      {{
+        "label": "<short human-readable segment name, e.g. 'Emergency Homeowner' or 'Commercial Facilities Manager'>",
+        "confidence": <0.0-1.0>,
+        "primary": <true for the top segment, false for others>,
+        "demographics": {{
+          "description": "<age range, income level, ownership status, or business size — whatever is most relevant>",
+          "situation": "<the life or business situation that makes them a customer>"
+        }},
+        "psychographics": {{
+          "trigger": "<the specific moment or event that causes them to search — be concrete>",
+          "fears": ["<fear 1>", "<fear 2>", "<fear 3>"],
+          "motivations": ["<motivation 1>", "<motivation 2>"],
+          "buying_behavior": "<1 sentence describing how they evaluate and choose a provider>"
+        }},
+        "messaging": {{
+          "tone": "<the tone that resonates with this segment, e.g. 'Calm and reassuring' or 'Direct and ROI-focused'>",
+          "hooks": ["<headline hook 1>", "<headline hook 2>", "<headline hook 3>"],
+          "trust_signals": ["<trust signal 1>", "<trust signal 2>", "<trust signal 3>"]
+        }}
+      }}
+    ],
+    "reasoning": "<2-3 sentences explaining why these segments were chosen based on the business category and page structure>"
   }},
   "differentiators": [
-    {{"claim": "<specific claim>", "mechanism": "<how achieved>", "type": "<speed|cost|guarantee|specialization|availability|other>"}}
+    {{"claim": "<specific claim from page titles or H1s>", "mechanism": "<how they achieve or back up the claim>", "type": "<speed|cost|guarantee|specialization|availability|other>"}}
   ]
 }}
-
-ICP types: emergency_homeowner, general_homeowner, commercial, property_manager, vulnerable_homeowner, trade_contractor, landlord
 
 Extract differentiators only from the page titles and H1s above. Look for speed claims, pricing models, guarantees, specializations. If none are evident, return an empty array.
 
