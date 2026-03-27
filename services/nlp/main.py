@@ -573,6 +573,17 @@ class BusinessAnalysisResponse(BaseModel):
     analysis_status: str   # "complete" | "partial" | "failed"
 
 
+class BrandVoiceRequest(BaseModel):
+    website_url: str
+    business_name: str
+    existing_pages: List[dict] = []
+
+
+class BrandVoiceResponse(BaseModel):
+    brand_voice: Optional[dict]
+    pages_sampled: int
+
+
 STATE_ABBREVS = {
     'al','ak','az','ar','ca','co','ct','de','fl','ga','hi','id','il','in',
     'ia','ks','ky','la','me','md','ma','mi','mn','ms','mo','mt','ne','nv',
@@ -935,3 +946,201 @@ async def analyze_business(request: BusinessAnalysisRequest):
         pages_crawled=len(pages),
         analysis_status=status,
     )
+
+
+# ── Brand Voice ────────────────────────────────────────────────────────────────
+
+async def _fetch_page_text(url: str, client: httpx.AsyncClient) -> str:
+    """Fetch a page and extract meaningful paragraph text."""
+    try:
+        resp = await client.get(url, timeout=10.0, follow_redirects=True)
+        if resp.status_code != 200:
+            return ""
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+            tag.decompose()
+        paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
+        paragraphs = [p for p in paragraphs if len(p) > 40]
+        return " ".join(paragraphs[:30])
+    except Exception:
+        return ""
+
+
+async def analyze_brand_voice_with_anthropic(page_contents: List[str], business_name: str) -> dict:
+    """Use Claude Haiku to extract brand voice from sampled page copy."""
+    if not ANTHROPIC_API_KEY:
+        logger.warning("ANTHROPIC_API_KEY not set — skipping brand voice analysis")
+        return {}
+
+    content_text = "\n\n---\n\n".join(page_contents) if page_contents else "(no content available)"
+
+    system_prompt = """You are a senior brand strategist, direct-response copywriter, and conversion-focused messaging architect with experience building brand voice systems for high-growth companies.
+Your task is to analyze a company website and produce a comprehensive, professional-grade brand voice system equivalent to what would be delivered in a paid brand strategy engagement.
+You must operate in two distinct phases:
+
+PHASE 1 — EXTRACTION & DIAGNOSIS
+- Extract observable signals from the website (tone, messaging, structure, offers, positioning)
+- Infer the target audience, buyer sophistication level, and conversion intent
+- Identify strengths, weaknesses, inconsistencies, and missed opportunities
+- Base all observations on evidence (specific phrasing patterns, positioning, structure)
+
+PHASE 2 — STRATEGIC SYNTHESIS & SYSTEM CREATION
+- Refine and improve the brand positioning (do not blindly mirror the site)
+- Construct a complete brand voice system that is:
+  - Operational (usable by teams immediately)
+  - Conversion-aware (focused on persuasion and outcomes)
+  - Scalable (usable across channels and AI systems)
+  - Distinct (not generic or interchangeable with competitors)
+
+OUTPUT DEPTH REQUIREMENTS:
+This is a long-form, high-detail deliverable. For EACH section: provide depth not summaries, include rationale, include multiple concrete examples, translate abstract ideas into executable rules.
+Avoid: generic branding advice, vague descriptors without examples, repetition or filler language.
+
+STRATEGIC STANDARDS:
+- Prioritize clarity over cleverness
+- Favor specificity over generality
+- Anchor messaging in outcomes (revenue, leads, efficiency, etc.)
+- Align tone with audience sophistication level
+- Ensure the voice is usable in direct-response and SEO/AEO contexts
+
+CRITICAL BEHAVIOR:
+If the website has weak, generic, or inconsistent messaging — fix it, elevate it, make it competitive. Do NOT simply describe the brand as-is. You are building the brand voice it SHOULD have.
+
+The final output must read like a professional internal strategy document that can be handed to marketing teams, copywriters, SEO teams, and AI/automation engineers. It must be immediately usable without additional interpretation."""
+
+    prompt = f"""Analyze this business's website copy and produce a comprehensive brand voice system.
+
+Business: {business_name}
+
+Website copy samples (up to 20 pages):
+{content_text[:10000]}
+
+Return a JSON object with exactly this structure:
+{{
+  "personality": ["<trait 1>", "<trait 2>", "<trait 3>"],
+  "tone": "<1-2 sentence description of the overall tone>",
+  "writing_style": {{
+    "sentence_length": "<short / medium / long / mixed>",
+    "person": "<first person / second person / third person / mixed>",
+    "jargon_level": "<low / medium / high> — <brief explanation>",
+    "formality": "<casual / professional / formal>"
+  }},
+  "vocabulary": {{
+    "use": ["<word or phrase>", "<word or phrase>", "<word or phrase>", "<word or phrase>", "<word or phrase>"],
+    "avoid": ["<word or phrase>", "<word or phrase>", "<word or phrase>"]
+  }},
+  "messaging_themes": ["<theme 1>", "<theme 2>", "<theme 3>"],
+  "sample_phrases": ["<actual or representative phrase>", "<actual or representative phrase>", "<actual or representative phrase>"],
+  "content_generation_instructions": "<2-3 sentences of concrete guidance for writing new content that matches this brand voice>",
+  "writer_execution_guide": {{
+    "how_to_think_before_writing": "<define the role and mindset the writer should assume>",
+    "core_writing_objective": "<what every piece of content must achieve>",
+    "default_writing_formula": {{
+      "structure": "<e.g. Problem → Consequence → Contrast → Solution → Outcome>",
+      "example": "<walk through one concrete example using the formula>"
+    }},
+    "non_negotiable_rules": ["<rule 1>", "<rule 2>", "<rule 3>", "<rule 4>", "<rule 5>"],
+    "sentence_style_guide": {{
+      "description": "<define sentence length, tone, and structure>",
+      "do": ["<DO example 1>", "<DO example 2>", "<DO example 3>"],
+      "dont": ["<DON'T example 1>", "<DON'T example 2>", "<DON'T example 3>"]
+    }},
+    "rewriting_framework": ["<transformation rule 1: generic → specific>", "<transformation rule 2: feature → outcome>", "<transformation rule 3: soft → direct>"],
+    "before_after_examples": [
+      {{"before": "<weak copy>", "after": "<strong copy>"}},
+      {{"before": "<weak copy>", "after": "<strong copy>"}}
+    ],
+    "seo_aeo_instructions": "<specific guidance for writing answer-first, modular, scannable content for SEO and AI retrieval>",
+    "ai_writing_rules": "<instructions for maintaining voice consistency when using AI tools>",
+    "common_failure_modes": ["<failure mode 1 and how to fix it>", "<failure mode 2 and how to fix it>", "<failure mode 3 and how to fix it>"],
+    "quick_cheat_sheet": ["<rule 1>", "<rule 2>", "<rule 3>", "<rule 4>", "<rule 5>"]
+  }}
+}}
+
+Return only valid JSON, no markdown or explanation."""
+
+    import anthropic
+    import json as json_lib
+
+    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    try:
+        message = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=8192,
+            system=system_prompt,
+            messages=[{'role': 'user', 'content': prompt}],
+        )
+        usage = message.usage
+        logger.info(
+            f"Brand voice usage — input: {usage.input_tokens} tokens, "
+            f"output: {usage.output_tokens} tokens, "
+            f"est. cost: ${(usage.input_tokens * 0.0000008) + (usage.output_tokens * 0.000004):.5f}"
+        )
+        text = message.content[0].text.strip()
+        if text.startswith("```"):
+            text = re.sub(r'^```(?:json)?\s*', '', text)
+            text = re.sub(r'\s*```$', '', text.strip())
+        return json_lib.loads(text)
+    except Exception as e:
+        logger.error(f"Brand voice analysis error: {e}")
+        raise
+
+
+@app.post('/analyze-brand-voice', response_model=BrandVoiceResponse)
+async def analyze_brand_voice(request: BrandVoiceRequest):
+    """
+    Brand voice pipeline:
+      1. Select up to 20 pages from existing_pages (home → about → service → other)
+      2. Fetch paragraph text from each page directly via httpx
+      3. Send to Claude Haiku for brand voice extraction
+    """
+    if not request.website_url:
+        raise HTTPException(status_code=400, detail="website_url is required")
+
+    url = request.website_url.strip()
+    if not url.startswith(('http://', 'https://')):
+        url = f"https://{url}"
+
+    # Prioritise: home → about → service → other
+    def _priority(p: dict) -> int:
+        u = p.get('url', '').lower().rstrip('/')
+        base = url.rstrip('/')
+        if u == base or u == base + '/index' or u == base + '/home':
+            return 0
+        pt = p.get('page_type', '')
+        slug = u.split('/')[-1]
+        if any(x in slug for x in ['about', 'who-we-are', 'our-story', 'team']):
+            return 1
+        if pt == 'service':
+            return 2
+        if pt in ('location', 'city_service'):
+            return 3
+        return 4
+
+    pages = sorted(request.existing_pages, key=_priority)
+
+    # Ensure homepage is included
+    home_urls = {url.rstrip('/'), url.rstrip('/') + '/'}
+    if not any(p.get('url', '').rstrip('/') in {u.rstrip('/') for u in home_urls} for p in pages):
+        pages = [{'url': url, 'page_type': 'home', 'title': '', 'h1': ''}] + pages
+
+    selected = pages[:20]
+
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0; +https://showuplocal.com)"}
+    async with httpx.AsyncClient(headers=headers) as client:
+        texts = await asyncio.gather(*[_fetch_page_text(p['url'], client) for p in selected])
+
+    page_contents = [
+        f"[{p.get('page_type', 'page')}] {p['url']}\n{text[:600]}"
+        for p, text in zip(selected, texts)
+        if text.strip()
+    ]
+    pages_sampled = len(page_contents)
+    logger.info(f"Brand voice: sampled {pages_sampled}/{len(selected)} pages for {url}")
+
+    try:
+        brand_voice = await analyze_brand_voice_with_anthropic(page_contents, request.business_name)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Brand voice analysis failed: {e}")
+
+    return BrandVoiceResponse(brand_voice=brand_voice, pages_sampled=pages_sampled)
