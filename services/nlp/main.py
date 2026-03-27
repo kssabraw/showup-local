@@ -967,53 +967,38 @@ async def _fetch_page_text(url: str, client: httpx.AsyncClient) -> str:
 
 
 async def analyze_brand_voice_with_anthropic(page_contents: List[str], business_name: str) -> dict:
-    """Use Claude Haiku to extract brand voice from sampled page copy."""
+    """Use Claude Haiku to extract brand voice from sampled page copy.
+    Runs two sequential API calls to avoid JSON complexity errors:
+      1. Base brand voice profile (simple flat structure)
+      2. Writer Execution Guide (separate, focused call)
+    """
     if not ANTHROPIC_API_KEY:
         logger.warning("ANTHROPIC_API_KEY not set — skipping brand voice analysis")
         return {}
 
+    import anthropic
+    import json as json_lib
+
     content_text = "\n\n---\n\n".join(page_contents) if page_contents else "(no content available)"
 
-    system_prompt = """You are a senior brand strategist, direct-response copywriter, and conversion-focused messaging architect with experience building brand voice systems for high-growth companies.
-Your task is to analyze a company website and produce a comprehensive, professional-grade brand voice system equivalent to what would be delivered in a paid brand strategy engagement.
-You must operate in two distinct phases:
+    system_prompt = """You are a senior brand strategist and direct-response copywriter building brand voice systems for local service businesses.
+Analyze the website copy provided. Do NOT blindly mirror the existing site — elevate and improve weak or generic messaging.
+Return only valid JSON, no markdown, no explanation."""
 
-PHASE 1 — EXTRACTION & DIAGNOSIS
-- Extract observable signals from the website (tone, messaging, structure, offers, positioning)
-- Infer the target audience, buyer sophistication level, and conversion intent
-- Identify strengths, weaknesses, inconsistencies, and missed opportunities
-- Base all observations on evidence (specific phrasing patterns, positioning, structure)
+    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-PHASE 2 — STRATEGIC SYNTHESIS & SYSTEM CREATION
-- Refine and improve the brand positioning (do not blindly mirror the site)
-- Construct a complete brand voice system that is:
-  - Operational (usable by teams immediately)
-  - Conversion-aware (focused on persuasion and outcomes)
-  - Scalable (usable across channels and AI systems)
-  - Distinct (not generic or interchangeable with competitors)
+    def _parse(message: any) -> dict:
+        text = message.content[0].text.strip()
+        if text.startswith("```"):
+            text = re.sub(r'^```(?:json)?\s*', '', text)
+            text = re.sub(r'\s*```$', '', text.strip())
+        return json_lib.loads(text)
 
-OUTPUT DEPTH REQUIREMENTS:
-This is a long-form, high-detail deliverable. For EACH section: provide depth not summaries, include rationale, include multiple concrete examples, translate abstract ideas into executable rules.
-Avoid: generic branding advice, vague descriptors without examples, repetition or filler language.
+    # ── Call 1: Base brand voice profile ──────────────────────────────────────
+    prompt_base = f"""Business: {business_name}
 
-STRATEGIC STANDARDS:
-- Prioritize clarity over cleverness
-- Favor specificity over generality
-- Anchor messaging in outcomes (revenue, leads, efficiency, etc.)
-- Align tone with audience sophistication level
-- Ensure the voice is usable in direct-response and SEO/AEO contexts
-
-CRITICAL BEHAVIOR:
-If the website has weak, generic, or inconsistent messaging — fix it, elevate it, make it competitive. Do NOT simply describe the brand as-is. You are building the brand voice it SHOULD have.
-
-The final output must read like a professional internal strategy document that can be handed to marketing teams, copywriters, SEO teams, and AI/automation engineers. It must be immediately usable without additional interpretation."""
-
-    prompt = f"""Analyze this business's website copy and produce a comprehensive brand voice system.
-
-Business: {business_name}
-
-Website copy samples (up to 20 pages):
-{content_text[:10000]}
+Website copy (up to 20 pages):
+{content_text[:8000]}
 
 Return a JSON object with exactly this structure:
 {{
@@ -1022,7 +1007,7 @@ Return a JSON object with exactly this structure:
   "writing_style": {{
     "sentence_length": "<short / medium / long / mixed>",
     "person": "<first person / second person / third person / mixed>",
-    "jargon_level": "<low / medium / high> — <brief explanation>",
+    "jargon_level": "<low / medium / high — brief explanation>",
     "formality": "<casual / professional / formal>"
   }},
   "vocabulary": {{
@@ -1030,60 +1015,65 @@ Return a JSON object with exactly this structure:
     "avoid": ["<word or phrase>", "<word or phrase>", "<word or phrase>"]
   }},
   "messaging_themes": ["<theme 1>", "<theme 2>", "<theme 3>"],
-  "sample_phrases": ["<actual or representative phrase>", "<actual or representative phrase>", "<actual or representative phrase>"],
-  "content_generation_instructions": "<2-3 sentences of concrete guidance for writing new content that matches this brand voice>",
-  "writer_execution_guide": {{
-    "how_to_think_before_writing": "<define the role and mindset the writer should assume>",
-    "core_writing_objective": "<what every piece of content must achieve>",
-    "default_writing_formula": {{
-      "structure": "<e.g. Problem → Consequence → Contrast → Solution → Outcome>",
-      "example": "<walk through one concrete example using the formula>"
-    }},
-    "non_negotiable_rules": ["<rule 1>", "<rule 2>", "<rule 3>", "<rule 4>", "<rule 5>"],
-    "sentence_style_guide": {{
-      "description": "<define sentence length, tone, and structure>",
-      "do": ["<DO example 1>", "<DO example 2>", "<DO example 3>"],
-      "dont": ["<DON'T example 1>", "<DON'T example 2>", "<DON'T example 3>"]
-    }},
-    "rewriting_framework": ["<transformation rule 1: generic → specific>", "<transformation rule 2: feature → outcome>", "<transformation rule 3: soft → direct>"],
-    "before_after_examples": [
-      {{"before": "<weak copy>", "after": "<strong copy>"}},
-      {{"before": "<weak copy>", "after": "<strong copy>"}}
-    ],
-    "seo_aeo_instructions": "<specific guidance for writing answer-first, modular, scannable content for SEO and AI retrieval>",
-    "ai_writing_rules": "<instructions for maintaining voice consistency when using AI tools>",
-    "common_failure_modes": ["<failure mode 1 and how to fix it>", "<failure mode 2 and how to fix it>", "<failure mode 3 and how to fix it>"],
-    "quick_cheat_sheet": ["<rule 1>", "<rule 2>", "<rule 3>", "<rule 4>", "<rule 5>"]
-  }}
-}}
+  "sample_phrases": ["<phrase>", "<phrase>", "<phrase>"],
+  "content_generation_instructions": "<2-3 sentences of concrete guidance for writing content that matches this brand voice>"
+}}"""
 
-Return only valid JSON, no markdown or explanation."""
-
-    import anthropic
-    import json as json_lib
-
-    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
     try:
-        message = await client.messages.create(
+        msg1 = await client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=8192,
+            max_tokens=2048,
             system=system_prompt,
-            messages=[{'role': 'user', 'content': prompt}],
+            messages=[{'role': 'user', 'content': prompt_base}],
         )
-        usage = message.usage
-        logger.info(
-            f"Brand voice usage — input: {usage.input_tokens} tokens, "
-            f"output: {usage.output_tokens} tokens, "
-            f"est. cost: ${(usage.input_tokens * 0.0000008) + (usage.output_tokens * 0.000004):.5f}"
-        )
-        text = message.content[0].text.strip()
-        if text.startswith("```"):
-            text = re.sub(r'^```(?:json)?\s*', '', text)
-            text = re.sub(r'\s*```$', '', text.strip())
-        return json_lib.loads(text)
+        u1 = msg1.usage
+        logger.info(f"Brand voice call 1 — input: {u1.input_tokens}, output: {u1.output_tokens}, est. cost: ${(u1.input_tokens * 0.0000008) + (u1.output_tokens * 0.000004):.5f}")
+        base = _parse(msg1)
     except Exception as e:
-        logger.error(f"Brand voice analysis error: {e}")
+        logger.error(f"Brand voice call 1 error: {e}")
         raise
+
+    # ── Call 2: Writer Execution Guide ─────────────────────────────────────────
+    prompt_guide = f"""Business: {business_name}
+Brand voice summary: {base.get('tone', '')}
+Personality: {', '.join(base.get('personality', []))}
+
+Website copy (up to 20 pages):
+{content_text[:6000]}
+
+Return a JSON object with exactly this structure:
+{{
+  "how_to_think_before_writing": "<role and mindset the writer should assume>",
+  "core_writing_objective": "<what every piece of content must achieve>",
+  "default_writing_formula": "<e.g. Problem → Consequence → Solution → Outcome — include a concrete example sentence>",
+  "non_negotiable_rules": ["<rule 1>", "<rule 2>", "<rule 3>", "<rule 4>", "<rule 5>"],
+  "sentence_style_do": ["<DO example 1>", "<DO example 2>", "<DO example 3>"],
+  "sentence_style_dont": ["<DON'T example 1>", "<DON'T example 2>", "<DON'T example 3>"],
+  "rewriting_framework": ["<generic → specific example>", "<feature → outcome example>", "<soft → direct example>"],
+  "before_after_weak": "<a weak copy example>",
+  "before_after_strong": "<the improved version>",
+  "seo_aeo_instructions": "<guidance for answer-first, scannable content for SEO and AI retrieval>",
+  "ai_writing_rules": "<instructions for maintaining voice when using AI tools>",
+  "common_failure_modes": ["<failure mode 1 and fix>", "<failure mode 2 and fix>", "<failure mode 3 and fix>"],
+  "quick_cheat_sheet": ["<rule 1>", "<rule 2>", "<rule 3>", "<rule 4>", "<rule 5>"]
+}}"""
+
+    try:
+        msg2 = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=3000,
+            system=system_prompt,
+            messages=[{'role': 'user', 'content': prompt_guide}],
+        )
+        u2 = msg2.usage
+        logger.info(f"Brand voice call 2 — input: {u2.input_tokens}, output: {u2.output_tokens}, est. cost: ${(u2.input_tokens * 0.0000008) + (u2.output_tokens * 0.000004):.5f}")
+        guide = _parse(msg2)
+    except Exception as e:
+        logger.error(f"Brand voice call 2 error: {e}")
+        guide = {}
+
+    base['writer_execution_guide'] = guide
+    return base
 
 
 @app.post('/analyze-brand-voice', response_model=BrandVoiceResponse)
