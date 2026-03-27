@@ -876,12 +876,13 @@ async def crawl_website(website_url: str, max_pages: int = 200) -> List[dict]:
         homepage = f"{parsed.scheme}://{parsed.netloc}"
         all_urls = list(dict.fromkeys([homepage] + discovered))  # dedup, preserve order
 
-        # Classify all discovered URLs
+        # Classify all discovered URLs, drop blog pages entirely
         all_pages = [_make_page_record(u) for u in all_urls]
+        all_pages = [p for p in all_pages if p['page_type'] != 'blog']
 
-        # Prioritise: service/location/city_service first, then other, blog last
+        # Sort: city_service → service → location → other
         def _sort_key(p: dict) -> int:
-            return {'city_service': 0, 'service': 1, 'location': 2, 'other': 3, 'blog': 4}.get(p['page_type'], 3)
+            return {'city_service': 0, 'service': 1, 'location': 2, 'other': 3}.get(p['page_type'], 3)
 
         pages = sorted(all_pages, key=_sort_key)[:max_pages]
         type_counts = {}
