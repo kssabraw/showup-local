@@ -871,6 +871,13 @@ Return only valid JSON, no markdown or explanation."""
             messages=[{'role': 'user', 'content': prompt}],
         )
 
+        usage = message.usage
+        logger.info(
+            f"Anthropic ICP usage — input: {usage.input_tokens} tokens, "
+            f"output: {usage.output_tokens} tokens, "
+            f"est. cost: ${(usage.input_tokens * 0.0000008) + (usage.output_tokens * 0.000004):.5f}"
+        )
+
         text = message.content[0].text.strip()
         # Strip markdown code fences if model wrapped the JSON
         if text.startswith("```"):
