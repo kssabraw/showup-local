@@ -146,12 +146,6 @@ const Index = () => {
               onBack={() => setSelectedLocationId(null)}
             />
           )}
-          {activeItem === "analytics" && (
-            <div>
-              <h1 className="text-2xl font-display font-bold text-foreground">Analytics</h1>
-              <p className="text-muted-foreground text-sm mt-1">Track performance across your content and locations.</p>
-            </div>
-          )}
           {activeItem === "settings" && (
             <div>
               <h1 className="text-2xl font-display font-bold text-foreground">Settings</h1>

@@ -2,7 +2,6 @@ import {
   LayoutDashboard, 
   FileText, 
   MapPin, 
-  BarChart3, 
   Settings, 
   Plus,
   ChevronLeft,
@@ -21,7 +20,6 @@ const navItems = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "content", label: "Content", icon: FileText },
   { id: "locations", label: "Locations", icon: MapPin },
-  { id: "analytics", label: "Analytics", icon: BarChart3 },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
