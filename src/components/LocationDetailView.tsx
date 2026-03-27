@@ -42,15 +42,6 @@ const PAGE_TYPE_LABELS: Record<string, { label: string; color: string }> = {
   other:        { label: "Other",           color: "bg-muted text-muted-foreground" },
 };
 
-const ICP_LABELS: Record<string, string> = {
-  emergency_homeowner:    "Emergency Homeowner",
-  general_homeowner:      "General Homeowner",
-  commercial:             "Commercial / Business",
-  property_manager:       "Property Manager",
-  vulnerable_homeowner:   "Vulnerable / Assisted Homeowner",
-  trade_contractor:       "Trade / Contractor",
-  landlord:               "Landlord / Rental Owner",
-};
 
 const TABS = ["Overview", "Website Pages", "ICP & Differentiators"] as const;
 type Tab = typeof TABS[number];
@@ -503,42 +494,103 @@ const LocationDetailView = ({
               )}
             </div>
             {icp ? (
-              <div className="space-y-3">
-                <div className="flex items-center gap-3">
-                  <CheckCircle2 className="w-4 h-4 text-success flex-shrink-0" />
-                  <div>
-                    <p className="text-sm font-medium text-foreground">
-                      {ICP_LABELS[icp.primary] || icp.primary}
-                    </p>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      {Math.round(icp.confidence * 100)}% confidence
-                    </p>
-                  </div>
-                </div>
+              <div className="space-y-4">
                 {icp.reasoning && (
-                  <p className="text-xs text-muted-foreground border-t border-border pt-3">{icp.reasoning}</p>
+                  <p className="text-xs text-muted-foreground">{icp.reasoning}</p>
                 )}
-                {icp.all && icp.all.length > 1 && (
-                  <div className="border-t border-border pt-3 space-y-1.5">
-                    <p className="text-xs font-medium text-muted-foreground">All detected ICPs</p>
-                    {icp.all.map((item: any, i: number) => (
-                      <div key={i} className="flex items-center justify-between">
-                        <span className="text-xs text-foreground">{ICP_LABELS[item.type] || item.type}</span>
-                        <div className="flex items-center gap-2">
-                          <div className="w-20 h-1.5 rounded-full bg-muted overflow-hidden">
-                            <div
-                              className="h-full rounded-full bg-accent"
-                              style={{ width: `${Math.round(item.confidence * 100)}%` }}
-                            />
-                          </div>
-                          <span className="text-xs text-muted-foreground w-8 text-right">
-                            {Math.round(item.confidence * 100)}%
-                          </span>
-                        </div>
+                {(icp.segments || []).map((seg: any, i: number) => (
+                  <div key={i} className="border border-border rounded-lg p-4 space-y-3">
+                    {/* Segment header */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        {seg.primary && <CheckCircle2 className="w-4 h-4 text-success flex-shrink-0" />}
+                        <span className="text-sm font-semibold text-foreground">{seg.label}</span>
                       </div>
-                    ))}
+                      <span className="text-xs text-muted-foreground">{Math.round(seg.confidence * 100)}% confidence</span>
+                    </div>
+
+                    {/* Demographics */}
+                    {seg.demographics && (
+                      <div className="space-y-1">
+                        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Who They Are</p>
+                        <p className="text-xs text-foreground">{seg.demographics.description}</p>
+                        <p className="text-xs text-muted-foreground">{seg.demographics.situation}</p>
+                      </div>
+                    )}
+
+                    {/* Psychographics */}
+                    {seg.psychographics && (
+                      <div className="space-y-2 border-t border-border pt-3">
+                        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Psychographics</p>
+                        {seg.psychographics.trigger && (
+                          <div>
+                            <span className="text-xs font-medium text-foreground">Trigger: </span>
+                            <span className="text-xs text-muted-foreground">{seg.psychographics.trigger}</span>
+                          </div>
+                        )}
+                        {seg.psychographics.fears?.length > 0 && (
+                          <div>
+                            <p className="text-xs font-medium text-foreground mb-1">Fears</p>
+                            <ul className="space-y-0.5">
+                              {seg.psychographics.fears.map((f: string, j: number) => (
+                                <li key={j} className="text-xs text-muted-foreground flex gap-1.5"><span>•</span>{f}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {seg.psychographics.motivations?.length > 0 && (
+                          <div>
+                            <p className="text-xs font-medium text-foreground mb-1">Motivations</p>
+                            <ul className="space-y-0.5">
+                              {seg.psychographics.motivations.map((m: string, j: number) => (
+                                <li key={j} className="text-xs text-muted-foreground flex gap-1.5"><span>•</span>{m}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {seg.psychographics.buying_behavior && (
+                          <div>
+                            <span className="text-xs font-medium text-foreground">Buying Behavior: </span>
+                            <span className="text-xs text-muted-foreground">{seg.psychographics.buying_behavior}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Messaging */}
+                    {seg.messaging && (
+                      <div className="space-y-2 border-t border-border pt-3">
+                        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Messaging</p>
+                        {seg.messaging.tone && (
+                          <div>
+                            <span className="text-xs font-medium text-foreground">Tone: </span>
+                            <span className="text-xs text-muted-foreground">{seg.messaging.tone}</span>
+                          </div>
+                        )}
+                        {seg.messaging.hooks?.length > 0 && (
+                          <div>
+                            <p className="text-xs font-medium text-foreground mb-1">Hooks</p>
+                            <ul className="space-y-0.5">
+                              {seg.messaging.hooks.map((h: string, j: number) => (
+                                <li key={j} className="text-xs text-muted-foreground flex gap-1.5"><span>•</span>{h}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {seg.messaging.trust_signals?.length > 0 && (
+                          <div>
+                            <p className="text-xs font-medium text-foreground mb-1">Trust Signals</p>
+                            <ul className="space-y-0.5">
+                              {seg.messaging.trust_signals.map((t: string, j: number) => (
+                                <li key={j} className="text-xs text-muted-foreground flex gap-1.5"><span>•</span>{t}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
-                )}
+                ))}
               </div>
             ) : (
               <p className="text-sm text-muted-foreground text-center py-4">
