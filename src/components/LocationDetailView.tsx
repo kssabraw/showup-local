@@ -24,6 +24,7 @@ interface BusinessProfile {
   detected_icp: any | null;
   differentiators: any[];
   analysis_status: string;
+  brand_voice: any | null;
 }
 
 interface PageRecord {
@@ -43,7 +44,7 @@ const PAGE_TYPE_LABELS: Record<string, { label: string; color: string }> = {
 };
 
 
-const TABS = ["Overview", "Website Pages", "ICP & Differentiators"] as const;
+const TABS = ["Overview", "Website Pages", "ICP & Differentiators", "Brand Voice"] as const;
 type Tab = typeof TABS[number];
 
 const LocationDetailView = ({
@@ -65,6 +66,10 @@ const LocationDetailView = ({
   const [icpSegments, setIcpSegments] = useState<any[]>([]);
   const [icpReasoning, setIcpReasoning] = useState("");
   const [savingIcp, setSavingIcp] = useState(false);
+  const [scanningBrandVoice, setScanningBrandVoice] = useState(false);
+  const [editingBrandVoice, setEditingBrandVoice] = useState(false);
+  const [brandVoiceDraft, setBrandVoiceDraft] = useState<any>(null);
+  const [savingBrandVoice, setSavingBrandVoice] = useState(false);
 
   useEffect(() => {
     fetchBusiness();
@@ -268,6 +273,50 @@ const LocationDetailView = ({
       next[segIdx][section][field].splice(itemIdx, 1);
       return next;
     });
+  };
+
+  const scanBrandVoice = async (b: BusinessProfile) => {
+    let website = b.website;
+    if (!website) {
+      website = await fetchWebsiteFromGBP(b);
+      if (!website) return;
+    }
+    setScanningBrandVoice(true);
+    try {
+      const response = await fetch(`${NLP_SERVICE_URL}/analyze-brand-voice`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          website_url: website,
+          business_name: b.business_name,
+          existing_pages: b.existing_pages || [],
+        }),
+      });
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}));
+        throw new Error(`Brand voice scan failed: ${response.status} — ${errBody.detail || JSON.stringify(errBody)}`);
+      }
+      const result = await response.json();
+      const { error } = await supabase
+        .from("business_profiles")
+        .update({ brand_voice: result.brand_voice })
+        .eq("id", b.id);
+      if (error) throw error;
+      await fetchBusiness();
+    } catch (err) {
+      console.error("Brand voice scan error:", err);
+    } finally {
+      setScanningBrandVoice(false);
+    }
+  };
+
+  const saveBrandVoice = async () => {
+    if (!business) return;
+    setSavingBrandVoice(true);
+    await supabase.from("business_profiles").update({ brand_voice: brandVoiceDraft }).eq("id", business.id);
+    await fetchBusiness();
+    setEditingBrandVoice(false);
+    setSavingBrandVoice(false);
   };
 
   if (loading) {
@@ -850,6 +899,236 @@ const LocationDetailView = ({
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Brand Voice tab */}
+      {activeTab === "Brand Voice" && (
+        <div className="bg-card border border-border rounded-xl p-5">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-sm font-semibold text-foreground">Brand Voice</h2>
+            <div className="flex items-center gap-3">
+              {business.brand_voice && !editingBrandVoice && (
+                <button
+                  onClick={() => { setBrandVoiceDraft(JSON.parse(JSON.stringify(business.brand_voice))); setEditingBrandVoice(true); }}
+                  className="text-xs font-medium text-accent hover:underline"
+                >
+                  Edit
+                </button>
+              )}
+              {!editingBrandVoice && (
+                <button
+                  onClick={() => scanBrandVoice(business)}
+                  disabled={scanningBrandVoice}
+                  className="flex items-center gap-1.5 text-xs font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {scanningBrandVoice ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                  {scanningBrandVoice ? "Scanning..." : business.brand_voice ? "Re-scan" : "Scan Website"}
+                </button>
+              )}
+              {editingBrandVoice && (
+                <div className="flex items-center gap-3">
+                  <button onClick={() => setEditingBrandVoice(false)} className="text-xs text-muted-foreground hover:text-foreground">Cancel</button>
+                  <button onClick={saveBrandVoice} disabled={savingBrandVoice} className="text-xs font-medium text-accent hover:underline disabled:opacity-40">
+                    {savingBrandVoice ? "Saving..." : "Save"}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Empty state */}
+          {!business.brand_voice && !editingBrandVoice && (
+            <p className="text-sm text-muted-foreground text-center py-4">
+              {scanningBrandVoice ? "Scanning website for brand voice signals…" : "Click Scan Website to auto-generate a brand voice profile."}
+            </p>
+          )}
+
+          {/* View mode */}
+          {business.brand_voice && !editingBrandVoice && (() => {
+            const bv = business.brand_voice;
+            return (
+              <div className="space-y-5">
+                {/* Personality + Tone */}
+                {bv.personality?.length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Personality</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {bv.personality.map((t: string, i: number) => (
+                        <span key={i} className="text-xs px-2.5 py-1 rounded-full bg-accent/10 text-accent-foreground font-medium">{t}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {bv.tone && (
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1">Tone</p>
+                    <p className="text-xs text-foreground">{bv.tone}</p>
+                  </div>
+                )}
+                {/* Writing Style */}
+                {bv.writing_style && (
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Writing Style</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      {Object.entries(bv.writing_style).map(([k, v]: [string, any]) => (
+                        <div key={k} className="bg-muted/40 rounded-lg px-3 py-2">
+                          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">{k.replace(/_/g, ' ')}</p>
+                          <p className="text-xs text-foreground mt-0.5">{v}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {/* Vocabulary */}
+                {bv.vocabulary && (
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Vocabulary</p>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <p className="text-xs font-medium text-green-600 mb-1">Use</p>
+                        <ul className="space-y-0.5">{(bv.vocabulary.use || []).map((w: string, i: number) => <li key={i} className="text-xs text-foreground flex gap-1.5"><span className="text-green-500">+</span>{w}</li>)}</ul>
+                      </div>
+                      <div>
+                        <p className="text-xs font-medium text-destructive mb-1">Avoid</p>
+                        <ul className="space-y-0.5">{(bv.vocabulary.avoid || []).map((w: string, i: number) => <li key={i} className="text-xs text-foreground flex gap-1.5"><span className="text-destructive">−</span>{w}</li>)}</ul>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {/* Messaging Themes */}
+                {bv.messaging_themes?.length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1">Messaging Themes</p>
+                    <ul className="space-y-0.5">{bv.messaging_themes.map((t: string, i: number) => <li key={i} className="text-xs text-muted-foreground flex gap-1.5"><span>•</span>{t}</li>)}</ul>
+                  </div>
+                )}
+                {/* Sample Phrases */}
+                {bv.sample_phrases?.length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1">Sample Phrases</p>
+                    <ul className="space-y-1">{bv.sample_phrases.map((p: string, i: number) => <li key={i} className="text-xs text-foreground italic border-l-2 border-accent pl-3">"{p}"</li>)}</ul>
+                  </div>
+                )}
+                {/* Content Generation Instructions */}
+                {bv.content_generation_instructions && (
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1">Content Generation Instructions</p>
+                    <p className="text-xs text-foreground">{bv.content_generation_instructions}</p>
+                  </div>
+                )}
+                {/* Writer Execution Guide */}
+                {bv.writer_execution_guide && (
+                  <div className="border-t border-border pt-4 space-y-4">
+                    <p className="text-xs font-semibold text-foreground uppercase tracking-wide">Writer Execution Guide</p>
+                    {Object.entries(bv.writer_execution_guide).map(([key, val]: [string, any]) => (
+                      <div key={key}>
+                        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1">{key.replace(/_/g, ' ')}</p>
+                        {typeof val === 'string' && <p className="text-xs text-foreground">{val}</p>}
+                        {Array.isArray(val) && (
+                          <ul className="space-y-0.5">{val.map((item: any, i: number) => (
+                            <li key={i} className="text-xs text-muted-foreground flex gap-1.5">
+                              <span>•</span>
+                              {typeof item === 'string' ? item : JSON.stringify(item)}
+                            </li>
+                          ))}</ul>
+                        )}
+                        {typeof val === 'object' && !Array.isArray(val) && val !== null && (
+                          <div className="space-y-1">
+                            {Object.entries(val).map(([k2, v2]: [string, any]) => (
+                              <div key={k2}>
+                                <span className="text-xs font-medium text-foreground capitalize">{k2.replace(/_/g, ' ')}: </span>
+                                <span className="text-xs text-muted-foreground">{Array.isArray(v2) ? v2.join(', ') : String(v2)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Edit mode */}
+          {editingBrandVoice && brandVoiceDraft && (
+            <div className="space-y-5">
+              {/* Personality */}
+              <div>
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Personality Traits</p>
+                {(brandVoiceDraft.personality || []).map((t: string, i: number) => (
+                  <div key={i} className="flex gap-1.5 mb-1">
+                    <input value={t} onChange={e => { const d = {...brandVoiceDraft, personality: [...brandVoiceDraft.personality]}; d.personality[i] = e.target.value; setBrandVoiceDraft(d); }} className="flex-1 text-xs rounded-md border border-border bg-background px-3 py-1.5 text-foreground focus:outline-none focus:ring-1 focus:ring-accent" />
+                    <button onClick={() => setBrandVoiceDraft({...brandVoiceDraft, personality: brandVoiceDraft.personality.filter((_: any, j: number) => j !== i)})} className="text-muted-foreground hover:text-destructive"><X className="w-3.5 h-3.5" /></button>
+                  </div>
+                ))}
+                <button onClick={() => setBrandVoiceDraft({...brandVoiceDraft, personality: [...(brandVoiceDraft.personality || []), ""]})} className="text-xs text-accent hover:underline flex items-center gap-1"><Plus className="w-3 h-3" />Add trait</button>
+              </div>
+              {/* Tone */}
+              <div>
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1">Tone</p>
+                <textarea value={brandVoiceDraft.tone || ""} onChange={e => setBrandVoiceDraft({...brandVoiceDraft, tone: e.target.value})} rows={2} className="w-full text-xs rounded-md border border-border bg-background px-3 py-2 text-foreground resize-none focus:outline-none focus:ring-1 focus:ring-accent" />
+              </div>
+              {/* Writing Style */}
+              {brandVoiceDraft.writing_style && (
+                <div>
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Writing Style</p>
+                  {Object.keys(brandVoiceDraft.writing_style).map(k => (
+                    <div key={k} className="mb-2">
+                      <p className="text-xs text-muted-foreground capitalize mb-0.5">{k.replace(/_/g, ' ')}</p>
+                      <input value={brandVoiceDraft.writing_style[k] || ""} onChange={e => setBrandVoiceDraft({...brandVoiceDraft, writing_style: {...brandVoiceDraft.writing_style, [k]: e.target.value}})} className="w-full text-xs rounded-md border border-border bg-background px-3 py-1.5 text-foreground focus:outline-none focus:ring-1 focus:ring-accent" />
+                    </div>
+                  ))}
+                </div>
+              )}
+              {/* Vocabulary */}
+              {brandVoiceDraft.vocabulary && (
+                <div>
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Vocabulary</p>
+                  {(['use', 'avoid'] as const).map(field => (
+                    <div key={field} className="mb-3">
+                      <p className={`text-xs font-medium mb-1 ${field === 'use' ? 'text-green-600' : 'text-destructive'}`}>{field === 'use' ? 'Use' : 'Avoid'}</p>
+                      {(brandVoiceDraft.vocabulary[field] || []).map((w: string, i: number) => (
+                        <div key={i} className="flex gap-1.5 mb-1">
+                          <input value={w} onChange={e => { const v = [...brandVoiceDraft.vocabulary[field]]; v[i] = e.target.value; setBrandVoiceDraft({...brandVoiceDraft, vocabulary: {...brandVoiceDraft.vocabulary, [field]: v}}); }} className="flex-1 text-xs rounded-md border border-border bg-background px-3 py-1.5 text-foreground focus:outline-none focus:ring-1 focus:ring-accent" />
+                          <button onClick={() => { const v = brandVoiceDraft.vocabulary[field].filter((_: any, j: number) => j !== i); setBrandVoiceDraft({...brandVoiceDraft, vocabulary: {...brandVoiceDraft.vocabulary, [field]: v}}); }} className="text-muted-foreground hover:text-destructive"><X className="w-3.5 h-3.5" /></button>
+                        </div>
+                      ))}
+                      <button onClick={() => setBrandVoiceDraft({...brandVoiceDraft, vocabulary: {...brandVoiceDraft.vocabulary, [field]: [...(brandVoiceDraft.vocabulary[field] || []), ""]}})} className="text-xs text-accent hover:underline flex items-center gap-1"><Plus className="w-3 h-3" />Add word</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {/* Messaging Themes */}
+              <div>
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Messaging Themes</p>
+                {(brandVoiceDraft.messaging_themes || []).map((t: string, i: number) => (
+                  <div key={i} className="flex gap-1.5 mb-1">
+                    <input value={t} onChange={e => { const d = [...brandVoiceDraft.messaging_themes]; d[i] = e.target.value; setBrandVoiceDraft({...brandVoiceDraft, messaging_themes: d}); }} className="flex-1 text-xs rounded-md border border-border bg-background px-3 py-1.5 text-foreground focus:outline-none focus:ring-1 focus:ring-accent" />
+                    <button onClick={() => setBrandVoiceDraft({...brandVoiceDraft, messaging_themes: brandVoiceDraft.messaging_themes.filter((_: any, j: number) => j !== i)})} className="text-muted-foreground hover:text-destructive"><X className="w-3.5 h-3.5" /></button>
+                  </div>
+                ))}
+                <button onClick={() => setBrandVoiceDraft({...brandVoiceDraft, messaging_themes: [...(brandVoiceDraft.messaging_themes || []), ""]})} className="text-xs text-accent hover:underline flex items-center gap-1"><Plus className="w-3 h-3" />Add theme</button>
+              </div>
+              {/* Sample Phrases */}
+              <div>
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Sample Phrases</p>
+                {(brandVoiceDraft.sample_phrases || []).map((p: string, i: number) => (
+                  <div key={i} className="flex gap-1.5 mb-1">
+                    <input value={p} onChange={e => { const d = [...brandVoiceDraft.sample_phrases]; d[i] = e.target.value; setBrandVoiceDraft({...brandVoiceDraft, sample_phrases: d}); }} className="flex-1 text-xs rounded-md border border-border bg-background px-3 py-1.5 text-foreground focus:outline-none focus:ring-1 focus:ring-accent" />
+                    <button onClick={() => setBrandVoiceDraft({...brandVoiceDraft, sample_phrases: brandVoiceDraft.sample_phrases.filter((_: any, j: number) => j !== i)})} className="text-muted-foreground hover:text-destructive"><X className="w-3.5 h-3.5" /></button>
+                  </div>
+                ))}
+                <button onClick={() => setBrandVoiceDraft({...brandVoiceDraft, sample_phrases: [...(brandVoiceDraft.sample_phrases || []), ""]})} className="text-xs text-accent hover:underline flex items-center gap-1"><Plus className="w-3 h-3" />Add phrase</button>
+              </div>
+              {/* Content Generation Instructions */}
+              <div>
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1">Content Generation Instructions</p>
+                <textarea value={brandVoiceDraft.content_generation_instructions || ""} onChange={e => setBrandVoiceDraft({...brandVoiceDraft, content_generation_instructions: e.target.value})} rows={3} className="w-full text-xs rounded-md border border-border bg-background px-3 py-2 text-foreground resize-none focus:outline-none focus:ring-1 focus:ring-accent" />
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
