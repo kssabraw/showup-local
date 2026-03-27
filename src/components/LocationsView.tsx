@@ -113,7 +113,10 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
         }),
       });
 
-      if (!response.ok) throw new Error(`Analysis failed: ${response.status}`);
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}));
+        throw new Error(`Analysis failed: ${response.status} — ${errBody.detail || JSON.stringify(errBody)}`);
+      }
       const result = await response.json();
 
       await supabase
