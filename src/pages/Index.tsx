@@ -23,10 +23,11 @@ const Index = () => {
   };
 
   const handleBusinessConfirm = async (business: BusinessDetails) => {
-    if (!business.place_id || !business.name || !business.address) {
+    // address is not required — service area businesses legitimately have no address
+    if (!business.place_id || !business.name) {
       toast({
         title: "Missing business info",
-        description: "This listing is missing a Place ID, name, or address. Please try searching again or selecting a different result.",
+        description: "This listing is missing a Place ID or name. Please try searching again or selecting a different result.",
         variant: "destructive",
       });
       return;
