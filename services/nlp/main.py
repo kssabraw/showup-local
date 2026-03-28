@@ -177,6 +177,8 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
         logger.warning("DataForSEO credentials not set — skipping SERP fetch")
         return []
 
+    # Standard HTTP Basic Auth encoding — credentials come from Railway env vars,
+    # not source code. Base64 is transport encoding, not encryption.
     credentials = base64.b64encode(
         f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
     ).decode()
@@ -1309,7 +1311,11 @@ async def analyze_business(request: Request, body: BusinessAnalysisRequest):
             body.gbp_categories,
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Anthropic analysis failed: {e}")
+        logger.error(f"Business Anthropic error for {url}: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail="Our AI analysis service encountered an error. Please try again — if the problem continues, contact ShowUP support."
+        )
 
     status = 'complete' if pages else 'partial'
 
@@ -1574,9 +1580,10 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
                     detail=f"Your website returned a {probe.status_code} error. Check that the URL is correct and the site is live."
                 )
         except httpx.RequestError as e:
+            logger.warning(f"Brand voice probe error for {url}: {type(e).__name__}: {e}")
             raise HTTPException(
                 status_code=422,
-                detail=f"Your website couldn't be reached ({type(e).__name__}). Check that the URL is correct and your site is live."
+                detail="Your website couldn't be reached. Check that the URL is correct and your site is live."
             )
 
         selected = await _crawl_pages_for_brand_voice(url, client, max_pages=25)
