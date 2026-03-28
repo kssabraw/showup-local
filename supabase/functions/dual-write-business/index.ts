@@ -14,9 +14,11 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json();
     const record = body.record;
-    if (!record || !record.gbp_place_id || !record.business_name || !record.address) {
+    // address is intentionally not required — service area businesses (SABs)
+    // hide their physical address in GBP and will have no address field.
+    if (!record || !record.gbp_place_id || !record.business_name) {
       return new Response(
-        JSON.stringify({ error: "Missing required fields: gbp_place_id, business_name, address" }),
+        JSON.stringify({ error: "Missing required fields: gbp_place_id, business_name" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
