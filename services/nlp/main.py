@@ -712,9 +712,18 @@ BLOG_LEAD_WORDS = {
     'clarifying','understanding','navigating','protecting','managing',
     'avoiding','preparing','addressing','implementing','evaluating',
     'identifying','recognizing','overcoming','preventing','handling',
+    'building','creating','running','growing','leading','working',
+    'finding','becoming','turning','writing','reading','sending',
+    'moving','setting','taking','making','giving','keeping',
     # Contractions without apostrophes (common in casual blog titles)
     'dont','cant','wont','isnt','arent','wasnt','didnt',
     'shouldnt','couldnt','wouldnt','havent','hasnt','hadnt',
+    # Articles as first word — editorial content, never service pages
+    'the','an',
+    # Modal verbs not already covered
+    'may','might',
+    # Action verbs that open blog/news titles
+    'become','grow','achieve','master','fix','solve','tackle','beat',
 }
 
 # Mid-slug function words: their presence mid-slug signals sentence structure
@@ -725,6 +734,12 @@ BLOG_MID_WORDS = {
     'is','are','was','were','has','have','had',
     # Possessive/personal pronouns — never appear in service page slugs
     'your','our','their','my','its',
+    # Third-person present verbs mid-slug signal sentence structure
+    'needs','takes','makes','gets','helps','keeps','shows','means',
+    'works','comes','goes','lets','gives','puts','sets','runs',
+    # Month names — dated content (e.g. microsoft-teams-rooms-may-update)
+    'january','february','march','april','may','june','july',
+    'august','september','october','november','december',
 }
 
 
@@ -1002,13 +1017,18 @@ async def _classify_urls_with_ai(urls: List[str]) -> Dict[str, str]:
         prompt = f"""Classify each URL from a business website. Return ONLY a JSON object mapping URL→type.
 
 Types: city_service | service | location | blog | other
-- city_service: service + specific city (e.g. /plumbing-dallas-tx/, /managed-it-miami-fl/)
-- service: general service page, short noun phrase (e.g. /hvac-repair/, /cybersecurity/)
-- location: city/area listing (e.g. /locations/, /service-areas/)
-- blog: post, article, news, press release, how-to, opinion, announcement, dated content
+- city_service: service targeting a specific city, ends with city/state (e.g. /plumbing-dallas-tx/, /managed-it-miami-fl/)
+- service: bare noun-phrase service page, MAX 3 words (e.g. /hvac-repair/, /cybersecurity/, /managed-it-services/)
+- location: city or service-area listing (e.g. /locations/, /service-areas/)
+- blog: post, article, news, press release, how-to guide, opinion, product update, monthly roundup, tips, announcement, dated content — anything informational or editorial
 - other: about, contact, team, privacy, homepage, etc.
 
-When in doubt between blog and service → blog. Service slugs are short noun phrases only.
+CRITICAL RULES:
+1. Service page slugs are BARE NOUN PHRASES of 1–3 words. No verbs, no articles (the/a/an), no pronouns, no modifiers.
+2. Any slug with 4+ words that is NOT a clear city+service combo → blog or other.
+3. Topics about specific software products (Teams, Yammer, Office 365), compliance issues, security threats, or IT tips are BLOG posts — not service pages.
+4. Gerunds (building, becoming, creating), question words, and contractions always indicate blog.
+5. When genuinely uncertain → blog.
 
 {url_list}
 
