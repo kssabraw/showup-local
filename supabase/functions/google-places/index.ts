@@ -118,7 +118,7 @@ serve(async (req) => {
 
       // Extract categories - Outscraper returns category and subtypes
       // subtypes may be a comma-separated string or an array
-      console.log('outscraper category fields:', JSON.stringify({ category: p.category, type: p.type, category_name: p.category_name, subtypes: p.subtypes }));
+      console.log('outscraper category fields:', JSON.stringify({ category: p.category, type: p.type, category_name: p.category_name, subtypes: p.subtypes, categories: p.categories, types: p.types, secondary_category: p.secondary_category }));
       const primaryCategory = p.category || p.category_name || p.type || '';
       let rawSubtypes: string[];
       if (Array.isArray(p.subtypes)) {
