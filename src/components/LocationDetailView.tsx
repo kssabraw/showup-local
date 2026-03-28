@@ -295,7 +295,16 @@ const LocationDetailView = ({
       });
       if (!response.ok) {
         const errBody = await response.json().catch(() => ({}));
-        throw new Error(errBody.detail || `Scan failed (${response.status})`);
+        const detail = errBody.detail || "";
+        const is4xx = response.status >= 400 && response.status < 500;
+        toast({
+          title: "Brand voice scan failed",
+          description: is4xx
+            ? detail || "There was an issue with your website. Check the URL is correct and the site is live."
+            : detail || "Something went wrong on our end. Please try again — if the problem continues, contact ShowUP support.",
+          variant: "destructive",
+        });
+        return;
       }
       const result = await response.json();
       const { error } = await supabase
@@ -308,7 +317,9 @@ const LocationDetailView = ({
       console.error("Brand voice scan error:", err);
       toast({
         title: "Brand voice scan failed",
-        description: err instanceof Error ? err.message : "An unexpected error occurred.",
+        description: err instanceof Error && err.message
+          ? err.message
+          : "Unable to reach the ShowUP analysis service. Please try again.",
         variant: "destructive",
       });
     } finally {

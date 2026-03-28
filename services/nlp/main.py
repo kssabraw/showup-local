@@ -1509,6 +1509,20 @@ async def analyze_brand_voice(request: BrandVoiceRequest):
         timeout=15.0,
         headers=CRAWL_HEADERS,
     ) as client:
+        # Check homepage is reachable before doing anything else
+        try:
+            probe = await client.get(url, timeout=10.0)
+            if probe.status_code >= 400:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Your website returned a {probe.status_code} error. Check that the URL is correct and the site is live."
+                )
+        except httpx.RequestError as e:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Your website couldn't be reached ({type(e).__name__}). Check that the URL is correct and your site is live."
+            )
+
         selected = await _crawl_pages_for_brand_voice(url, client, max_pages=25)
         texts = await asyncio.gather(*[_fetch_page_text(p['url'], client) for p in selected])
 
@@ -1521,11 +1535,23 @@ async def analyze_brand_voice(request: BrandVoiceRequest):
     logger.info(f"Brand voice: sampled {pages_sampled}/{len(selected)} pages for {url}")
 
     if not page_contents:
-        raise HTTPException(status_code=422, detail="No readable page content found on the website.")
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Your website was reached but no readable text content was found. "
+                "This usually means the site is JavaScript-rendered (React, Vue, etc.) "
+                "and requires server-side rendering to be crawlable. "
+                "Contact ShowUP support for assistance."
+            )
+        )
 
     try:
         brand_voice = await analyze_brand_voice_with_anthropic(page_contents, request.business_name)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Brand voice analysis failed: {e}")
+        logger.error(f"Brand voice Anthropic error for {url}: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail="Our AI analysis service encountered an error. Please try again — if the problem continues, contact ShowUP support."
+        )
 
     return BrandVoiceResponse(brand_voice=brand_voice, pages_sampled=pages_sampled)
