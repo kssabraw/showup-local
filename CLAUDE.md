@@ -2,9 +2,11 @@
 
 ## What This App Is
 
-ShowUP Local is a local SEO content generation platform. The core idea: a user inputs a keyword and location, the app analyzes the top competitor pages ranking for that keyword, extracts SEO signals (related keywords, key phrases, Google entities), and uses that data to generate optimized local SEO content pages for service-area businesses (e.g. plumbers, HVAC, electricians).
+ShowUP Local is a local SEO content generation platform. The core idea: a user inputs a keyword and location, the app analyzes the top competitor pages ranking for that keyword, extracts SEO signals (related keywords, key phrases, Google entities), and uses that data to generate optimized local SEO content pages.
 
 The name "ShowUP" is a play on showing up in local search results.
+
+**Target customer**: Any local business that relies heavily on their Google Business Profile (GBP) to generate leads — brick-and-mortar shops, restaurants, medical/dental, legal, auto repair, salons, contractors, etc. Service area businesses (SABs like plumbers, HVAC, electricians) are a subset but not the primary focus.
 
 ---
 
