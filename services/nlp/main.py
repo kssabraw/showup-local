@@ -19,8 +19,9 @@ logger.info(f"Working directory: {os.getcwd()}")
 logger.info(f"Files in cwd: {os.listdir('.')}")
 
 try:
-    from fastapi import FastAPI, HTTPException
+    from fastapi import FastAPI, HTTPException, Depends, Security
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.security import APIKeyHeader
     from pydantic import BaseModel
     from typing import List, Dict, Optional
     import re
@@ -83,6 +84,16 @@ DATAFORSEO_LOGIN     = os.environ.get("DATAFORSEO_LOGIN", "")
 DATAFORSEO_PASSWORD  = os.environ.get("DATAFORSEO_PASSWORD", "")
 SCRAPEOWL_API_KEY    = os.environ.get("SCRAPEOWL_API_KEY", "")
 ANTHROPIC_API_KEY    = os.environ.get("ANTHROPIC_API_KEY", "")
+NLP_API_KEY          = os.environ.get("NLP_API_KEY", "")
+
+# ── API key auth dependency ───────────────────────────────────────────────────
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+async def verify_api_key(api_key: str = Security(_api_key_header)):
+    """Validates X-API-Key header. Skipped if NLP_API_KEY env var is not set."""
+    if NLP_API_KEY and api_key != NLP_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    return api_key
 
 GOOGLE_NLP_ENDPOINT  = "https://language.googleapis.com/v1/documents:analyzeEntities"
 DATAFORSEO_ENDPOINT  = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced"
@@ -494,7 +505,7 @@ async def get_google_entities(
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
-@app.post('/analyze', response_model=AnalysisResponse)
+@app.post('/analyze', response_model=AnalysisResponse, dependencies=[Depends(verify_api_key)])
 async def analyze(request: AnalysisRequest):
     """
     Full pipeline:
@@ -1255,7 +1266,7 @@ Return only valid JSON, no markdown or explanation."""
         raise
 
 
-@app.post('/analyze-business', response_model=BusinessAnalysisResponse)
+@app.post('/analyze-business', response_model=BusinessAnalysisResponse, dependencies=[Depends(verify_api_key)])
 async def analyze_business(request: BusinessAnalysisRequest):
     """
     Phase 1 business setup pipeline:
@@ -1523,7 +1534,7 @@ Return a JSON object with exactly this structure:
     }
 
 
-@app.post('/analyze-brand-voice', response_model=BrandVoiceResponse)
+@app.post('/analyze-brand-voice', response_model=BrandVoiceResponse, dependencies=[Depends(verify_api_key)])
 async def analyze_brand_voice(request: BrandVoiceRequest):
     """
     Brand voice pipeline:

@@ -1,7 +1,9 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
+const ALLOWED_ORIGIN = Deno.env.get('ALLOWED_ORIGIN') || '*';
+
 const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
 };
 
@@ -118,7 +120,6 @@ serve(async (req) => {
 
       // Extract categories - Outscraper returns category and subtypes
       // subtypes may be a comma-separated string or an array
-      console.log('outscraper category fields:', JSON.stringify({ category: p.category, type: p.type, category_name: p.category_name, subtypes: p.subtypes, categories: p.categories, types: p.types, secondary_category: p.secondary_category }));
       const primaryCategory = p.category || p.category_name || p.type || '';
       let rawSubtypes: string[];
       if (Array.isArray(p.subtypes)) {

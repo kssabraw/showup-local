@@ -1,21 +1,31 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import AppSidebar from "@/components/AppSidebar";
 import DashboardView from "@/components/DashboardView";
 import NewContentView from "@/components/NewContentView";
 import BusinessSearchView, { type BusinessDetails } from "@/components/BusinessSearchView";
 import LocationsView from "@/components/LocationsView";
 import LocationDetailView from "@/components/LocationDetailView";
+import LoginView from "@/components/LoginView";
 import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
+import type { Session } from "@supabase/supabase-js";
 
 const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
+const NLP_API_KEY = import.meta.env.VITE_NLP_API_KEY ?? "";
 
 const Index = () => {
   const { toast } = useToast();
+  const [session, setSession] = useState<Session | null | undefined>(undefined);
   const [activeItem, setActiveItem] = useState("dashboard");
   const [collapsed, setCollapsed] = useState(false);
   const [selectedLocationId, setSelectedLocationId] = useState<string | null>(null);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
+    return () => subscription.unsubscribe();
+  }, []);
 
   const handleItemClick = (item: string) => {
     setActiveItem(item);
@@ -93,7 +103,7 @@ const Index = () => {
 
       const response = await fetch(`${NLP_SERVICE_URL}/analyze-business`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
         body: JSON.stringify({
           website_url: business.website,
           business_name: business.name,
@@ -119,6 +129,12 @@ const Index = () => {
     }
   };
 
+  // Still loading session — render nothing to avoid flash
+  if (session === undefined) return null;
+
+  // Not authenticated — show login
+  if (session === null) return <LoginView onAuth={() => {}} />;
+
   return (
     <div className="min-h-screen bg-background">
       <AppSidebar
@@ -136,8 +152,15 @@ const Index = () => {
         <header className="h-16 border-b border-border bg-card/80 backdrop-blur-sm flex items-center px-6 sticky top-0 z-40">
           <div className="flex-1" />
           <div className="flex items-center gap-3">
+            <span className="text-xs text-muted-foreground hidden sm:block">{session.user.email}</span>
+            <button
+              onClick={() => supabase.auth.signOut()}
+              className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Sign out
+            </button>
             <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center text-primary-foreground text-xs font-bold">
-              SU
+              {(session.user.email?.[0] ?? "U").toUpperCase()}
             </div>
           </div>
         </header>
