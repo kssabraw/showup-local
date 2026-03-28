@@ -655,6 +655,86 @@ _STATE_ABBREV_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# Function words that appear in blog titles but not in service/location page slugs
+BLOG_STOP_WORDS = {
+    # Articles & prepositions
+    'a','an','the','to','for','in','on','at','by','from','with','about',
+    'of','and','or','but','as','if','into','over','out','up','down',
+    # Question / clause words
+    'how','why','what','when','where','who','which','whether',
+    # Common blog verbs
+    'do','does','did','get','make','find','choose','fix','know','need',
+    'use','keep','avoid','increase','improve','reduce','boost','help',
+    'save','build','create','start','stop','prevent','handle','manage',
+    # List/tip words
+    'tips','ways','reasons','things','steps','signs','mistakes','ideas',
+    'questions','examples','facts','benefits','types','differences',
+    # Adjectives common in blog titles
+    'best','top','great','good','better','new','old','free','easy','quick',
+    'simple','complete','ultimate','essential','important','common','right',
+    'wrong','perfect','proven','effective','powerful','smart',
+    # Numbers as words
+    'one','two','three','four','five','six','seven','eight','nine','ten',
+}
+
+# Words that almost never start a service/location page slug
+BLOG_LEAD_WORDS = {
+    # Interrogatives
+    'how','why','what','when','where','who','which','whether',
+    # Modal / auxiliary verbs
+    'is','are','was','were','will','would','can','could','should','do','does','did',
+    # Imperative / action verbs that open blog posts
+    'get','find','make','learn','discover','explore','understand','read',
+    'see','check','avoid','stop','start','build','improve','increase',
+    'boost','reduce','save','use','try','need','want',
+}
+
+# Mid-slug function words: their presence mid-slug signals sentence structure
+BLOG_MID_WORDS = {
+    'in','the','for','with','of','and','or','to','a','an','by','from',
+    'at','on','as','into','over','about',
+}
+
+
+def _slug_looks_like_blog(slug: str) -> bool:
+    """Return True if a URL leaf slug looks like a blog post rather than a service/location page.
+
+    Four signals are checked (any one is sufficient):
+    1. Length — >6 words is almost always editorial content.
+    2. Digit prefix — e.g. 5-tips-for-... or 10-reasons-...
+    3. Question/verb lead word — slugs starting with 'how', 'why', 'is', 'can', 'do', etc.
+    4. Sentence structure — mid-slug prepositions/articles (in, the, for, of) indicate the
+       slug reads like a natural-language sentence rather than a short noun phrase.
+    Service/location slugs are short noun phrases with no function words.
+    """
+    words = [w for w in re.split(r'[-_]', slug.lower()) if len(w) > 1]
+    if not words:
+        return False
+
+    # Signal 1: More than 6 words → almost always a blog post
+    if len(words) > 6:
+        return True
+
+    # Signal 2: Starts with a digit (e.g. 5-tips-for..., 10-reasons...)
+    if words[0].isdigit():
+        return True
+
+    # Signal 3: Starts with a question word, modal, or action verb typical of blog titles
+    if words[0] in BLOG_LEAD_WORDS:
+        return True
+
+    # Signal 4: Mid-slug prepositions or articles indicate sentence structure
+    # (e.g. "technology-in-the-medical-field", "guide-for-homeowners")
+    # Only trigger on 3+ word slugs to avoid false-positives on short slugs
+    if len(words) >= 3 and any(w in BLOG_MID_WORDS for w in words[1:]):
+        return True
+
+    # Fallback: 4+ word slugs containing any stop word
+    if len(words) >= 4 and any(w in BLOG_STOP_WORDS for w in words):
+        return True
+
+    return False
+
 CRAWL_HEADERS = {
     'User-Agent': 'ShowUPLocalBot/1.0 (business-page-discovery; respects robots.txt)',
 }
@@ -676,6 +756,28 @@ def classify_page_type(url: str, title: str = '', h1: str = '') -> dict:
     # ── Blog / content pages ──────────────────────────────────────────────────
     if first in BLOG_SLUGS or (len(segments) > 1 and segments[0] in BLOG_SLUGS):
         return {'type': 'blog', 'primary_service': None, 'primary_city': None}
+
+    # Slug-complexity check: root-domain blog posts (e.g. /how-to-fix-your-furnace-this-winter)
+    # Long slugs (>6 words) or digit-prefixed slugs (5-tips-...) are always blog.
+    # Medium slugs (4-6 words with stop words) get a service+geo override to protect
+    # verbose city+service URLs like /emergency-plumber-dallas-tx.
+    leaf = segments[-1] if segments else ''
+    if leaf and _slug_looks_like_blog(leaf):
+        leaf_word_list = [w for w in re.split(r'[-_]', leaf.lower()) if len(w) > 1]
+        # Signals 1–3 are definitive: long slug, digit prefix, or question/verb lead word.
+        # No service-word override — "how-does-medical-technology-help" is still a blog.
+        definitely_blog = (
+            len(leaf_word_list) > 6
+            or (leaf_word_list and leaf_word_list[0].isdigit())
+            or (leaf_word_list and leaf_word_list[0] in BLOG_LEAD_WORDS)
+        )
+        if definitely_blog:
+            return {'type': 'blog', 'primary_service': None, 'primary_city': None}
+        # Signal 4 (mid-slug function words): allow service+geo override to protect
+        # verbose city+service URLs (e.g. /emergency-plumber-in-dallas — has "in" mid-slug).
+        leaf_words = set(leaf_word_list)
+        if not (leaf_words & SERVICE_WORDS or _STATE_ABBREV_PATTERN.search(leaf)):
+            return {'type': 'blog', 'primary_service': None, 'primary_city': None}
 
     # ── Skip patterns (admin, privacy, etc.) ─────────────────────────────────
     if first in SKIP_SLUGS:
