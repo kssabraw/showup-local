@@ -175,14 +175,20 @@ def classify(url: str) -> Tuple[str, str]:
     if not words:
         return 'keep', 'homepage or root'
 
-    # Leading digit (e.g. /5-reasons-why-..., /10-tips-...)
-    if words[0].isdigit():
-        return 'drop', f'leading number: {words[0]}'
+    # Leading digit in ANY segment (e.g. /4-frequently-visited-sites/, /5-reasons-why/...)
+    for seg in segments:
+        seg_words = _words(seg)
+        if seg_words and seg_words[0].isdigit():
+            return 'drop', f'segment starts with number: {seg_words[0]}'
 
     # 4-digit year anywhere (dated post)
     for w in words:
         if re.match(r'^(19|20)\d{2}$', w):
             return 'drop', f'year in slug: {w}'
+
+    # "vs" anywhere — comparison articles (windows-vs-mac, managed-it-vs-break-fix)
+    if 'vs' in words:
+        return 'drop', 'comparison slug: "vs"'
 
     # Blog lead word (first word)
     if words[0] in BLOG_LEAD_WORDS:
