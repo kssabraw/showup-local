@@ -32,24 +32,25 @@ Deno.serve(async (req) => {
 
     const primary = createClient(primaryUrl, primaryKey);
 
-    // --- Write to external Supabase ---
+    // --- Write to external Supabase (optional — skipped if key not configured) ---
     const externalUrl = "https://yvdfiwabdvcpqwrmtysd.supabase.co";
     const externalKey = Deno.env.get("EXTERNAL_SUPABASE_SERVICE_ROLE_KEY");
-    if (!externalKey) {
-      throw new Error("EXTERNAL_SUPABASE_SERVICE_ROLE_KEY not configured");
+    let externalError: { message: string } | null = null;
+
+    if (externalKey) {
+      const external = createClient(externalUrl, externalKey);
+      const { error } = await external
+        .from("business_profiles")
+        .upsert(record, { onConflict: "gbp_place_id" });
+      if (error) {
+        externalError = error;
+        console.error("External write failed (non-blocking):", error.message);
+      }
+    } else {
+      console.warn("EXTERNAL_SUPABASE_SERVICE_ROLE_KEY not configured — skipping external write");
     }
 
-    const external = createClient(externalUrl, externalKey);
-    const { error: externalError } = await external
-      .from("business_profiles")
-      .upsert(record, { onConflict: "gbp_place_id" });
-
-    if (externalError) {
-      console.error("External write failed (non-blocking):", externalError.message);
-    }
-
-    // Write to primary with sync status
-    const primaryRecord = { ...record, external_synced: !externalError };
+    const primaryRecord = { ...record };
     const { data: primaryData, error: primaryError } = await primary
       .from("business_profiles")
       .upsert(primaryRecord, { onConflict: "gbp_place_id" })

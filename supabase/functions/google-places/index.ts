@@ -61,12 +61,17 @@ serve(async (req) => {
       // data.data is an array of arrays: [[place1, place2, ...]]
       const places = (data.data && data.data[0]) || [];
 
-      const suggestions = places.map((p: any) => ({
-        place_id: p.place_id || p.google_id || '',
-        name: p.name || '',
-        address: p.full_address || p.address || '',
-        description: `${p.name || ''}, ${p.full_address || p.address || ''}`,
-      }));
+      const suggestions = places.map((p: any) => {
+        const fullAddress = p.full_address || p.address || '';
+        const cityFallback = [p.city, p.state].filter(Boolean).join(', ');
+        const displayAddress = fullAddress || cityFallback;
+        return {
+          place_id: p.place_id || p.google_id || '',
+          name: p.name || '',
+          address: displayAddress,
+          description: `${p.name || ''}, ${displayAddress}`,
+        };
+      });
 
       return new Response(JSON.stringify({ suggestions }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -112,9 +117,18 @@ serve(async (req) => {
       }
 
       // Extract categories - Outscraper returns category and subtypes
-      const primaryCategory = p.category || p.type || '';
-      const rawSubtypes = Array.isArray(p.subtypes) ? p.subtypes : (typeof p.subtypes === 'string' ? [p.subtypes] : []);
-      const additionalCategories = rawSubtypes.filter((t: string) => t !== primaryCategory);
+      // subtypes may be a comma-separated string or an array
+      console.log('outscraper category fields:', JSON.stringify({ category: p.category, type: p.type, category_name: p.category_name, subtypes: p.subtypes, categories: p.categories, types: p.types, secondary_category: p.secondary_category }));
+      const primaryCategory = p.category || p.category_name || p.type || '';
+      let rawSubtypes: string[];
+      if (Array.isArray(p.subtypes)) {
+        rawSubtypes = p.subtypes;
+      } else if (typeof p.subtypes === 'string' && p.subtypes) {
+        rawSubtypes = p.subtypes.split(',').map((s: string) => s.trim()).filter(Boolean);
+      } else {
+        rawSubtypes = [];
+      }
+      const additionalCategories = rawSubtypes.filter((t: string) => t.toLowerCase() !== primaryCategory.toLowerCase());
 
       // Decode the website URL — Outscraper sometimes returns query strings
       // double-encoded (e.g. %3F instead of ?).
