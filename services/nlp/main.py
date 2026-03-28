@@ -686,6 +686,11 @@ BLOG_STOP_WORDS = {
     'game','changing','groundbreaking','revolutionary','disruptive',
     'innovative','emerging','evolving','latest','modern','upcoming',
     'future','current','global','local','digital','virtual','real',
+    # Negative-framing / problem words common in blog titles
+    'failures','failure','problems','problem','challenges','challenge',
+    'risks','risk','myths','myth','stereotypes','stereotype',
+    'misconceptions','misconception','mistakes','mistake','issues','issue',
+    'dangers','danger','warning','warnings','pitfalls','pitfall',
 }
 
 # Words that almost never start a service/location page slug
@@ -703,6 +708,13 @@ BLOG_LEAD_WORDS = {
     'secure','protect','leverage','maximize','minimize','streamline',
     'enable','disable','setup','upgrade','deploy','troubleshoot',
     'comparing','choosing','picking','switching','using','getting',
+    # Gerunds that open editorial/explainer content
+    'clarifying','understanding','navigating','protecting','managing',
+    'avoiding','preparing','addressing','implementing','evaluating',
+    'identifying','recognizing','overcoming','preventing','handling',
+    # Contractions without apostrophes (common in casual blog titles)
+    'dont','cant','wont','isnt','arent','wasnt','didnt',
+    'shouldnt','couldnt','wouldnt','havent','hasnt','hadnt',
 }
 
 # Mid-slug function words: their presence mid-slug signals sentence structure
@@ -711,6 +723,8 @@ BLOG_MID_WORDS = {
     'at','on','as','into','over','about',
     # Auxiliary/linking verbs mid-slug indicate a sentence (e.g. cybersecurity-is-fortifying-...)
     'is','are','was','were','has','have','had',
+    # Possessive/personal pronouns — never appear in service page slugs
+    'your','our','their','my','its',
 }
 
 
@@ -836,8 +850,10 @@ def classify_page_type(url: str, title: str = '', h1: str = '') -> dict:
     elif has_service:
         page_type = 'service'
     elif len(segments) == 1 and first not in ABOUT_SLUGS:
-        # Top-level pages not otherwise classified are likely service/product pages
-        page_type = 'service'
+        # Short root-level slugs (≤3 words) are likely service/product pages (/hvac/, /plumbing-repair/)
+        # Longer ones are ambiguous — return 'other' so Haiku can reclassify them
+        slug_words = [w for w in re.split(r'[-_]', first) if len(w) > 1]
+        page_type = 'service' if len(slug_words) <= 3 else 'other'
     else:
         page_type = 'other'
 
