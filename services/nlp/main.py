@@ -949,6 +949,68 @@ async def _discover_via_nav(base_url: str, client: httpx.AsyncClient) -> List[st
         return []
 
 
+async def _classify_urls_with_ai(urls: List[str]) -> Dict[str, str]:
+    """
+    Use Claude Sonnet to classify a batch of URLs by page type.
+    Returns {url: page_type} for each URL.
+    Page types: city_service | service | location | blog | other
+
+    Falls back to an empty dict if the API key is missing or the call fails,
+    in which case the caller uses the rule-based classifier instead.
+    """
+    if not ANTHROPIC_API_KEY or not urls:
+        return {}
+
+    try:
+        import anthropic
+        import json as json_lib
+
+        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+        url_list = "\n".join(urls)
+        prompt = f"""You are classifying URLs from a local service business website.
+For each URL determine its page type and return a single JSON object mapping each URL to its type.
+
+Page types:
+- city_service  : A service page targeting a specific city or location (e.g. /plumbing-repair-dallas-tx/, /managed-it-services-miami-fl/)
+- service       : A general service or product page with no specific location (e.g. /hvac-repair/, /cybersecurity-services/)
+- location      : A location, city, or service-area listing page (e.g. /locations/, /service-areas/, /cities-we-serve/)
+- blog          : A blog post, news article, press release, opinion piece, how-to guide, or any editorial/informational content
+- other         : About, contact, team, privacy, terms, pricing, homepage, or anything else
+
+Rules:
+- When in doubt between blog and service, prefer blog — service pages have very short noun-phrase slugs
+- Company announcements (awards, certifications, partnerships) are blog
+- Dated content (year in slug) is blog
+- How-to, tips, guides, "X reasons why" are blog
+
+URLs to classify:
+{url_list}
+
+Respond with ONLY a JSON object, no markdown, no explanation:
+{{"https://example.com/url1": "service", "https://example.com/url2": "blog"}}"""
+
+        response = await client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        raw = response.content[0].text.strip()
+        # Strip markdown fences if present
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-z]*\n?", "", raw)
+            raw = re.sub(r"\n?```$", "", raw)
+
+        result = json_lib.loads(raw)
+        logger.info(f"AI classified {len(result)} URLs")
+        return result
+
+    except Exception as e:
+        logger.warning(f"AI URL classification failed, falling back to rule-based: {e}")
+        return {}
+
+
 async def crawl_website(website_url: str, max_pages: int = 200) -> List[dict]:
     """
     Sitemap-first page discovery pipeline:
@@ -957,7 +1019,7 @@ async def crawl_website(website_url: str, max_pages: int = 200) -> List[dict]:
       3. Fallback: nav extraction from homepage (1 request)
       4. Last resort: shallow 1-level BFS from homepage
 
-    Classifies each URL by pattern — no need to fetch individual pages.
+    Classifies URLs using Claude Sonnet (AI) with rule-based fallback.
     """
     import urllib.parse
 
@@ -981,26 +1043,58 @@ async def crawl_website(website_url: str, max_pages: int = 200) -> List[dict]:
         # Stage 3: shallow BFS (homepage links only, no recursion)
         if not discovered:
             logger.info(f"Nav empty for {url} — falling back to homepage link scan")
-            discovered = await _discover_via_nav(url, client)  # same as nav but logged differently
+            discovered = await _discover_via_nav(url, client)
 
-        # Always include the homepage itself
-        parsed = urllib.parse.urlparse(url)
-        homepage = f"{parsed.scheme}://{parsed.netloc}"
-        all_urls = list(dict.fromkeys([homepage] + discovered))  # dedup, preserve order
+    # Always include the homepage itself
+    parsed = urllib.parse.urlparse(url)
+    homepage = f"{parsed.scheme}://{parsed.netloc}"
+    all_urls = list(dict.fromkeys([homepage] + discovered))  # dedup, preserve order
 
-        # Classify all discovered URLs, drop blog pages entirely
-        all_pages = [_make_page_record(u) for u in all_urls]
-        all_pages = [p for p in all_pages if p['page_type'] != 'blog']
+    # Rule-based pre-filter: drop definite skips (admin pages, known blog prefixes)
+    # before sending to AI — keeps token count low and avoids wasting quota on junk
+    def _rule_prefilter(u: str) -> bool:
+        p = urllib.parse.urlparse(u).path.lower().rstrip('/')
+        segs = [s for s in p.split('/') if s]
+        first = segs[0] if segs else ''
+        return first not in SKIP_SLUGS  # keep everything except definite admin/junk
 
-        # Sort: city_service → service → location → other
-        def _sort_key(p: dict) -> int:
-            return {'city_service': 0, 'service': 1, 'location': 2, 'other': 3}.get(p['page_type'], 3)
+    candidate_urls = [u for u in all_urls if _rule_prefilter(u)]
 
-        pages = sorted(all_pages, key=_sort_key)[:max_pages]
-        type_counts = {}
-        for p in pages:
-            type_counts[p['page_type']] = type_counts.get(p['page_type'], 0) + 1
-        logger.info(f"Page classification: {type_counts}")
+    # AI classification — send all candidates in one batch call
+    ai_types = await _classify_urls_with_ai(candidate_urls)
+
+    # Build page records using AI types where available, rule-based as fallback
+    all_pages = []
+    for u in candidate_urls:
+        if u in ai_types:
+            page_type = ai_types[u]
+            if page_type not in ('city_service', 'service', 'location', 'blog', 'other'):
+                page_type = 'other'
+        else:
+            # Fallback to rule-based classifier
+            c = classify_page_type(u)
+            page_type = c['type']
+        all_pages.append({
+            'url': u,
+            'title': '',
+            'h1': '',
+            'page_type': page_type,
+            'primary_service': None,
+            'primary_city': None,
+        })
+
+    # Drop blog pages entirely
+    all_pages = [p for p in all_pages if p['page_type'] != 'blog']
+
+    # Sort: city_service → service → location → other
+    def _sort_key(p: dict) -> int:
+        return {'city_service': 0, 'service': 1, 'location': 2, 'other': 3}.get(p['page_type'], 3)
+
+    pages = sorted(all_pages, key=_sort_key)[:max_pages]
+    type_counts = {}
+    for p in pages:
+        type_counts[p['page_type']] = type_counts.get(p['page_type'], 0) + 1
+    logger.info(f"Page classification: {type_counts}")
 
     logger.info(f"Page discovery complete: {len(pages)} pages from {website_url}")
     return pages
