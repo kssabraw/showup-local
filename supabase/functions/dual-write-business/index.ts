@@ -50,8 +50,7 @@ Deno.serve(async (req) => {
       console.warn("EXTERNAL_SUPABASE_SERVICE_ROLE_KEY not configured — skipping external write");
     }
 
-    // Write to primary with sync status
-    const primaryRecord = { ...record, external_synced: externalKey ? !externalError : false };
+    const primaryRecord = { ...record };
     const { data: primaryData, error: primaryError } = await primary
       .from("business_profiles")
       .upsert(primaryRecord, { onConflict: "gbp_place_id" })
