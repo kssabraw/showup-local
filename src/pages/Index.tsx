@@ -7,10 +7,12 @@ import LocationsView from "@/components/LocationsView";
 import LocationDetailView from "@/components/LocationDetailView";
 import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
+import { useToast } from "@/hooks/use-toast";
 
 const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
 
 const Index = () => {
+  const { toast } = useToast();
   const [activeItem, setActiveItem] = useState("dashboard");
   const [collapsed, setCollapsed] = useState(false);
   const [selectedLocationId, setSelectedLocationId] = useState<string | null>(null);
@@ -21,6 +23,15 @@ const Index = () => {
   };
 
   const handleBusinessConfirm = async (business: BusinessDetails) => {
+    if (!business.place_id || !business.name || !business.address) {
+      toast({
+        title: "Missing business info",
+        description: "This listing is missing a Place ID, name, or address. Please try searching again or selecting a different result.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     try {
       const { data, error } = await supabase.functions.invoke("dual-write-business", {
         body: {
@@ -55,6 +66,11 @@ const Index = () => {
       }
     } catch (err) {
       console.error("Error saving business:", err);
+      toast({
+        title: "Failed to save business",
+        description: err instanceof Error ? err.message : "An unexpected error occurred.",
+        variant: "destructive",
+      });
     }
   };
 
