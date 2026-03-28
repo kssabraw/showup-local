@@ -1,7 +1,9 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+const ALLOWED_ORIGIN = Deno.env.get("ALLOWED_ORIGIN") || "*";
+
 const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
@@ -26,8 +28,20 @@ Deno.serve(async (req) => {
     // --- Write to Lovable Cloud (primary) ---
     const primaryUrl = Deno.env.get("SUPABASE_URL");
     const primaryKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
     if (!primaryUrl || !primaryKey) {
       throw new Error("Primary Supabase credentials not configured");
+    }
+
+    // Extract the authenticated user's ID from the JWT so we can set user_id on the row.
+    let userId: string | null = null;
+    const authHeader = req.headers.get("Authorization");
+    if (authHeader && anonKey) {
+      const anonClient = createClient(primaryUrl, anonKey, {
+        global: { headers: { Authorization: authHeader } },
+      });
+      const { data: { user } } = await anonClient.auth.getUser();
+      userId = user?.id ?? null;
     }
 
     const primary = createClient(primaryUrl, primaryKey);
@@ -50,7 +64,7 @@ Deno.serve(async (req) => {
       console.warn("EXTERNAL_SUPABASE_SERVICE_ROLE_KEY not configured — skipping external write");
     }
 
-    const primaryRecord = { ...record };
+    const primaryRecord = { ...record, user_id: userId };
     const { data: primaryData, error: primaryError } = await primary
       .from("business_profiles")
       .upsert(primaryRecord, { onConflict: "gbp_place_id" })

@@ -19,10 +19,14 @@ logger.info(f"Working directory: {os.getcwd()}")
 logger.info(f"Files in cwd: {os.listdir('.')}")
 
 try:
-    from fastapi import FastAPI, HTTPException
+    from fastapi import FastAPI, HTTPException, Depends, Security, Request
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.security import APIKeyHeader
     from pydantic import BaseModel
     from typing import List, Dict, Optional
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.util import get_remote_address
+    from slowapi.errors import RateLimitExceeded
     import re
     from collections import defaultdict
     logger.info("Basic imports done")
@@ -59,6 +63,11 @@ except Exception as e:
 
 app = FastAPI()
 
+# ── Rate limiting ──────────────────────────────────────────────────────────────
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # ── CORS ──────────────────────────────────────────────────────────────────────
 # Reads allowed origins from CORS_ORIGINS env var (comma-separated).
 # Falls back to * in development. Tighten to your Railway/Vercel frontend
@@ -83,6 +92,16 @@ DATAFORSEO_LOGIN     = os.environ.get("DATAFORSEO_LOGIN", "")
 DATAFORSEO_PASSWORD  = os.environ.get("DATAFORSEO_PASSWORD", "")
 SCRAPEOWL_API_KEY    = os.environ.get("SCRAPEOWL_API_KEY", "")
 ANTHROPIC_API_KEY    = os.environ.get("ANTHROPIC_API_KEY", "")
+NLP_API_KEY          = os.environ.get("NLP_API_KEY", "")
+
+# ── API key auth dependency ───────────────────────────────────────────────────
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+async def verify_api_key(api_key: str = Security(_api_key_header)):
+    """Validates X-API-Key header. Skipped if NLP_API_KEY env var is not set."""
+    if NLP_API_KEY and api_key != NLP_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    return api_key
 
 GOOGLE_NLP_ENDPOINT  = "https://language.googleapis.com/v1/documents:analyzeEntities"
 DATAFORSEO_ENDPOINT  = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced"
@@ -494,8 +513,9 @@ async def get_google_entities(
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
-@app.post('/analyze', response_model=AnalysisResponse)
-async def analyze(request: AnalysisRequest):
+@app.post('/analyze', response_model=AnalysisResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+async def analyze(request: Request, body: AnalysisRequest):
     """
     Full pipeline:
       1. DataForSEO  — fetch top organic URLs for keyword + location
@@ -505,12 +525,12 @@ async def analyze(request: AnalysisRequest):
     Pass optional `urls` to skip the DataForSEO SERP step (testing / override).
     """
     # Step 1: get URLs
-    if request.urls:
-        urls = request.urls
+    if body.urls:
+        urls = body.urls
         logger.info(f"Using {len(urls)} manually provided URLs")
     else:
         async with httpx.AsyncClient() as client:
-            urls = await fetch_serp_urls(request.keyword, request.location, client)
+            urls = await fetch_serp_urls(body.keyword, body.location, client)
         if not urls:
             raise HTTPException(status_code=502, detail="DataForSEO returned no usable URLs")
 
@@ -533,17 +553,17 @@ async def analyze(request: AnalysisRequest):
 
     # Step 4: NLP analysis
     related = ZoneKeywords(
-        title=get_related_keywords_for_zone(zone_buckets["title"], request.keyword),
-        h1=get_related_keywords_for_zone(zone_buckets["h1"], request.keyword),
-        h2_h3=get_related_keywords_for_zone(zone_buckets["h2_h3"], request.keyword),
-        body=get_related_keywords_for_zone(zone_buckets["body"], request.keyword),
+        title=get_related_keywords_for_zone(zone_buckets["title"], body.keyword),
+        h1=get_related_keywords_for_zone(zone_buckets["h1"], body.keyword),
+        h2_h3=get_related_keywords_for_zone(zone_buckets["h2_h3"], body.keyword),
+        body=get_related_keywords_for_zone(zone_buckets["body"], body.keyword),
     )
-    quadgrams = get_top_quadgrams(zone_buckets["paragraphs"], request.keyword)
+    quadgrams = get_top_quadgrams(zone_buckets["paragraphs"], body.keyword)
     google_entities = await get_google_entities(zone_buckets["paragraphs"])
 
     return AnalysisResponse(
-        keyword=request.keyword,
-        location=request.location,
+        keyword=body.keyword,
+        location=body.location,
         serp_urls=scraped_urls,
         related_keywords=related,
         top_quadgrams=quadgrams,
@@ -1255,19 +1275,20 @@ Return only valid JSON, no markdown or explanation."""
         raise
 
 
-@app.post('/analyze-business', response_model=BusinessAnalysisResponse)
-async def analyze_business(request: BusinessAnalysisRequest):
+@app.post('/analyze-business', response_model=BusinessAnalysisResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("20/minute")
+async def analyze_business(request: Request, body: BusinessAnalysisRequest):
     """
     Phase 1 business setup pipeline:
       1. Sitemap-first page discovery (robots.txt → sitemap.xml → nav fallback)
       2. Classify each page as service / location / city_service / other
       3. Use Claude Haiku to detect ICP and extract differentiators
     """
-    if not request.website_url:
+    if not body.website_url:
         raise HTTPException(status_code=400, detail="website_url is required")
 
     # Normalize URL
-    url = request.website_url.strip()
+    url = body.website_url.strip()
     if not url.startswith(('http://', 'https://')):
         url = f"https://{url}"
 
@@ -1283,9 +1304,9 @@ async def analyze_business(request: BusinessAnalysisRequest):
     try:
         llm_result = await analyze_business_with_anthropic(
             pages,
-            request.business_name,
-            request.gbp_category,
-            request.gbp_categories,
+            body.business_name,
+            body.gbp_category,
+            body.gbp_categories,
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Anthropic analysis failed: {e}")
@@ -1523,18 +1544,19 @@ Return a JSON object with exactly this structure:
     }
 
 
-@app.post('/analyze-brand-voice', response_model=BrandVoiceResponse)
-async def analyze_brand_voice(request: BrandVoiceRequest):
+@app.post('/analyze-brand-voice', response_model=BrandVoiceResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("20/minute")
+async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
     """
     Brand voice pipeline:
       1. Crawl up to 25 pages from the site (home → about → service → other)
       2. Fetch paragraph text from each page
       3. Send to Claude Haiku for brand voice extraction
     """
-    if not request.website_url:
+    if not body.website_url:
         raise HTTPException(status_code=400, detail="website_url is required")
 
-    url = request.website_url.strip()
+    url = body.website_url.strip()
     if not url.startswith(('http://', 'https://')):
         url = f"https://{url}"
 
@@ -1580,7 +1602,7 @@ async def analyze_brand_voice(request: BrandVoiceRequest):
         )
 
     try:
-        brand_voice = await analyze_brand_voice_with_anthropic(page_contents, request.business_name)
+        brand_voice = await analyze_brand_voice_with_anthropic(page_contents, body.business_name)
     except Exception as e:
         logger.error(f"Brand voice Anthropic error for {url}: {e}")
         raise HTTPException(

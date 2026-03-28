@@ -1,6 +1,9 @@
 import { useState } from "react";
 import { ChevronDown, ChevronUp, ExternalLink } from "lucide-react";
 
+// Only allow http/https URLs in rendered links to prevent javascript: injection
+const isSafeUrl = (url: string) => /^https?:\/\//i.test(url);
+
 interface RelatedKeyword {
   term: string;
   score: number;
@@ -268,7 +271,7 @@ const AnalysisResultsView = ({
             Competitor pages scraped and analysed for this keyword.
           </p>
           <div className="border border-border rounded-lg overflow-hidden divide-y divide-border">
-            {result.serp_urls.map((url, i) => (
+            {result.serp_urls.filter(isSafeUrl).map((url, i) => (
               <a
                 key={i}
                 href={url}

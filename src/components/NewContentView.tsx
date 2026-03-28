@@ -5,6 +5,7 @@ import { supabase } from "@/integrations/supabase/client";
 import AnalysisResultsView from "@/components/AnalysisResultsView";
 
 const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
+const NLP_API_KEY = import.meta.env.VITE_NLP_API_KEY ?? "";
 
 interface BusinessProfile {
   id: string;
@@ -83,7 +84,7 @@ const NewContentView = ({ onBack }: { onBack: () => void }) => {
       // Call the Railway NLP service
       const response = await fetch(`${NLP_SERVICE_URL}/analyze`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
         body: JSON.stringify({ keyword: keyword.trim(), location: location.trim() }),
       });
 
