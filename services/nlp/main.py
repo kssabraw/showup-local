@@ -655,6 +655,48 @@ _STATE_ABBREV_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# Function words that appear in blog titles but not in service/location page slugs
+BLOG_STOP_WORDS = {
+    # Articles & prepositions
+    'a','an','the','to','for','in','on','at','by','from','with','about',
+    'of','and','or','but','as','if','into','over','out','up','down',
+    # Question / clause words
+    'how','why','what','when','where','who','which','whether',
+    # Common blog verbs
+    'do','does','did','get','make','find','choose','fix','know','need',
+    'use','keep','avoid','increase','improve','reduce','boost','help',
+    'save','build','create','start','stop','prevent','handle','manage',
+    # List/tip words
+    'tips','ways','reasons','things','steps','signs','mistakes','ideas',
+    'questions','examples','facts','benefits','types','differences',
+    # Adjectives common in blog titles
+    'best','top','great','good','better','new','old','free','easy','quick',
+    'simple','complete','ultimate','essential','important','common','right',
+    'wrong','perfect','proven','effective','powerful','smart',
+    # Numbers as words
+    'one','two','three','four','five','six','seven','eight','nine','ten',
+}
+
+
+def _slug_looks_like_blog(slug: str) -> bool:
+    """Return True if a URL leaf slug looks like a blog post rather than a service/location page.
+    Blog slugs tend to be long and contain function words (verbs, prepositions, adjectives).
+    Service/location slugs are short noun phrases.
+    """
+    words = [w for w in re.split(r'[-_]', slug.lower()) if len(w) > 1]
+    if not words:
+        return False
+    # Slugs with more than 6 words are almost always blog posts
+    if len(words) > 6:
+        return True
+    # Slugs starting with a number (e.g. 5-tips-for..., 10-reasons...)
+    if words[0].isdigit():
+        return True
+    # 4+ word slugs containing stop words
+    if len(words) >= 4 and any(w in BLOG_STOP_WORDS for w in words):
+        return True
+    return False
+
 CRAWL_HEADERS = {
     'User-Agent': 'ShowUPLocalBot/1.0 (business-page-discovery; respects robots.txt)',
 }
@@ -676,6 +718,16 @@ def classify_page_type(url: str, title: str = '', h1: str = '') -> dict:
     # ── Blog / content pages ──────────────────────────────────────────────────
     if first in BLOG_SLUGS or (len(segments) > 1 and segments[0] in BLOG_SLUGS):
         return {'type': 'blog', 'primary_service': None, 'primary_city': None}
+
+    # Slug-complexity check: root-domain blog posts (e.g. /how-to-fix-your-furnace-this-winter)
+    # Only classify as blog when there are no strong service or geo signals in the slug itself,
+    # to avoid false-positiving on verbose city+service URLs.
+    leaf = segments[-1] if segments else ''
+    if leaf and _slug_looks_like_blog(leaf):
+        # Allow through if the slug contains a clear service word or geo signal
+        leaf_words = set(re.split(r'[-_]', leaf))
+        if not (leaf_words & SERVICE_WORDS or _STATE_ABBREV_PATTERN.search(leaf)):
+            return {'type': 'blog', 'primary_service': None, 'primary_city': None}
 
     # ── Skip patterns (admin, privacy, etc.) ─────────────────────────────────
     if first in SKIP_SLUGS:
