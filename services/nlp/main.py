@@ -650,8 +650,11 @@ ABOUT_SLUGS = {
     'sitemap','accessibility','disclaimer','refund','shipping',
 }
 
+# Require state abbreviation to appear at the END of a URL path segment (e.g. -tx, -fl).
+# This prevents common English words that double as state abbreviations (in=Indiana,
+# or=Oregon, me=Maine, ok=Oklahoma) from falsely triggering geo detection mid-slug.
 _STATE_ABBREV_PATTERN = re.compile(
-    r'(?:^|[-/])(' + '|'.join(STATE_ABBREVS) + r')(?:$|[-/])',
+    r'-(' + '|'.join(STATE_ABBREVS) + r')(?:/|$)',
     re.IGNORECASE
 )
 
@@ -687,6 +690,11 @@ BLOG_LEAD_WORDS = {
     'get','find','make','learn','discover','explore','understand','read',
     'see','check','avoid','stop','start','build','improve','increase',
     'boost','reduce','save','use','try','need','want',
+    # Action verbs common in blog/tutorial titles
+    'simplify','configure','integrate','optimize','automate','migrate',
+    'secure','protect','leverage','maximize','minimize','streamline',
+    'enable','disable','setup','upgrade','deploy','troubleshoot',
+    'comparing','choosing','picking','switching','using','getting',
 }
 
 # Mid-slug function words: their presence mid-slug signals sentence structure
@@ -729,6 +737,11 @@ def _slug_looks_like_blog(slug: str) -> bool:
     if len(words) >= 3 and any(w in BLOG_MID_WORDS for w in words[1:]):
         return True
 
+    # Signal 5: Contains a 4-digit year — dated blog posts, news, annual roundups
+    # (e.g. hipaa-compliance-in-2026, it-buzzwords-to-know-in-2021)
+    if any(re.match(r'^(19|20)\d{2}$', w) for w in words):
+        return True
+
     # Fallback: 4+ word slugs containing any stop word
     if len(words) >= 4 and any(w in BLOG_STOP_WORDS for w in words):
         return True
@@ -764,19 +777,23 @@ def classify_page_type(url: str, title: str = '', h1: str = '') -> dict:
     leaf = segments[-1] if segments else ''
     if leaf and _slug_looks_like_blog(leaf):
         leaf_word_list = [w for w in re.split(r'[-_]', leaf.lower()) if len(w) > 1]
-        # Signals 1–3 are definitive: long slug, digit prefix, or question/verb lead word.
-        # No service-word override — "how-does-medical-technology-help" is still a blog.
+        # Signals 1–3 and 5 are definitive — no service-word override.
         definitely_blog = (
             len(leaf_word_list) > 6
             or (leaf_word_list and leaf_word_list[0].isdigit())
             or (leaf_word_list and leaf_word_list[0] in BLOG_LEAD_WORDS)
+            or any(re.match(r'^(19|20)\d{2}$', w) for w in leaf_word_list)
         )
         if definitely_blog:
             return {'type': 'blog', 'primary_service': None, 'primary_city': None}
-        # Signal 4 (mid-slug function words): allow service+geo override to protect
-        # verbose city+service URLs (e.g. /emergency-plumber-in-dallas — has "in" mid-slug).
+        # Signal 4 (mid-slug function words): allow override only when the slug has BOTH
+        # a service word AND a state abbreviation at the end (e.g. /hvac-repair-in-dallas-tx).
+        # Requiring both prevents service words alone (compliance, cybersecurity, managed)
+        # from blocking blog classification on editorial slugs.
         leaf_words = set(leaf_word_list)
-        if not (leaf_words & SERVICE_WORDS or _STATE_ABBREV_PATTERN.search(leaf)):
+        has_service_word = bool(leaf_words & SERVICE_WORDS)
+        has_state_at_end = bool(_STATE_ABBREV_PATTERN.search(leaf))
+        if not (has_service_word and has_state_at_end):
             return {'type': 'blog', 'primary_service': None, 'primary_city': None}
 
     # ── Skip patterns (admin, privacy, etc.) ─────────────────────────────────
