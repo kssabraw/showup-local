@@ -675,6 +675,14 @@ BLOG_STOP_WORDS = {
     'wrong','perfect','proven','effective','powerful','smart',
     # Numbers as words
     'one','two','three','four','five','six','seven','eight','nine','ten',
+    # News / announcement / press release verbs (company updates, achievements)
+    'secures','achieves','wins','launches','announces','expands','hires',
+    'partners','joins','receives','earns','reveals','unveils','named',
+    'recognized','awarded','ranked','acquires','closes','raises','signs',
+    # Editorial adjectives common in blog/opinion titles
+    'game','changing','groundbreaking','revolutionary','disruptive',
+    'innovative','emerging','evolving','latest','modern','upcoming',
+    'future','current','global','local','digital','virtual','real',
 }
 
 # Words that almost never start a service/location page slug
@@ -693,6 +701,8 @@ BLOG_LEAD_WORDS = {
 BLOG_MID_WORDS = {
     'in','the','for','with','of','and','or','to','a','an','by','from',
     'at','on','as','into','over','about',
+    # Auxiliary/linking verbs mid-slug indicate a sentence (e.g. cybersecurity-is-fortifying-...)
+    'is','are','was','were','has','have','had',
 }
 
 
