@@ -369,6 +369,15 @@ const LocationDetailView = ({
           <div>
             <h1 className="text-2xl font-display font-bold text-foreground">{business.business_name}</h1>
             <p className="text-sm text-muted-foreground mt-0.5">{business.gbp_category}</p>
+            {business.gbp_categories && business.gbp_categories.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-1">
+                {business.gbp_categories.map((cat, i) => (
+                  <span key={i} className="text-xs bg-secondary text-secondary-foreground px-2 py-0.5 rounded-md">
+                    {cat}
+                  </span>
+                ))}
+              </div>
+            )}
             {business.gbp_rating != null && (
               <div className="flex items-center gap-1 mt-1">
                 <Star className="w-3.5 h-3.5 text-warning fill-warning" />
