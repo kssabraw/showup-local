@@ -47,21 +47,23 @@ Deno.serve(async (req) => {
     const primary = createClient(primaryUrl, primaryKey);
 
     // --- Write to external Supabase (optional — skipped if key not configured) ---
-    const externalUrl = "https://yvdfiwabdvcpqwrmtysd.supabase.co";
+    // URL is read from env so the project ID isn't hardcoded in source.
+    const externalUrl = Deno.env.get("EXTERNAL_SUPABASE_URL");
     const externalKey = Deno.env.get("EXTERNAL_SUPABASE_SERVICE_ROLE_KEY");
-    let externalError: { message: string } | null = null;
+    let externalSynced = false;
 
-    if (externalKey) {
+    if (externalUrl && externalKey) {
       const external = createClient(externalUrl, externalKey);
       const { error } = await external
         .from("business_profiles")
         .upsert(record, { onConflict: "gbp_place_id" });
       if (error) {
-        externalError = error;
         console.error("External write failed (non-blocking):", error.message);
+      } else {
+        externalSynced = true;
       }
     } else {
-      console.warn("EXTERNAL_SUPABASE_SERVICE_ROLE_KEY not configured — skipping external write");
+      console.warn("External Supabase not configured — skipping external write");
     }
 
     const primaryRecord = { ...record, user_id: userId };
@@ -72,21 +74,30 @@ Deno.serve(async (req) => {
       .single();
 
     if (primaryError) {
-      throw new Error(`Primary write failed: ${primaryError.message}`);
+      // Log full detail internally; don't expose DB error text to the client.
+      console.error("Primary write failed:", primaryError.message, primaryError.code);
+      throw new Error("Failed to save business profile");
     }
 
     return new Response(
       JSON.stringify({
         success: true,
         data: primaryData,
-        external_synced: !externalError,
-        external_error: externalError?.message || null,
+        external_synced: externalSynced,
       }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (err) {
     console.error("dual-write error:", err);
-    const message = err instanceof Error ? err.message : "Unknown error";
+    // Only surface the message for known/expected errors thrown above.
+    // Generic fallback avoids leaking unexpected internal details.
+    const isKnown = err instanceof Error && (
+      err.message === "Failed to save business profile" ||
+      err.message === "Primary Supabase credentials not configured"
+    );
+    const message = isKnown && err instanceof Error
+      ? err.message
+      : "An unexpected error occurred. Please try again.";
     return new Response(
       JSON.stringify({ error: message }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
