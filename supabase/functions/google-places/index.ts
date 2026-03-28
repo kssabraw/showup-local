@@ -136,11 +136,14 @@ serve(async (req) => {
       const rawSite = p.site || p.website || '';
       let cleanWebsite = '';
       if (rawSite) {
+        let decoded = rawSite;
         try {
-          cleanWebsite = decodeURIComponent(rawSite);
+          decoded = decodeURIComponent(rawSite);
         } catch {
-          cleanWebsite = rawSite;
+          decoded = rawSite;
         }
+        // Only store http/https URLs — reject anything else (data:, javascript:, etc.)
+        cleanWebsite = /^https?:\/\//i.test(decoded) ? decoded : '';
       }
 
       const details = {
