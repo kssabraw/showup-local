@@ -968,12 +968,10 @@ async def _discover_via_nav(base_url: str, client: httpx.AsyncClient) -> List[st
 
 async def _classify_urls_with_ai(urls: List[str]) -> Dict[str, str]:
     """
-    Use Claude Sonnet to classify a batch of URLs by page type.
-    Returns {url: page_type} for each URL.
-    Page types: city_service | service | location | blog | other
-
-    Falls back to an empty dict if the API key is missing or the call fails,
-    in which case the caller uses the rule-based classifier instead.
+    Use Claude Haiku to classify a batch of ambiguous URLs by page type.
+    Only called for URLs the rule-based classifier couldn't confidently resolve.
+    Returns {url: page_type} — city_service | service | location | blog | other.
+    Falls back to empty dict on any failure so the caller can use rule-based results.
     """
     if not ANTHROPIC_API_KEY or not urls:
         return {}
@@ -985,46 +983,38 @@ async def _classify_urls_with_ai(urls: List[str]) -> Dict[str, str]:
         client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
         url_list = "\n".join(urls)
-        prompt = f"""You are classifying URLs from a local service business website.
-For each URL determine its page type and return a single JSON object mapping each URL to its type.
+        prompt = f"""Classify each URL from a business website. Return ONLY a JSON object mapping URL→type.
 
-Page types:
-- city_service  : A service page targeting a specific city or location (e.g. /plumbing-repair-dallas-tx/, /managed-it-services-miami-fl/)
-- service       : A general service or product page with no specific location (e.g. /hvac-repair/, /cybersecurity-services/)
-- location      : A location, city, or service-area listing page (e.g. /locations/, /service-areas/, /cities-we-serve/)
-- blog          : A blog post, news article, press release, opinion piece, how-to guide, or any editorial/informational content
-- other         : About, contact, team, privacy, terms, pricing, homepage, or anything else
+Types: city_service | service | location | blog | other
+- city_service: service + specific city (e.g. /plumbing-dallas-tx/, /managed-it-miami-fl/)
+- service: general service page, short noun phrase (e.g. /hvac-repair/, /cybersecurity/)
+- location: city/area listing (e.g. /locations/, /service-areas/)
+- blog: post, article, news, press release, how-to, opinion, announcement, dated content
+- other: about, contact, team, privacy, homepage, etc.
 
-Rules:
-- When in doubt between blog and service, prefer blog — service pages have very short noun-phrase slugs
-- Company announcements (awards, certifications, partnerships) are blog
-- Dated content (year in slug) is blog
-- How-to, tips, guides, "X reasons why" are blog
+When in doubt between blog and service → blog. Service slugs are short noun phrases only.
 
-URLs to classify:
 {url_list}
 
-Respond with ONLY a JSON object, no markdown, no explanation:
-{{"https://example.com/url1": "service", "https://example.com/url2": "blog"}}"""
+JSON only: {{"url1": "type1", "url2": "type2"}}"""
 
         response = await client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=4096,
+            model="claude-haiku-4-5-20251001",
+            max_tokens=2048,
             messages=[{"role": "user", "content": prompt}],
         )
 
         raw = response.content[0].text.strip()
-        # Strip markdown fences if present
         if raw.startswith("```"):
             raw = re.sub(r"^```[a-z]*\n?", "", raw)
             raw = re.sub(r"\n?```$", "", raw)
 
         result = json_lib.loads(raw)
-        logger.info(f"AI classified {len(result)} URLs")
+        logger.info(f"Haiku classified {len(result)} ambiguous URLs")
         return result
 
     except Exception as e:
-        logger.warning(f"AI URL classification failed, falling back to rule-based: {e}")
+        logger.warning(f"AI URL classification failed, using rule-based only: {e}")
         return {}
 
 
@@ -1036,7 +1026,9 @@ async def crawl_website(website_url: str, max_pages: int = 200) -> List[dict]:
       3. Fallback: nav extraction from homepage (1 request)
       4. Last resort: shallow 1-level BFS from homepage
 
-    Classifies URLs using Claude Sonnet (AI) with rule-based fallback.
+    Two-tier classification:
+      - Rule-based classifier handles clear-cut cases (fast, free)
+      - Haiku handles only 'other'-typed URLs the rules couldn't resolve
     """
     import urllib.parse
 
@@ -1067,30 +1059,29 @@ async def crawl_website(website_url: str, max_pages: int = 200) -> List[dict]:
     homepage = f"{parsed.scheme}://{parsed.netloc}"
     all_urls = list(dict.fromkeys([homepage] + discovered))  # dedup, preserve order
 
-    # Rule-based pre-filter: drop definite skips (admin pages, known blog prefixes)
-    # before sending to AI — keeps token count low and avoids wasting quota on junk
-    def _rule_prefilter(u: str) -> bool:
-        p = urllib.parse.urlparse(u).path.lower().rstrip('/')
-        segs = [s for s in p.split('/') if s]
-        first = segs[0] if segs else ''
-        return first not in SKIP_SLUGS  # keep everything except definite admin/junk
+    # Pass 1: rule-based classification on every URL
+    rule_results: Dict[str, str] = {}
+    for u in all_urls:
+        c = classify_page_type(u)
+        rule_results[u] = c['type']
 
-    candidate_urls = [u for u in all_urls if _rule_prefilter(u)]
+    # Pass 2: collect URLs the rules left as 'other' — send to Haiku for reclassification
+    # Cap at 150 to keep the Haiku call fast (typically only 10-50 URLs reach this)
+    ambiguous = [u for u, t in rule_results.items() if t == 'other'][:150]
+    ai_types = await _classify_urls_with_ai(ambiguous)
+    logger.info(f"Rule-based: {len(rule_results)} URLs — sent {len(ambiguous)} ambiguous to Haiku")
 
-    # AI classification — send all candidates in one batch call
-    ai_types = await _classify_urls_with_ai(candidate_urls)
+    # Merge: AI result takes precedence for ambiguous URLs
+    final_types = {**rule_results, **ai_types}
 
-    # Build page records using AI types where available, rule-based as fallback
+    # Build page records, drop blogs
     all_pages = []
-    for u in candidate_urls:
-        if u in ai_types:
-            page_type = ai_types[u]
-            if page_type not in ('city_service', 'service', 'location', 'blog', 'other'):
-                page_type = 'other'
-        else:
-            # Fallback to rule-based classifier
-            c = classify_page_type(u)
-            page_type = c['type']
+    for u in all_urls:
+        page_type = final_types.get(u, 'other')
+        if page_type not in ('city_service', 'service', 'location', 'blog', 'other'):
+            page_type = 'other'
+        if page_type == 'blog':
+            continue
         all_pages.append({
             'url': u,
             'title': '',
@@ -1100,15 +1091,12 @@ async def crawl_website(website_url: str, max_pages: int = 200) -> List[dict]:
             'primary_city': None,
         })
 
-    # Drop blog pages entirely
-    all_pages = [p for p in all_pages if p['page_type'] != 'blog']
-
     # Sort: city_service → service → location → other
     def _sort_key(p: dict) -> int:
         return {'city_service': 0, 'service': 1, 'location': 2, 'other': 3}.get(p['page_type'], 3)
 
     pages = sorted(all_pages, key=_sort_key)[:max_pages]
-    type_counts = {}
+    type_counts: Dict[str, int] = {}
     for p in pages:
         type_counts[p['page_type']] = type_counts.get(p['page_type'], 0) + 1
     logger.info(f"Page classification: {type_counts}")
@@ -1240,7 +1228,7 @@ async def analyze_business(request: BusinessAnalysisRequest):
     try:
         pages = await asyncio.wait_for(
             crawl_website(url),
-            timeout=30.0,
+            timeout=90.0,
         )
     except asyncio.TimeoutError:
         logger.warning(f"Page discovery timed out for {url}")
