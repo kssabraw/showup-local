@@ -929,8 +929,10 @@ Business Name: {business_name}
 GBP Primary Category: {gbp_category}
 All GBP Categories: {', '.join(gbp_categories) if gbp_categories else 'N/A'}
 
-Discovered website pages:
+Discovered website pages (URL-classified, may include misclassified blog/content pages):
 {pages_text}
+
+IMPORTANT: Before analyzing, mentally discard any pages that look like blog posts, articles, news, or general content (e.g. URLs with date patterns, long descriptive slugs, how-to or tips-style titles). Only use pages that represent actual services, locations, or core business offerings for your analysis.
 
 Identify 1-3 distinct customer segments this business serves. For each segment provide deep psychographic insight a marketer could use to write targeted local SEO content.
 
@@ -966,7 +968,7 @@ Return a JSON object with exactly this structure:
   ]
 }}
 
-Extract differentiators only from the page titles and H1s above. Look for speed claims, pricing models, guarantees, specializations. If none are evident, return an empty array.
+Extract differentiators only from the page titles and H1s of service/core pages. Ignore any content that appears to be blog or editorial. If no differentiators are evident, return an empty array.
 
 Return only valid JSON, no markdown or explanation."""
 
@@ -1091,7 +1093,7 @@ Return only valid JSON, no markdown, no explanation."""
     # ── Call 1: Base brand voice profile ──────────────────────────────────────
     prompt_base = f"""Business: {business_name}
 
-Website copy (up to 20 pages):
+Website copy (up to 20 pages — may include some blog or content pages; ignore those and focus only on service, location, and core business pages):
 {content_text[:8000]}
 
 Return a JSON object with exactly this structure:
