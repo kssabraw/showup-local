@@ -720,12 +720,17 @@ def classify_page_type(url: str, title: str = '', h1: str = '') -> dict:
         return {'type': 'blog', 'primary_service': None, 'primary_city': None}
 
     # Slug-complexity check: root-domain blog posts (e.g. /how-to-fix-your-furnace-this-winter)
-    # Only classify as blog when there are no strong service or geo signals in the slug itself,
-    # to avoid false-positiving on verbose city+service URLs.
+    # Long slugs (>6 words) or digit-prefixed slugs (5-tips-...) are always blog.
+    # Medium slugs (4-6 words with stop words) get a service+geo override to protect
+    # verbose city+service URLs like /emergency-plumber-dallas-tx.
     leaf = segments[-1] if segments else ''
     if leaf and _slug_looks_like_blog(leaf):
-        # Allow through if the slug contains a clear service word or geo signal
-        leaf_words = set(re.split(r'[-_]', leaf))
+        leaf_word_list = [w for w in re.split(r'[-_]', leaf.lower()) if len(w) > 1]
+        definitely_blog = len(leaf_word_list) > 6 or (leaf_word_list and leaf_word_list[0].isdigit())
+        if definitely_blog:
+            return {'type': 'blog', 'primary_service': None, 'primary_city': None}
+        # Medium-length slug: only classify blog if no service+geo signal present
+        leaf_words = set(leaf_word_list)
         if not (leaf_words & SERVICE_WORDS or _STATE_ABBREV_PATTERN.search(leaf)):
             return {'type': 'blog', 'primary_service': None, 'primary_city': None}
 
