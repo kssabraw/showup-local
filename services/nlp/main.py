@@ -1381,9 +1381,10 @@ async def _fetch_page_text(url: str, client: httpx.AsyncClient) -> str:
 
 async def analyze_brand_voice_with_anthropic(page_contents: List[str], business_name: str) -> dict:
     """Use Claude Haiku to extract brand voice from sampled page copy.
-    Runs two sequential API calls to avoid JSON complexity errors:
-      1. Base brand voice profile (simple flat structure)
-      2. Writer Execution Guide (separate, focused call)
+    Runs three sequential API calls:
+      1. Current voice — purely descriptive (what the site sounds like now)
+      2. Recommended voice — aspirational (what it should sound like)
+      3. Writer Execution Guide — based on the recommended voice
     """
     if not ANTHROPIC_API_KEY:
         logger.warning("ANTHROPIC_API_KEY not set — skipping brand voice analysis")
@@ -1394,10 +1395,6 @@ async def analyze_brand_voice_with_anthropic(page_contents: List[str], business_
 
     content_text = "\n\n---\n\n".join(page_contents) if page_contents else "(no content available)"
 
-    system_prompt = """You are a senior brand strategist and direct-response copywriter building brand voice systems for local service businesses.
-Analyze the website copy provided. Do NOT blindly mirror the existing site — elevate and improve weak or generic messaging.
-Return only valid JSON, no markdown, no explanation."""
-
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
     def _parse(message: any) -> dict:
@@ -1407,51 +1404,84 @@ Return only valid JSON, no markdown, no explanation."""
             text = re.sub(r'\s*```$', '', text.strip())
         return json_lib.loads(text)
 
-    # ── Call 1: Base brand voice profile ──────────────────────────────────────
-    prompt_base = f"""Business: {business_name}
-
-Website copy (up to 20 pages — may include some blog or content pages; ignore those and focus only on service, location, and core business pages):
-{content_text[:8000]}
-
-Return a JSON object with exactly this structure:
-{{
+    VOICE_SCHEMA = """{
   "personality": ["<trait 1>", "<trait 2>", "<trait 3>"],
   "tone": "<1-2 sentence description of the overall tone>",
-  "writing_style": {{
+  "writing_style": {
     "sentence_length": "<short / medium / long / mixed>",
     "person": "<first person / second person / third person / mixed>",
     "jargon_level": "<low / medium / high — brief explanation>",
     "formality": "<casual / professional / formal>"
-  }},
-  "vocabulary": {{
+  },
+  "vocabulary": {
     "use": ["<word or phrase>", "<word or phrase>", "<word or phrase>", "<word or phrase>", "<word or phrase>"],
     "avoid": ["<word or phrase>", "<word or phrase>", "<word or phrase>"]
-  }},
+  },
   "messaging_themes": ["<theme 1>", "<theme 2>", "<theme 3>"],
   "sample_phrases": ["<phrase>", "<phrase>", "<phrase>"],
   "content_generation_instructions": "<2-3 sentences of concrete guidance for writing content that matches this brand voice>"
-}}"""
+}"""
+
+    # ── Call 1: Current voice (purely descriptive) ────────────────────────────
+    prompt_current = f"""Business: {business_name}
+
+Website copy (service, location, and core business pages only):
+{content_text[:8000]}
+
+Describe the brand voice EXACTLY as it currently exists on this website. Be objective and descriptive — report what you observe, do not prescribe or improve anything.
+
+Return a JSON object with exactly this structure:
+{VOICE_SCHEMA}"""
 
     try:
         msg1 = await client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=2048,
-            system=system_prompt,
-            messages=[{'role': 'user', 'content': prompt_base}],
+            max_tokens=1024,
+            system="You are a brand analyst. Describe brand voice objectively based on evidence from the website copy. Do not prescribe or recommend — only describe what you observe. Return only valid JSON, no markdown, no explanation.",
+            messages=[{'role': 'user', 'content': prompt_current}],
         )
         u1 = msg1.usage
-        logger.info(f"Brand voice call 1 — input: {u1.input_tokens}, output: {u1.output_tokens}, est. cost: ${(u1.input_tokens * 0.0000008) + (u1.output_tokens * 0.000004):.5f}")
-        base = _parse(msg1)
+        logger.info(f"Brand voice call 1 (current) — input: {u1.input_tokens}, output: {u1.output_tokens}, est. cost: ${(u1.input_tokens * 0.0000008) + (u1.output_tokens * 0.000004):.5f}")
+        current_voice = _parse(msg1)
     except Exception as e:
         logger.error(f"Brand voice call 1 error: {e}")
         raise
 
-    # ── Call 2: Writer Execution Guide ─────────────────────────────────────────
-    prompt_guide = f"""Business: {business_name}
-Brand voice summary: {base.get('tone', '')}
-Personality: {', '.join(base.get('personality', []))}
+    # ── Call 2: Recommended voice (aspirational) ──────────────────────────────
+    prompt_recommended = f"""Business: {business_name}
 
-Website copy (up to 20 pages):
+Current brand voice:
+- Personality: {', '.join(current_voice.get('personality', []))}
+- Tone: {current_voice.get('tone', '')}
+
+Website copy (service, location, and core business pages only):
+{content_text[:8000]}
+
+Based on the current brand voice and business type, recommend an elevated brand voice that would better serve this business. Do NOT simply mirror the existing copy — improve weak or generic messaging.
+
+Return a JSON object with exactly this structure:
+{VOICE_SCHEMA}"""
+
+    try:
+        msg2 = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            system="You are a senior brand strategist and direct-response copywriter for local service businesses. Recommend an elevated, optimized brand voice. Return only valid JSON, no markdown, no explanation.",
+            messages=[{'role': 'user', 'content': prompt_recommended}],
+        )
+        u2 = msg2.usage
+        logger.info(f"Brand voice call 2 (recommended) — input: {u2.input_tokens}, output: {u2.output_tokens}, est. cost: ${(u2.input_tokens * 0.0000008) + (u2.output_tokens * 0.000004):.5f}")
+        recommended_voice = _parse(msg2)
+    except Exception as e:
+        logger.error(f"Brand voice call 2 error: {e}")
+        recommended_voice = {}
+
+    # ── Call 3: Writer Execution Guide (based on recommended voice) ────────────
+    prompt_guide = f"""Business: {business_name}
+Recommended brand voice summary: {recommended_voice.get('tone', '')}
+Personality: {', '.join(recommended_voice.get('personality', []))}
+
+Website copy:
 {content_text[:6000]}
 
 Return a JSON object with exactly this structure:
@@ -1472,21 +1502,25 @@ Return a JSON object with exactly this structure:
 }}"""
 
     try:
-        msg2 = await client.messages.create(
+        msg3 = await client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=3000,
-            system=system_prompt,
+            system="You are a senior brand strategist and direct-response copywriter building brand voice systems for local service businesses. Return only valid JSON, no markdown, no explanation.",
             messages=[{'role': 'user', 'content': prompt_guide}],
         )
-        u2 = msg2.usage
-        logger.info(f"Brand voice call 2 — input: {u2.input_tokens}, output: {u2.output_tokens}, est. cost: ${(u2.input_tokens * 0.0000008) + (u2.output_tokens * 0.000004):.5f}")
-        guide = _parse(msg2)
+        u3 = msg3.usage
+        logger.info(f"Brand voice call 3 (guide) — input: {u3.input_tokens}, output: {u3.output_tokens}, est. cost: ${(u3.input_tokens * 0.0000008) + (u3.output_tokens * 0.000004):.5f}")
+        guide = _parse(msg3)
     except Exception as e:
-        logger.error(f"Brand voice call 2 error: {e}")
+        logger.error(f"Brand voice call 3 error: {e}")
         guide = {}
 
-    base['writer_execution_guide'] = guide
-    return base
+    return {
+        "current_voice": current_voice,
+        "recommended_voice": recommended_voice,
+        "recommended_accepted": None,   # null = not yet decided
+        "writer_execution_guide": guide,
+    }
 
 
 @app.post('/analyze-brand-voice', response_model=BrandVoiceResponse)
