@@ -1077,8 +1077,8 @@ async def crawl_website(website_url: str, max_pages: int = 200) -> List[dict]:
 
     candidate_urls = [u for u in all_urls if _rule_prefilter(u)]
 
-    # AI classification — send all candidates in one batch call
-    ai_types = await _classify_urls_with_ai(candidate_urls)
+    # AI classification — send candidates in one batch call (cap at 300 to stay fast)
+    ai_types = await _classify_urls_with_ai(candidate_urls[:300])
 
     # Build page records using AI types where available, rule-based as fallback
     all_pages = []
@@ -1240,7 +1240,7 @@ async def analyze_business(request: BusinessAnalysisRequest):
     try:
         pages = await asyncio.wait_for(
             crawl_website(url),
-            timeout=30.0,
+            timeout=90.0,
         )
     except asyncio.TimeoutError:
         logger.warning(f"Page discovery timed out for {url}")
