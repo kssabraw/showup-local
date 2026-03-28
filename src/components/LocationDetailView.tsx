@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, RefreshCw, CheckCircle2, AlertCircle, Sparkles, Plus, Trash2, X } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { useToast } from "@/hooks/use-toast";
 
 const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
 
@@ -54,6 +55,7 @@ const LocationDetailView = ({
   businessId: string;
   onBack: () => void;
 }) => {
+  const { toast } = useToast();
   const [business, setBusiness] = useState<BusinessProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<Tab>("Overview");
@@ -289,12 +291,20 @@ const LocationDetailView = ({
         body: JSON.stringify({
           website_url: website,
           business_name: b.business_name,
-          existing_pages: b.existing_pages || [],
         }),
       });
       if (!response.ok) {
         const errBody = await response.json().catch(() => ({}));
-        throw new Error(`Brand voice scan failed: ${response.status} — ${errBody.detail || JSON.stringify(errBody)}`);
+        const detail = errBody.detail || "";
+        const is4xx = response.status >= 400 && response.status < 500;
+        toast({
+          title: "Brand voice scan failed",
+          description: is4xx
+            ? detail || "There was an issue with your website. Check the URL is correct and the site is live."
+            : detail || "Something went wrong on our end. Please try again — if the problem continues, contact ShowUP support.",
+          variant: "destructive",
+        });
+        return;
       }
       const result = await response.json();
       const { error } = await supabase
@@ -305,6 +315,13 @@ const LocationDetailView = ({
       await fetchBusiness();
     } catch (err) {
       console.error("Brand voice scan error:", err);
+      toast({
+        title: "Brand voice scan failed",
+        description: err instanceof Error && err.message
+          ? err.message
+          : "Unable to reach the ShowUP analysis service. Please try again.",
+        variant: "destructive",
+      });
     } finally {
       setScanningBrandVoice(false);
     }

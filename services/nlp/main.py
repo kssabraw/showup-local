@@ -1303,6 +1303,66 @@ async def analyze_business(request: BusinessAnalysisRequest):
 
 # ── Brand Voice ────────────────────────────────────────────────────────────────
 
+async def _crawl_pages_for_brand_voice(website_url: str, client: httpx.AsyncClient, max_pages: int = 25) -> List[dict]:
+    """
+    Discover up to max_pages pages for brand voice analysis.
+    Priority: home → about → top-level service → service → location/city_service → other
+    Skips blog pages and admin/legal slugs.
+    """
+    import urllib.parse
+    parsed = urllib.parse.urlparse(website_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+
+    # Discover URLs via sitemap; fallback to homepage nav links
+    sitemap_urls = await _discover_via_sitemap(website_url, client)
+    if sitemap_urls:
+        candidate_urls = sitemap_urls
+    else:
+        candidate_urls = await _discover_via_nav(website_url, client)
+
+    # Always include homepage
+    homepage = origin
+    all_urls = list({homepage} | {u.rstrip('/') for u in candidate_urls} | {website_url.rstrip('/')})
+
+    classified = []
+    for url in all_urls:
+        result = classify_page_type(url)
+        page_type = result['type']
+        if page_type == 'blog':
+            continue
+        path = urllib.parse.urlparse(url).path.lower().rstrip('/')
+        first = path.split('/')[1] if '/' in path[1:] else path.lstrip('/')
+        if first in SKIP_SLUGS:
+            continue
+        classified.append({'url': url, 'page_type': page_type})
+
+    def _priority(p: dict) -> int:
+        u = p['url'].rstrip('/')
+        path = urllib.parse.urlparse(u).path.lower().rstrip('/')
+        segments = [s for s in path.split('/') if s]
+        slug = segments[-1] if segments else ''
+        # Homepage
+        if not segments or u in {origin, origin + '/index', origin + '/home'}:
+            return 0
+        # About pages
+        if any(x in slug for x in ('about', 'who-we-are', 'our-story', 'team', 'about-us')):
+            return 1
+        # Top-level (single-segment) service pages
+        pt = p['page_type']
+        if pt == 'service' and len(segments) == 1:
+            return 2
+        # Deeper service pages
+        if pt == 'service':
+            return 3
+        if pt in ('location', 'city_service'):
+            return 4
+        return 5
+
+    classified.sort(key=_priority)
+    logger.info(f"Brand voice crawl: {len(classified)} candidate pages for {website_url}")
+    return classified[:max_pages]
+
+
 async def _fetch_page_text(url: str, client: httpx.AsyncClient) -> str:
     """Fetch a page and extract meaningful paragraph text."""
     try:
@@ -1433,8 +1493,8 @@ Return a JSON object with exactly this structure:
 async def analyze_brand_voice(request: BrandVoiceRequest):
     """
     Brand voice pipeline:
-      1. Select up to 20 pages from existing_pages (home → about → service → other)
-      2. Fetch paragraph text from each page directly via httpx
+      1. Crawl up to 25 pages from the site (home → about → service → other)
+      2. Fetch paragraph text from each page
       3. Send to Claude Haiku for brand voice extraction
     """
     if not request.website_url:
@@ -1444,33 +1504,26 @@ async def analyze_brand_voice(request: BrandVoiceRequest):
     if not url.startswith(('http://', 'https://')):
         url = f"https://{url}"
 
-    # Prioritise: home → about → service → other
-    def _priority(p: dict) -> int:
-        u = p.get('url', '').lower().rstrip('/')
-        base = url.rstrip('/')
-        if u == base or u == base + '/index' or u == base + '/home':
-            return 0
-        pt = p.get('page_type', '')
-        slug = u.split('/')[-1]
-        if any(x in slug for x in ['about', 'who-we-are', 'our-story', 'team']):
-            return 1
-        if pt == 'service':
-            return 2
-        if pt in ('location', 'city_service'):
-            return 3
-        return 4
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=15.0,
+        headers=CRAWL_HEADERS,
+    ) as client:
+        # Check homepage is reachable before doing anything else
+        try:
+            probe = await client.get(url, timeout=10.0)
+            if probe.status_code >= 400:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Your website returned a {probe.status_code} error. Check that the URL is correct and the site is live."
+                )
+        except httpx.RequestError as e:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Your website couldn't be reached ({type(e).__name__}). Check that the URL is correct and your site is live."
+            )
 
-    pages = sorted(request.existing_pages, key=_priority)
-
-    # Ensure homepage is included
-    home_urls = {url.rstrip('/'), url.rstrip('/') + '/'}
-    if not any(p.get('url', '').rstrip('/') in {u.rstrip('/') for u in home_urls} for p in pages):
-        pages = [{'url': url, 'page_type': 'home', 'title': '', 'h1': ''}] + pages
-
-    selected = pages[:20]
-
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0; +https://showuplocal.com)"}
-    async with httpx.AsyncClient(headers=headers) as client:
+        selected = await _crawl_pages_for_brand_voice(url, client, max_pages=25)
         texts = await asyncio.gather(*[_fetch_page_text(p['url'], client) for p in selected])
 
     page_contents = [
@@ -1481,9 +1534,24 @@ async def analyze_brand_voice(request: BrandVoiceRequest):
     pages_sampled = len(page_contents)
     logger.info(f"Brand voice: sampled {pages_sampled}/{len(selected)} pages for {url}")
 
+    if not page_contents:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Your website was reached but no readable text content was found. "
+                "This usually means the site is JavaScript-rendered (React, Vue, etc.) "
+                "and requires server-side rendering to be crawlable. "
+                "Contact ShowUP support for assistance."
+            )
+        )
+
     try:
         brand_voice = await analyze_brand_voice_with_anthropic(page_contents, request.business_name)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Brand voice analysis failed: {e}")
+        logger.error(f"Brand voice Anthropic error for {url}: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail="Our AI analysis service encountered an error. Please try again — if the problem continues, contact ShowUP support."
+        )
 
     return BrandVoiceResponse(brand_voice=brand_voice, pages_sampled=pages_sampled)
