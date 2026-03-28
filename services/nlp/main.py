@@ -809,6 +809,16 @@ def classify_page_type(url: str, title: str = '', h1: str = '') -> dict:
     if first in BLOG_SLUGS or (len(segments) > 1 and segments[0] in BLOG_SLUGS):
         return {'type': 'blog', 'primary_service': None, 'primary_city': None}
 
+    # Any segment starting with a digit → blog (e.g. /4-frequently-visited-sites/)
+    for seg in segments:
+        seg_words = [w for w in re.split(r'[-_]', seg.lower()) if len(w) > 1]
+        if seg_words and seg_words[0].isdigit():
+            return {'type': 'blog', 'primary_service': None, 'primary_city': None}
+
+    # "vs" anywhere in path → comparison article, always blog
+    if 'vs' in path_words:
+        return {'type': 'blog', 'primary_service': None, 'primary_city': None}
+
     # Slug-complexity check: root-domain blog posts (e.g. /how-to-fix-your-furnace-this-winter)
     # Long slugs (>6 words) or digit-prefixed slugs (5-tips-...) are always blog.
     # Medium slugs (4-6 words with stop words) get a service+geo override to protect
