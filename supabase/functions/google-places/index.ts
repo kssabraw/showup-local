@@ -61,12 +61,17 @@ serve(async (req) => {
       // data.data is an array of arrays: [[place1, place2, ...]]
       const places = (data.data && data.data[0]) || [];
 
-      const suggestions = places.map((p: any) => ({
-        place_id: p.place_id || p.google_id || '',
-        name: p.name || '',
-        address: p.full_address || p.address || '',
-        description: `${p.name || ''}, ${p.full_address || p.address || ''}`,
-      }));
+      const suggestions = places.map((p: any) => {
+        const fullAddress = p.full_address || p.address || '';
+        const cityFallback = [p.city, p.state].filter(Boolean).join(', ');
+        const displayAddress = fullAddress || cityFallback;
+        return {
+          place_id: p.place_id || p.google_id || '',
+          name: p.name || '',
+          address: displayAddress,
+          description: `${p.name || ''}, ${displayAddress}`,
+        };
+      });
 
       return new Response(JSON.stringify({ suggestions }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
