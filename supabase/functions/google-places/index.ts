@@ -117,9 +117,18 @@ serve(async (req) => {
       }
 
       // Extract categories - Outscraper returns category and subtypes
-      const primaryCategory = p.category || p.type || '';
-      const rawSubtypes = Array.isArray(p.subtypes) ? p.subtypes : (typeof p.subtypes === 'string' ? [p.subtypes] : []);
-      const additionalCategories = rawSubtypes.filter((t: string) => t !== primaryCategory);
+      // subtypes may be a comma-separated string or an array
+      console.log('outscraper category fields:', JSON.stringify({ category: p.category, type: p.type, category_name: p.category_name, subtypes: p.subtypes }));
+      const primaryCategory = p.category || p.category_name || p.type || '';
+      let rawSubtypes: string[];
+      if (Array.isArray(p.subtypes)) {
+        rawSubtypes = p.subtypes;
+      } else if (typeof p.subtypes === 'string' && p.subtypes) {
+        rawSubtypes = p.subtypes.split(',').map((s: string) => s.trim()).filter(Boolean);
+      } else {
+        rawSubtypes = [];
+      }
+      const additionalCategories = rawSubtypes.filter((t: string) => t.toLowerCase() !== primaryCategory.toLowerCase());
 
       // Decode the website URL — Outscraper sometimes returns query strings
       // double-encoded (e.g. %3F instead of ?).
