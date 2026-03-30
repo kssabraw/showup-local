@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { MapPin, Sparkles, ChevronDown, Building2, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
@@ -35,10 +35,16 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
   const [selectedBusinessId, setSelectedBusinessId] = useState("");
   const [keyword, setKeyword] = useState("");
   const [location, setLocation] = useState(defaultLocation);
+  const [locationInput, setLocationInput] = useState(defaultLocation);
+  const [locationSuggestions, setLocationSuggestions] = useState<string[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [locationLoading, setLocationLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingBusinesses, setLoadingBusinesses] = useState(true);
   const [error, setError] = useState("");
   const [result, setResult] = useState<AnalysisResult | null>(null);
+  const locationDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const locationContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     fetchBusinesses();
@@ -49,16 +55,57 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     if (selectedBusinessId) {
       const b = businesses.find((b) => b.id === selectedBusinessId);
       if (b) {
-        // Extract city + state from address for location field
         const parts = b.address.split(",").map((s) => s.trim());
-        // Typical format: "123 Main St, Anaheim, CA 92801"
-        // We want "Anaheim, California, United States"
         if (parts.length >= 2) {
-          setLocation(parts.slice(1).join(", ") + ", United States");
+          const prefilled = parts.slice(1).join(", ") + ", United States";
+          setLocation(prefilled);
+          setLocationInput(prefilled);
         }
       }
     }
   }, [selectedBusinessId, businesses]);
+
+  // Close suggestions when clicking outside
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (locationContainerRef.current && !locationContainerRef.current.contains(e.target as Node)) {
+        setShowSuggestions(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const handleLocationInput = (value: string) => {
+    setLocationInput(value);
+    setLocation(""); // unconfirmed until selected from list
+    setShowSuggestions(true);
+    if (locationDebounce.current) clearTimeout(locationDebounce.current);
+    if (value.length < 2) {
+      setLocationSuggestions([]);
+      return;
+    }
+    locationDebounce.current = setTimeout(async () => {
+      setLocationLoading(true);
+      try {
+        const { data } = await supabase
+          .from("Locations")
+          .select("Location")
+          .ilike("Location", `%${value}%`)
+          .limit(8);
+        setLocationSuggestions((data || []).map((r: any) => r.Location));
+      } finally {
+        setLocationLoading(false);
+      }
+    }, 200);
+  };
+
+  const selectLocation = (loc: string) => {
+    setLocation(loc);
+    setLocationInput(loc);
+    setLocationSuggestions([]);
+    setShowSuggestions(false);
+  };
 
   const fetchBusinesses = async () => {
     try {
@@ -195,18 +242,35 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         </div>
 
         {/* Location */}
-        <div className="space-y-2">
+        <div className="space-y-2" ref={locationContainerRef}>
           <label className="text-sm font-medium text-foreground">Location</label>
-          <p className="text-xs text-muted-foreground -mt-1">Format: City, State, Country</p>
+          <p className="text-xs text-muted-foreground -mt-1">Start typing to search DataForSEO locations</p>
           <div className="relative">
-            <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+            <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground z-10" />
             <input
               type="text"
-              value={location}
-              onChange={(e) => setLocation(e.target.value)}
+              value={locationInput}
+              onChange={(e) => handleLocationInput(e.target.value)}
+              onFocus={() => { if (locationSuggestions.length > 0) setShowSuggestions(true); }}
               placeholder="e.g. Anaheim, California, United States"
               className="w-full bg-background border border-input rounded-lg pl-9 pr-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
             />
+            {locationLoading && (
+              <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground animate-spin" />
+            )}
+            {showSuggestions && locationSuggestions.length > 0 && (
+              <ul className="absolute z-50 w-full mt-1 bg-popover border border-border rounded-lg shadow-lg max-h-56 overflow-y-auto">
+                {locationSuggestions.map((loc) => (
+                  <li
+                    key={loc}
+                    onMouseDown={() => selectLocation(loc)}
+                    className="px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground cursor-pointer"
+                  >
+                    {loc}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </div>
 
@@ -221,7 +285,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         <Button
           className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
           onClick={handleAnalyze}
-          disabled={loading || !keyword.trim() || !location.trim() || !selectedBusinessId || businesses.length === 0}
+          disabled={loading || !keyword.trim() || !location || !selectedBusinessId || businesses.length === 0}
         >
           {loading ? (
             <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Analyzing competitors...</>
