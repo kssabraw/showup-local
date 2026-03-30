@@ -163,9 +163,17 @@ function YourSiteTab({
   const [scores, setScores] = useState<Record<string, PageScore | "loading" | "error">>({});
 
   const city = location.split(",")[0].trim().toLowerCase();
-  const kwWords = keyword.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
-  // Service terms = keyword words that are not the city name
-  const serviceTerms = kwWords.filter((w) => !city.includes(w) && !w.includes(city.split(" ")[0]));
+  const kwLower = keyword.toLowerCase();
+
+  // Detect intent: if city name appears in keyword it's a local keyword, otherwise service-only
+  // e.g. "plumber anaheim" → local | "plumber" or "commercial plumber" → service-only
+  const isLocalKeyword = city.split(" ").some((word) => word.length > 2 && kwLower.includes(word));
+
+  // Service terms = keyword words longer than 3 chars, excluding city words
+  const cityWords = new Set(city.split(" ").filter((w) => w.length > 2));
+  const serviceTerms = kwLower.split(/\s+/).filter(
+    (w) => w.length > 3 && !cityWords.has(w)
+  );
 
   const matchesCity = (p: ExistingPage) => {
     const text = `${p.url} ${p.title ?? ""} ${p.h1 ?? ""} ${p.primary_city ?? ""}`.toLowerCase();
@@ -177,9 +185,20 @@ function YourSiteTab({
     return serviceTerms.some((t) => text.includes(t));
   };
 
-  const queryPages    = existingPages.filter((p) => matchesCity(p) && matchesService(p));
-  const servicePages  = existingPages.filter((p) => !matchesCity(p) && matchesService(p) && p.page_type === "service");
-  const locationPages = existingPages.filter((p) => matchesCity(p) && !matchesService(p) && p.page_type === "location");
+  // Classification differs by intent:
+  // Local keyword  → query pages need both service + city match (city_service pages)
+  // Service keyword → query pages need only service match (service pages, no geo required)
+  const queryPages = isLocalKeyword
+    ? existingPages.filter((p) => matchesCity(p) && matchesService(p))
+    : existingPages.filter((p) => matchesService(p) && p.page_type === "service");
+
+  const servicePages = isLocalKeyword
+    ? existingPages.filter((p) => !matchesCity(p) && matchesService(p) && p.page_type === "service")
+    : []; // not meaningful for service-only keywords
+
+  const locationPages = isLocalKeyword
+    ? existingPages.filter((p) => matchesCity(p) && !matchesService(p) && p.page_type === "location")
+    : existingPages.filter((p) => matchesCity(p) && p.page_type === "location");
 
   const handleScore = async (url: string) => {
     setScores((s) => ({ ...s, [url]: "loading" }));
@@ -272,9 +291,21 @@ function YourSiteTab({
       </p>
       <div className="grid grid-cols-3 gap-3">
         {[
-          { label: "Query pages", count: queryPages.length, desc: `${keyword}` },
-          { label: "Service pages", count: servicePages.length, desc: serviceTerms.join(" ") || keyword },
-          { label: "Location pages", count: locationPages.length, desc: location.split(",")[0] },
+          {
+            label: isLocalKeyword ? "Query pages" : "Service pages",
+            count: queryPages.length,
+            desc: keyword,
+          },
+          {
+            label: "Supporting service pages",
+            count: servicePages.length,
+            desc: serviceTerms.join(" ") || keyword,
+          },
+          {
+            label: "Location pages",
+            count: locationPages.length,
+            desc: location.split(",")[0],
+          },
         ].map(({ label, count, desc }) => (
           <div key={label} className="bg-card border border-border rounded-xl p-3 text-center">
             <p className="text-2xl font-bold">{count}</p>
@@ -285,18 +316,32 @@ function YourSiteTab({
       </div>
       <PageList
         pages={queryPages}
-        label={`Directly targeting query — "${keyword}"`}
-        emptyMsg="No pages found targeting both service and city."
+        label={
+          isLocalKeyword
+            ? `Local landing pages — "${keyword}"`
+            : `Service pages targeting "${keyword}"`
+        }
+        emptyMsg={
+          isLocalKeyword
+            ? "No pages found targeting both service and city."
+            : "No top-level service page found for this keyword."
+        }
       />
-      <PageList
-        pages={servicePages}
-        label={`Service pages — no geo`}
-        emptyMsg="No pure service pages found."
-      />
+      {isLocalKeyword && (
+        <PageList
+          pages={servicePages}
+          label={`Supporting service pages — "${serviceTerms.join(" ") || keyword}" (no geo)`}
+          emptyMsg="No top-level service page found. Consider adding one to build topical authority."
+        />
+      )}
       <PageList
         pages={locationPages}
         label={`Location pages — "${location.split(",")[0]}"`}
-        emptyMsg="No location-only pages found for this city."
+        emptyMsg={
+          isLocalKeyword
+            ? "No location page found for this city."
+            : `No location page found for "${location.split(",")[0]}".`
+        }
       />
     </div>
   );
