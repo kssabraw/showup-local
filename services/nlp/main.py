@@ -815,9 +815,14 @@ SERVICE_WORDS = {
 }
 
 # First URL segment patterns that indicate blog/content/editorial pages
+# Media/press archive slugs — classified as 'media' type, distinct from blog
+MEDIA_SLUGS = {
+    'media', 'newsroom', 'press-room', 'press-releases', 'news-releases',
+}
+
 BLOG_SLUGS = {
     'blog','news','insights','articles','resources','resource','post','posts',
-    'updates','press','media','events','case-studies','whitepapers','guides',
+    'updates','press','events','case-studies','whitepapers','guides',
     'tips','podcast','webinars','newsletter','stories','learn','library',
     'knowledge-base','kb','forum','community','careers','jobs',
 }
@@ -997,6 +1002,10 @@ def classify_page_type(url: str, title: str = '', h1: str = '') -> dict:
     segments = [s for s in path.split('/') if s]
     first = segments[0] if segments else ''
     path_words = set(re.split(r'[-_]', ' '.join(segments)))
+
+    # ── Media / press release pages ───────────────────────────────────────────
+    if first in MEDIA_SLUGS or (len(segments) > 1 and segments[0] in MEDIA_SLUGS):
+        return {'type': 'media', 'primary_service': None, 'primary_city': None}
 
     # ── Blog / content pages ──────────────────────────────────────────────────
     if first in BLOG_SLUGS or (len(segments) > 1 and segments[0] in BLOG_SLUGS):
@@ -1242,7 +1251,8 @@ def analyze_site_architecture(pages: List[dict]) -> dict:
 
     found_essential: set = set()
     page_type_counts: Dict[str, int] = {
-        'service': 0, 'location': 0, 'city_service': 0, 'blog': 0, 'other': 0,
+        'service': 0, 'location': 0, 'city_service': 0,
+        'blog': 0, 'media': 0, 'other': 0,
     }
 
     for page in pages:

@@ -2,61 +2,93 @@
 
 **Current as of:** 19 Nov 2024
 **Applies to:** All SEO and Web Design clients
-**Used internally by:** ShowUP Local NLP service — `analyze_site_architecture()`, `check_url_sop_compliance()`, `INTERNAL_LINKING_RULES`
+**Used internally by:** ShowUP Local NLP service — `analyze_site_architecture()`, `classify_page_type()`, `INTERNAL_LINKING_RULES`
 
 ---
 
-## URL Structure
+## Page Taxonomy
 
-### Top-Level Pages (Tier 1)
+### Utility Pages (every site)
 
-| Page | URL Pattern |
-|---|---|
-| Home | `https://site.com/` |
-| About Us | `https://site.com/about-us/` |
-| Bio Pages | `https://site.com/bio/` |
-| Contact Us | `https://site.com/contact-us/` |
-| Privacy Policy | `https://site.com/privacy-policy/` |
-| Service Pages | `https://site.com/service/`, `https://site.com/service-2/` |
-| Location Pages | `https://site.com/location/`, `https://site.com/location-2/` |
-| Blog Archive | `https://site.com/blog/` |
-| Areas We Serve | `https://site.com/areas-we-serve/` |
+| Page | URL Pattern | Title Tag Pattern |
+|---|---|---|
+| Home | `site.com/` | `{Brand}` or `{Primary Service} \| {Brand}` |
+| About Us | `site.com/about-us/` | `About Us \| {Brand}` |
+| Contact Us | `site.com/contact-us/` | `Contact Us \| {Brand}` |
+| Privacy Policy | `site.com/privacy-policy/` | `Privacy Policy \| {Brand}` |
+| Services Index | `site.com/services/` | `Services \| {Brand}` |
+| Areas We Serve | `site.com/areas-we-serve/` | `Areas We Serve \| {Brand}` |
+| Media / Newsroom | `site.com/media/` | `Media \| {Brand}` |
 
-**Service pages must NOT be geo-targeted** unless the company targets only one city.
-**Location pages must NOT include service terms** — one page per city.
+### Top-Level Category Pages (Tier 1)
 
-### Second-Level Pages (Tier 2)
+| Page | URL Pattern | Title Tag Pattern | Example |
+|---|---|---|---|
+| Location Page | `site.com/location/` | `{City} \| {Brand}` | `Los Angeles \| XYZ Plumber` |
+| Service Page | `site.com/service/` | `{Service} \| {Brand}` | `Residential Plumber \| XYZ Plumber` |
+| Blog Archive | `site.com/blog/` | `{Brand} Blog` | |
 
-| Page | URL Pattern |
-|---|---|
-| Local Landing Page | `https://site.com/location/service/` |
-| Blog Posts | `https://site.com/blog/blog-name-here/` |
-| Sub Services | `https://site.com/service/subservice/` |
-| Neighborhoods | `https://site.com/location/neighborhood/` |
+**Service pages must NOT be geo-targeted** unless the business targets only one city.
+**Location pages must NOT focus on a single service** — cover all major services in H2s.
 
-**Local landing pages:** location slug FIRST, service slug SECOND — `/location/service/` not `/service/location/`.
+### Second-Level Category Pages (Tier 2)
 
-### Third-Level Pages (Tier 3 — competitive/difficult keywords only)
+| Page | URL Pattern | Title Tag Pattern | Example |
+|---|---|---|---|
+| Bio Page | `site.com/about-us/person/` | `{Name} \| {Brand}` | `Clayton Kershaw \| XYZ Plumber` |
+| Sub-Service | `site.com/service/subservice/` | `{SubService} \| {Brand}` | `Drain Cleaning \| XYZ Plumber` |
+| Blog Post | `site.com/blog/post-name/` | `{Post Title} \| {Brand}` | `What Is A Plumbing Emergency? \| XYZ Plumber` |
+| Press Release | `site.com/media/press-release/` | `{Announcement} \| {Brand}` | `XYZ Plumber Announces New Santa Monica Location \| XYZ Plumber` |
 
-| Page | URL Pattern |
-|---|---|
-| Hyper-Specific Local | `https://site.com/location/service/sub-service/` |
-| Hyper-Specific Neighborhood | `https://site.com/location/neighborhood/sub-service/` |
+### Local Landing Pages
+
+| Page | URL Pattern | Title Tag Pattern | Example |
+|---|---|---|---|
+| City + Service | `site.com/location/service/` | `{Service} {City} \| {Brand}` | `Residential Plumber Los Angeles \| XYZ Plumber` |
+| City + SubService | `site.com/location/service/subservice/` | `{SubService} {City} \| {Brand}` | `Water Heater Repair Los Angeles \| XYZ Plumber` |
+
+**Local landing pages:** location slug FIRST, service slug SECOND.
+**Most geo-relevant pages on the site** — primary driver of GBP signal.
+
+### Silo Pages
+
+| Page | URL Pattern | Title Tag Pattern | Example |
+|---|---|---|---|
+| Neighborhood | `site.com/location/neighborhood/` | `{Service} {Neighborhood} \| {Brand}` | `Plumber Sawtelle \| XYZ Plumber` |
+| POI | `site.com/location/poi/` | `{Service} near {POI} \| {Brand}` | |
+
+Neighborhood pages: only for large cities with recognized neighborhoods (verify in Google Maps — must have left-panel entity info).
 
 ---
 
-## Page Purposes
+## Page Type Detection (Classifier Types)
 
-- **Home:** Brand-focused. Do NOT optimize for the main keyword — optimize for brand search intent.
-- **About Us:** Company history, mission, USP, leadership team. Not service-focused.
-- **Bio Pages:** Leadership credentials, work history, education, professional orgs. Builds authority.
-- **Contact Us:** NAP, GBP embed, form fill, click-to-call, social links. Keep short.
-- **Service Pages:** Expertise + authority for the service. No geo-targeting (unless single-city business).
-- **Location Pages:** City-focused. Include all major services in H2s. No single-service focus.
-- **Local Landing Pages:** Optimized for `[service] in [city]` and `[service] near me`. Most geo-relevant power. Pushes GBP signal.
-- **Blog Posts:** Informational intent. Nationwide traffic + brand authority. Do NOT geo-target informational posts.
-- **Sub-Service Pages:** For keywords on a different intent vector (e.g., "24-hour plumber" vs "plumber").
-- **Neighborhood Pages:** For large cities with recognized neighborhoods verified in Google Maps.
+The NLP service classifies each discovered page into one of these types:
+
+| Type | Description | Detection |
+|---|---|---|
+| `service` | Top-level service page, no geo | Service words in URL/title/H1, no geo signal |
+| `location` | Top-level city page, no service | Geo signal in URL/title/H1, no service words |
+| `city_service` | Local landing page — service + city | Both service words AND geo signal |
+| `blog` | Blog post or content page | Under `/blog/`, `/news/`, `/articles/`, etc. |
+| `media` | Press release or newsroom content | Under `/media/`, `/newsroom/`, `/press-room/`, `/press-releases/` |
+| `other` | About, contact, home, utility pages | Everything else |
+
+---
+
+## Title Tag Patterns Summary
+
+| Page Type | Pattern |
+|---|---|
+| Location | `{City} \| {Brand}` |
+| Service | `{Service} \| {Brand}` |
+| Local landing (city+service) | `{Service} {City} \| {Brand}` |
+| Local landing (city+subservice) | `{SubService} {City} \| {Brand}` |
+| Neighborhood silo | `{Service} {Neighborhood} \| {Brand}` |
+| Bio | `{Full Name} \| {Brand}` |
+| Sub-service | `{SubService} \| {Brand}` |
+| Blog post | `{Post Title} \| {Brand}` |
+| Press release | `{Announcement headline} \| {Brand}` |
 
 ---
 
@@ -64,8 +96,8 @@
 
 ### All pages must link via nav/footer to:
 - Home, About Us, Contact Us, Privacy Policy
-- Top-level service pages (or Services index if too many)
-- Top-level location pages (or Areas We Serve if too many)
+- Top-level service pages (or Services index if too many for nav)
+- Top-level location pages (or Areas We Serve if too many for nav)
 - Blog Archive
 
 ### Body content links by page type:
@@ -86,19 +118,19 @@
 
 ## PageRank / Link Equity Principles
 
-- Every page has a finite amount of link equity to distribute equally across all outbound links.
-- Adding pages to a category dilutes equity to all other pages in that category.
-- Direct external links pass more value than internal links (15%+ dampening factor).
-- Deep pages that aren't linked site-wide only receive equity from their category index page.
-- Keep navigation focused — too many links in nav dilutes equity to each destination.
+- Every page distributes its equity equally across all outbound links.
+- Adding pages to a category dilutes equity per page in that category.
+- Direct external links pass more value than internal links (15%+ dampening).
+- Deep pages only receive equity from their category index page.
+- Keep navigation focused — too many nav links dilutes equity to each destination.
 
 ---
 
 ## Content Silos
 
-Group semantically related pages through internal linking. Each silo = one main topic with related subtopics linked together.
+Group semantically related pages through internal linking. Each silo = one main topic with related subtopics all linked together.
 
 Benefits:
-1. Reinforces keyword relevance within the silo
-2. Distributes link equity efficiently within the topic cluster
+1. Reinforces keyword relevance within the topic cluster
+2. Distributes link equity efficiently within the silo
 3. Improves user navigation and time-on-site
