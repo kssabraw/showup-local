@@ -967,6 +967,18 @@ async def score_existing_page(request: Request, body: ScorePageRequest):
     return ScorePageResponse(url=body.url, **result)
 
 
+class SiteArchitectureRequest(BaseModel):
+    pages: List[dict]   # List of existing_page records from analyze-business
+
+
+class SiteArchitectureResponse(BaseModel):
+    missing_essential_pages: List[str]
+    page_type_summary: dict
+    total_pages_analyzed: int
+    recommendations: List[dict]
+    internal_linking_rules: dict
+
+
 @app.post('/analyze-site-architecture', response_model=SiteArchitectureResponse, dependencies=[Depends(verify_api_key)])
 @limiter.limit("20/minute")
 async def analyze_site_architecture_endpoint(request: Request, body: SiteArchitectureRequest):
@@ -995,18 +1007,6 @@ class BusinessAnalysisResponse(BaseModel):
     pages_crawled: int
     analysis_status: str            # "complete" | "partial" | "failed"
     site_architecture: Optional[dict] = None  # SOP audit result
-
-
-class SiteArchitectureRequest(BaseModel):
-    pages: List[dict]   # List of existing_page records from analyze-business
-
-
-class SiteArchitectureResponse(BaseModel):
-    missing_essential_pages: List[str]
-    page_type_summary: dict
-    total_pages_analyzed: int
-    recommendations: List[dict]
-    internal_linking_rules: dict
 
 
 class BrandVoiceRequest(BaseModel):
