@@ -29,6 +29,7 @@ try:
     from slowapi.errors import RateLimitExceeded
     import re
     from collections import defaultdict
+    from nltk.stem import PorterStemmer
     logger.info("Basic imports done")
 
     from sklearn.feature_extraction.text import TfidfVectorizer
@@ -139,6 +140,65 @@ SKIP_DOMAINS = {
     "wikipedia.org", "amazon.com", "ebay.com",
     "angieslist.com", "nextdoor.com", "mapquest.com", "maps.google.com",
 }
+
+
+# ── Service abbreviation / synonym expansion map ──────────────────────────────
+# Keys: lowercase abbreviations/short-forms users type in keywords.
+# Values: expanded terms that should ALSO match pages about that service.
+# Covers the major local SEO niches: HVAC, plumbing, electrical, legal, medical,
+# IT/MSP, roofing, automotive, marketing, real estate.
+SERVICE_ABBREVIATION_MAP: Dict[str, List[str]] = {
+    # HVAC / Climate control
+    "ac":       ["air conditioning", "air conditioner", "cooling", "hvac"],
+    "a/c":      ["air conditioning", "air conditioner", "cooling", "hvac"],
+    "hvac":     ["air conditioning", "heating", "cooling", "furnace", "heat pump"],
+    # Plumbing
+    "hw":       ["hot water", "water heater"],
+    # Electrical
+    "ev":       ["electric vehicle", "ev charging", "electric car charger"],
+    "led":      ["led lighting", "energy efficient lighting"],
+    # IT / MSP
+    "msp":      ["managed service provider", "managed services", "it support", "it services"],
+    "it":       ["information technology", "tech support", "computer support", "it services"],
+    "voip":     ["voip", "business phone", "hosted phone"],
+    "cybersec": ["cybersecurity", "cyber security", "network security"],
+    # Legal
+    "dui":      ["drunk driving", "driving under the influence", "dwi"],
+    "dwi":      ["drunk driving", "driving while intoxicated", "dui"],
+    "pi":       ["personal injury", "accident attorney", "injury lawyer"],
+    "ovi":      ["operating vehicle impaired", "drunk driving", "dui"],
+    # Medical / Health
+    "pt":       ["physical therapy", "physical therapist"],
+    "ot":       ["occupational therapy", "occupational therapist"],
+    "chiro":    ["chiropractor", "chiropractic"],
+    "obgyn":    ["obgyn", "gynecologist", "obstetrics"],
+    # Roofing / Solar
+    "solar":    ["solar panel", "solar energy", "photovoltaic", "solar installation"],
+    # Security
+    "cctv":     ["security camera", "surveillance", "video surveillance"],
+    # Marketing / Digital
+    "seo":      ["search engine optimization", "seo services"],
+    "ppc":      ["pay per click", "paid advertising", "google ads"],
+    "smm":      ["social media marketing", "social media management"],
+    "cro":      ["conversion rate optimization"],
+    # Finance / Accounting
+    "cpa":      ["certified public accountant", "accountant", "tax preparation"],
+    "cfo":      ["chief financial officer", "financial consulting", "fractional cfo"],
+    # Property / Real Estate
+    "hoa":      ["homeowners association", "hoa management"],
+    "re":       ["real estate", "realtor", "realty"],
+    "pm":       ["property management", "property manager"],
+    # Staffing
+    "hr":       ["human resources", "hr services", "human resource"],
+    # Auto
+    "awd":      ["all wheel drive", "awd service"],
+    "4wd":      ["four wheel drive", "4x4"],
+}
+
+NEAR_ME_SIGNALS = ["near me", "nearby", "near by", "closest", "open now", "open 24"]
+
+# Singleton stemmer — created once at module load
+_stemmer = PorterStemmer()
 
 
 # ── Request / Response models ─────────────────────────────────────────────────
@@ -576,6 +636,90 @@ async def analyze(request: Request, body: AnalysisRequest):
 @app.get('/health')
 async def health():
     return {'status': 'ok'}
+
+
+# ── Keyword classifier ────────────────────────────────────────────────────────
+
+class ClassifyKeywordRequest(BaseModel):
+    keyword: str
+    location: str   # e.g. "Anaheim, California, United States"
+
+
+class ClassifyKeywordResponse(BaseModel):
+    intent: str                    # "local" | "service_only"
+    city: str                      # lowercase city extracted from location
+    raw_service_terms: List[str]   # tokens after city + stopword removal
+    match_words: List[str]         # single words — use \b word-boundary matching
+    match_phrases: List[str]       # multi-word phrases — use substring matching
+
+
+@app.post('/classify-keyword', response_model=ClassifyKeywordResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("60/minute")
+async def classify_keyword_endpoint(request: Request, body: ClassifyKeywordRequest):
+    """
+    Extracts service terms from a keyword and expands abbreviations/synonyms so
+    the frontend can find matching pages regardless of how the page titles phrase
+    the same concept (e.g. "AC" vs "Air Conditioning" vs "HVAC").
+
+    Steps:
+    1. Detect intent: local (city in keyword or proximity signal) vs service-only
+    2. Tokenise keyword; identify and expand abbreviations before stopword removal
+    3. Remove stopwords from remaining tokens
+    4. Porter-stem all terms and collect single-word + multi-word phrase buckets
+    """
+    kw = body.keyword.lower().strip()
+    city = body.location.split(",")[0].strip().lower()
+    city_words = [w for w in city.split() if w]
+
+    # Intent detection (same logic as frontend, authoritative backend version)
+    city_in_kw = any(
+        re.search(r'\b' + re.escape(w) + r'\b', kw)
+        for w in city_words if len(w) > 2
+    )
+    proximity = any(s in kw for s in NEAR_ME_SIGNALS)
+    intent = "local" if (city_in_kw or proximity) else "service_only"
+
+    city_word_set = set(city_words)
+
+    # Tokenise: keep letters, digits, slashes (for "a/c")
+    tokens = re.findall(r'[a-z][a-z0-9/]*', kw)
+
+    raw_service_terms: List[str] = []
+    abbrev_expanded_words: List[str] = []    # single-word expansions
+    abbrev_expanded_phrases: List[str] = []  # multi-word expansions
+
+    for tok in tokens:
+        if tok in city_word_set:
+            continue  # skip city words
+        if tok in SERVICE_ABBREVIATION_MAP:
+            raw_service_terms.append(tok)
+            for exp in SERVICE_ABBREVIATION_MAP[tok]:
+                if " " in exp:
+                    abbrev_expanded_phrases.append(exp)
+                else:
+                    abbrev_expanded_words.append(exp)
+        elif tok not in STOP_WORDS:
+            raw_service_terms.append(tok)
+
+    # Build match_words: original service tokens + single-word expansions + their stems
+    match_words_set: set = set()
+    for term in raw_service_terms + abbrev_expanded_words:
+        match_words_set.add(term)
+        stemmed = _stemmer.stem(term)
+        if len(stemmed) >= 3:
+            match_words_set.add(stemmed)
+
+    # Build match_phrases: multi-word expansions + their stemmed first words
+    # (phrases are matched by substring so no need to add extra stem variants)
+    match_phrases_set: set = set(abbrev_expanded_phrases)
+
+    return ClassifyKeywordResponse(
+        intent=intent,
+        city=city,
+        raw_service_terms=raw_service_terms,
+        match_words=sorted(match_words_set),
+        match_phrases=sorted(match_phrases_set),
+    )
 
 
 # ── Existing page scorer ──────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { ChevronDown, ChevronUp, ExternalLink, Loader2, CheckCircle2, XCircle, AlertCircle } from "lucide-react";
 
 const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
@@ -149,6 +149,14 @@ function SignalIcon({ status }: { status: string }) {
   return <XCircle className="w-4 h-4 text-red-400 flex-shrink-0" />;
 }
 
+interface ClassifyResult {
+  intent: "local" | "service_only";
+  city: string;
+  raw_service_terms: string[];
+  match_words: string[];
+  match_phrases: string[];
+}
+
 function YourSiteTab({
   existingPages,
   businessWebsite,
@@ -161,33 +169,61 @@ function YourSiteTab({
   location: string;
 }) {
   const [scores, setScores] = useState<Record<string, PageScore | "loading" | "error">>({});
+  const [classify, setClassify] = useState<ClassifyResult | null>(null);
 
+  // Call the backend to get intent + expanded match terms (handles abbreviations,
+  // stemming, stopwords properly — e.g. "ac" expands to "air conditioning")
+  useEffect(() => {
+    if (!keyword || !location) return;
+    setClassify(null);
+    fetch(`${NLP_SERVICE_URL}/classify-keyword`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
+      body: JSON.stringify({ keyword, location }),
+    })
+      .then((r) => r.ok ? r.json() : null)
+      .then((data: ClassifyResult | null) => { if (data) setClassify(data); })
+      .catch(() => {/* fall through to fallback */});
+  }, [keyword, location]);
+
+  // Fallback (used while classify is loading or if call failed):
+  // basic city/service extraction without abbreviation expansion
   const city = location.split(",")[0].trim().toLowerCase();
   const kwLower = keyword.toLowerCase();
-
-  // Detect intent: local if city name appears in keyword OR "near me" / proximity signals present
-  // Uses word boundaries to avoid partial matches (e.g. "ann" matching "annual")
-  const NEAR_ME_SIGNALS = ["near me", "nearby", "near by", "closest", "open now", "open 24"];
-  const cityInKeyword = city.split(" ").some(
-    (word) => word.length > 2 && new RegExp(`\\b${word}\\b`, "i").test(kwLower)
+  const NEAR_ME_SIGNALS_FB = ["near me", "nearby", "near by", "closest", "open now", "open 24"];
+  const fallbackIsLocal = city.split(" ").some(
+    (w) => w.length > 2 && new RegExp(`\\b${w}\\b`, "i").test(kwLower)
+  ) || NEAR_ME_SIGNALS_FB.some((s) => kwLower.includes(s));
+  const fallbackCityWords = new Set(city.split(" ").filter((w) => w.length > 2));
+  const fallbackServiceTerms = kwLower.split(/\s+/).filter(
+    (w) => w.length > 3 && !fallbackCityWords.has(w)
   );
-  const hasProximitySignal = NEAR_ME_SIGNALS.some((s) => kwLower.includes(s));
-  const isLocalKeyword = cityInKeyword || hasProximitySignal;
 
-  // Service terms = keyword words longer than 3 chars, excluding city words
-  const cityWords = new Set(city.split(" ").filter((w) => w.length > 2));
-  const serviceTerms = kwLower.split(/\s+/).filter(
-    (w) => w.length > 3 && !cityWords.has(w)
-  );
+  // Active classification values — prefer backend result, fall back to local
+  const isLocalKeyword = classify ? classify.intent === "local" : fallbackIsLocal;
+  const activeCity = classify ? classify.city : city;
+  const matchWords: string[] = classify ? classify.match_words : [];
+  const matchPhrases: string[] = classify ? classify.match_phrases : [];
+  const serviceTerms: string[] = classify ? classify.raw_service_terms : fallbackServiceTerms;
 
   const matchesCity = (p: ExistingPage) => {
     const text = `${p.url} ${p.title ?? ""} ${p.h1 ?? ""} ${p.primary_city ?? ""}`.toLowerCase();
-    return text.includes(city);
+    return text.includes(activeCity);
   };
+
   const matchesService = (p: ExistingPage) => {
-    if (serviceTerms.length === 0) return true;
     const text = `${p.url} ${p.title ?? ""} ${p.h1 ?? ""}`.toLowerCase();
-    return serviceTerms.some((t) => text.includes(t));
+    if (classify) {
+      // Backend classification available: use expanded match terms
+      // match_phrases: multi-word expanded terms (e.g. "air conditioning") — substring match
+      if (matchPhrases.some((ph) => text.includes(ph))) return true;
+      // match_words: single-word stems/tokens — word-boundary match to avoid "ac" → "academy"
+      if (matchWords.some((w) => new RegExp(`\\b${w}\\b`).test(text))) return true;
+      return matchWords.length === 0 && matchPhrases.length === 0;
+    }
+    // Fallback: simple substring match on service terms
+    if (fallbackServiceTerms.length === 0) return true;
+    return fallbackServiceTerms.some((t) => text.includes(t));
   };
 
   // Classification differs by intent:
@@ -290,10 +326,23 @@ function YourSiteTab({
 
   return (
     <div className="space-y-6">
-      <p className="text-xs text-muted-foreground">
-        Pages found on the business website, classified against your keyword and city.
-        Click <strong>Score</strong> to scrape and evaluate any page.
-      </p>
+      <div className="space-y-1">
+        <p className="text-xs text-muted-foreground">
+          Pages found on the business website, classified against your keyword and city.
+          Click <strong>Score</strong> to scrape and evaluate any page.
+        </p>
+        {classify && (matchWords.length > 0 || matchPhrases.length > 0) && (
+          <p className="text-[10px] text-muted-foreground">
+            Matching on:{" "}
+            <span className="text-foreground">
+              {[...matchPhrases, ...matchWords].join(", ")}
+            </span>
+          </p>
+        )}
+        {!classify && (
+          <p className="text-[10px] text-muted-foreground italic">Classifying keyword…</p>
+        )}
+      </div>
       <div className="grid grid-cols-3 gap-3">
         {[
           {
