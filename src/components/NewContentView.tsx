@@ -12,6 +12,8 @@ interface BusinessProfile {
   business_name: string;
   address: string;
   gbp_category: string;
+  website: string | null;
+  existing_pages: any[];
 }
 
 interface AnalysisResult {
@@ -62,7 +64,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     try {
       const { data, error } = await supabase
         .from("business_profiles")
-        .select("id, business_name, address, gbp_category")
+        .select("id, business_name, address, gbp_category, website, existing_pages")
         .order("created_at", { ascending: false });
       if (error) throw error;
       setBusinesses(data || []);
@@ -121,10 +123,13 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
   };
 
   if (result) {
+    const selectedBusiness = businesses.find((b) => b.id === selectedBusinessId);
     return (
       <AnalysisResultsView
         result={result}
-        businessName={businesses.find((b) => b.id === selectedBusinessId)?.business_name || ""}
+        businessName={selectedBusiness?.business_name || ""}
+        existingPages={selectedBusiness?.existing_pages || []}
+        businessWebsite={selectedBusiness?.website || ""}
         onBack={() => setResult(null)}
       />
     );
