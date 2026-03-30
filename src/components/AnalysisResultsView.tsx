@@ -165,9 +165,14 @@ function YourSiteTab({
   const city = location.split(",")[0].trim().toLowerCase();
   const kwLower = keyword.toLowerCase();
 
-  // Detect intent: if city name appears in keyword it's a local keyword, otherwise service-only
-  // e.g. "plumber anaheim" → local | "plumber" or "commercial plumber" → service-only
-  const isLocalKeyword = city.split(" ").some((word) => word.length > 2 && kwLower.includes(word));
+  // Detect intent: local if city name appears in keyword OR "near me" / proximity signals present
+  // Uses word boundaries to avoid partial matches (e.g. "ann" matching "annual")
+  const NEAR_ME_SIGNALS = ["near me", "nearby", "near by", "closest", "open now", "open 24"];
+  const cityInKeyword = city.split(" ").some(
+    (word) => word.length > 2 && new RegExp(`\\b${word}\\b`, "i").test(kwLower)
+  );
+  const hasProximitySignal = NEAR_ME_SIGNALS.some((s) => kwLower.includes(s));
+  const isLocalKeyword = cityInKeyword || hasProximitySignal;
 
   // Service terms = keyword words longer than 3 chars, excluding city words
   const cityWords = new Set(city.split(" ").filter((w) => w.length > 2));
