@@ -6,6 +6,7 @@ import BusinessSearchView, { type BusinessDetails } from "@/components/BusinessS
 import LocationsView from "@/components/LocationsView";
 import LocationDetailView from "@/components/LocationDetailView";
 import LoginView from "@/components/LoginView";
+import SettingsView from "@/components/SettingsView";
 import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
@@ -20,12 +21,28 @@ const Index = () => {
   const [activeItem, setActiveItem] = useState("dashboard");
   const [collapsed, setCollapsed] = useState(false);
   const [selectedLocationId, setSelectedLocationId] = useState<string | null>(null);
+  const [defaultLocation, setDefaultLocation] = useState("");
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      if (data.session) fetchDefaultLocation(data.session.user.id);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
+      setSession(s);
+      if (s) fetchDefaultLocation(s.user.id);
+    });
     return () => subscription.unsubscribe();
   }, []);
+
+  const fetchDefaultLocation = async (userId: string) => {
+    const { data } = await supabase
+      .from("profiles" as any)
+      .select("default_location")
+      .eq("id", userId)
+      .single();
+    if ((data as any)?.default_location) setDefaultLocation((data as any).default_location);
+  };
 
   const handleItemClick = (item: string) => {
     setActiveItem(item);
@@ -173,7 +190,7 @@ const Index = () => {
             />
           )}
           {activeItem === "content" && (
-            <NewContentView onBack={() => setActiveItem("dashboard")} />
+            <NewContentView onBack={() => setActiveItem("dashboard")} defaultLocation={defaultLocation} />
           )}
           {activeItem === "locations" && !selectedLocationId && (
             <LocationsView
@@ -187,10 +204,11 @@ const Index = () => {
             />
           )}
           {activeItem === "settings" && (
-            <div>
-              <h1 className="text-2xl font-display font-bold text-foreground">Settings</h1>
-              <p className="text-muted-foreground text-sm mt-1">Configure your ShowUP workspace.</p>
-            </div>
+            <SettingsView
+              session={session}
+              defaultLocation={defaultLocation}
+              onDefaultLocationSaved={setDefaultLocation}
+            />
           )}
         </div>
       </main>
