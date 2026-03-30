@@ -28,3 +28,4 @@ dist-ssr
 # .env.local and *.local files are for local-only secret overrides
 .env.local
 .env.*.local
+__pycache__/
