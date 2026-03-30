@@ -724,6 +724,18 @@ async def score_existing_page(request: Request, body: ScorePageRequest):
     return ScorePageResponse(url=body.url, **result)
 
 
+@app.post('/analyze-site-architecture', response_model=SiteArchitectureResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("20/minute")
+async def analyze_site_architecture_endpoint(request: Request, body: SiteArchitectureRequest):
+    """
+    Evaluates a list of existing_pages records against the Site Architecture SOP.
+    Returns URL structure issues, missing essential pages, page type summary,
+    internal linking rules, and actionable recommendations.
+    """
+    result = analyze_site_architecture(body.pages)
+    return SiteArchitectureResponse(**result)
+
+
 # ── Business Analysis: website crawl + ICP/differentiator extraction ──────────
 
 class BusinessAnalysisRequest(BaseModel):
@@ -738,7 +750,20 @@ class BusinessAnalysisResponse(BaseModel):
     detected_icp: Optional[dict]
     differentiators: List[dict]
     pages_crawled: int
-    analysis_status: str   # "complete" | "partial" | "failed"
+    analysis_status: str            # "complete" | "partial" | "failed"
+    site_architecture: Optional[dict] = None  # SOP audit result
+
+
+class SiteArchitectureRequest(BaseModel):
+    pages: List[dict]   # List of existing_page records from analyze-business
+
+
+class SiteArchitectureResponse(BaseModel):
+    missing_essential_pages: List[str]
+    page_type_summary: dict
+    total_pages_analyzed: int
+    recommendations: List[dict]
+    internal_linking_rules: dict
 
 
 class BrandVoiceRequest(BaseModel):
@@ -790,9 +815,14 @@ SERVICE_WORDS = {
 }
 
 # First URL segment patterns that indicate blog/content/editorial pages
+# Media/press archive slugs — classified as 'media' type, distinct from blog
+MEDIA_SLUGS = {
+    'media', 'newsroom', 'press-room', 'press-releases', 'news-releases',
+}
+
 BLOG_SLUGS = {
     'blog','news','insights','articles','resources','resource','post','posts',
-    'updates','press','media','events','case-studies','whitepapers','guides',
+    'updates','press','events','case-studies','whitepapers','guides',
     'tips','podcast','webinars','newsletter','stories','learn','library',
     'knowledge-base','kb','forum','community','careers','jobs',
 }
@@ -973,6 +1003,10 @@ def classify_page_type(url: str, title: str = '', h1: str = '') -> dict:
     first = segments[0] if segments else ''
     path_words = set(re.split(r'[-_]', ' '.join(segments)))
 
+    # ── Media / press release pages ───────────────────────────────────────────
+    if first in MEDIA_SLUGS or (len(segments) > 1 and segments[0] in MEDIA_SLUGS):
+        return {'type': 'media', 'primary_service': None, 'primary_city': None}
+
     # ── Blog / content pages ──────────────────────────────────────────────────
     if first in BLOG_SLUGS or (len(segments) > 1 and segments[0] in BLOG_SLUGS):
         return {'type': 'blog', 'primary_service': None, 'primary_city': None}
@@ -1053,15 +1087,246 @@ def classify_page_type(url: str, title: str = '', h1: str = '') -> dict:
     return {'type': page_type, 'primary_service': None, 'primary_city': None}
 
 
+# ── Site Architecture SOP — internal ruleset ──────────────────────────────────
+# Source: Site Architecture, URL Structure, and Internal Linking SOP (Nov 2024)
+# This encodes the agency SOP so every page analysis and site audit is SOP-aware.
+
+# Essential pages every site must have per SOP
+ESSENTIAL_PAGE_SLUGS: Dict[str, set] = {
+    'about':   {'about', 'about-us', 'our-story', 'who-we-are', 'our-company', 'our-team'},
+    'contact': {'contact', 'contact-us', 'get-in-touch', 'reach-us', 'get-a-quote'},
+    'privacy': {'privacy', 'privacy-policy', 'terms', 'terms-of-service', 'legal'},
+}
+
+# Internal linking rules per page type.
+# nav_footer = links required in site-wide navigation or footer.
+# body       = links that must appear in the page body content.
+INTERNAL_LINKING_RULES: Dict[str, Dict[str, List[str]]] = {
+    'home': {
+        'nav_footer': ['about', 'contact', 'privacy', 'top_level_service_pages',
+                       'top_level_location_pages', 'areas_we_serve', 'blog'],
+        'body':       ['each_service_page', 'each_location_page', 'contact'],
+    },
+    'about': {
+        'nav_footer': ['home', 'contact', 'privacy', 'top_level_service_pages',
+                       'areas_we_serve', 'blog'],
+        'body':       ['bio_pages', 'areas_we_serve', 'top_level_service_page'],
+    },
+    'contact': {
+        'nav_footer': ['home', 'about', 'privacy', 'top_level_service_pages',
+                       'areas_we_serve', 'blog'],
+        'body':       [],
+    },
+    'service': {
+        'nav_footer': ['home', 'about', 'contact', 'privacy', 'areas_we_serve', 'blog'],
+        'body':       ['subservices', 'contact', 'related_local_landing_pages', 'services_page'],
+    },
+    'location': {
+        'nav_footer': ['home', 'about', 'contact', 'privacy', 'top_level_service_pages',
+                       'areas_we_serve', 'blog'],
+        'body':       ['neighborhood_pages', 'poi_pages', 'related_local_landing_pages',
+                       'contact', 'areas_we_serve'],
+    },
+    'city_service': {
+        'nav_footer': ['home', 'about', 'contact', 'privacy', 'top_level_service_pages',
+                       'areas_we_serve', 'blog'],
+        'body':       ['parent_location_page', 'relevant_service_page',
+                       'relevant_subservice_page', 'contact'],
+    },
+    'subservice': {
+        'nav_footer': ['home', 'about', 'contact', 'privacy', 'top_level_service_pages',
+                       'areas_we_serve', 'blog'],
+        'body':       ['parent_service_page', 'contact',
+                       'related_hyper_specific_local_landing_pages'],
+    },
+    'neighborhood': {
+        'nav_footer': ['home', 'about', 'contact', 'privacy', 'top_level_service_pages',
+                       'areas_we_serve', 'blog'],
+        'body':       ['parent_location_page', 'related_neighborhoods', 'related_poi',
+                       'related_service'],
+    },
+    'blog': {
+        'nav_footer': ['home', 'about', 'contact', 'privacy', 'top_level_service_pages',
+                       'areas_we_serve', 'blog'],
+        'body':       ['related_blog_posts_in_silo', 'related_service_or_subservice'],
+    },
+    'areas_we_serve': {
+        'nav_footer': ['home', 'about', 'contact', 'privacy', 'top_level_service_pages',
+                       'blog'],
+        'body':       ['each_individual_location_page'],
+    },
+}
+
+
+def check_url_sop_compliance(url: str, page_type: str) -> dict:
+    """
+    Validates a URL against the Site Architecture SOP rules for its detected page type.
+
+    SOP URL structure expectations:
+      service      → /service/               (root-level, NOT geo-targeted)
+      location     → /location/              (root-level)
+      city_service → /location/service/      (2 segments, location FIRST)
+      blog         → /blog/post-name/        (nested under blog parent)
+
+    Returns { compliant, issues, expected_url_pattern }
+    """
+    import urllib.parse
+    path     = urllib.parse.urlparse(url).path.lower().rstrip('/')
+    segments = [s for s in path.split('/') if s]
+    depth    = len(segments)
+    issues: List[str] = []
+    expected_pattern: Optional[str] = None
+
+    if page_type == 'city_service':
+        expected_pattern = '/location/service/'
+        if depth == 1:
+            issues.append(
+                "Local landing page at root level — SOP requires /location/service/ structure"
+            )
+        elif depth == 2:
+            # Detect reversed order: /service/location/ instead of /location/service/
+            seg0_words = set(re.split(r'[-_]', segments[0]))
+            seg1_words = set(re.split(r'[-_]', segments[1]))
+            seg0_is_service = bool(seg0_words & SERVICE_WORDS)
+            seg1_has_geo    = bool(_STATE_ABBREV_PATTERN.search(segments[1]))
+            if seg0_is_service and seg1_has_geo:
+                issues.append(
+                    "URL appears reversed — SOP requires /location/service/, not /service/location/"
+                )
+        # depth >= 3 → could be /location/service/subservice/ — acceptable per SOP
+
+    elif page_type == 'service':
+        expected_pattern = '/service/'
+        # Service pages must NOT be geo-targeted in the URL
+        if _STATE_ABBREV_PATTERN.search(path):
+            issues.append(
+                "Top-level service page URL contains a geo signal (state abbreviation) — "
+                "SOP: service pages should not be geo-targeted; use /location/service/ for local pages"
+            )
+        if re.search(r'\b\d{5}\b', path):
+            issues.append(
+                "Top-level service page URL contains a zip code — service pages must not be geo-targeted"
+            )
+        if depth > 2:
+            issues.append(
+                f"Service page nested {depth} levels deep — SOP expects /service/ or /services/service/"
+            )
+
+    elif page_type == 'location':
+        expected_pattern = '/location/'
+        if depth > 2:
+            issues.append(
+                f"Location page nested {depth} levels deep — SOP expects /location/ at root level"
+            )
+
+    elif page_type == 'blog':
+        expected_pattern = '/blog/post-name/'
+        if depth == 1 and segments and segments[0] not in BLOG_SLUGS:
+            issues.append(
+                "Blog post at root level — SOP recommends nesting under /blog/post-name/"
+            )
+
+    return {
+        'compliant':            len(issues) == 0,
+        'issues':               issues,
+        'expected_url_pattern': expected_pattern,
+    }
+
+
+def analyze_site_architecture(pages: List[dict]) -> dict:
+    """
+    Evaluates a list of existing_pages records against the Site Architecture SOP.
+
+    Note: URL structure is intentionally NOT checked — client sites vary widely
+    and the SOP URL patterns are the ideal, not a compliance requirement.
+
+    Checks:
+    - Missing essential pages (about, contact, privacy)
+    - Presence of key page types (service, location, city_service)
+    - Actionable recommendations based on page type gaps
+
+    Returns a structured audit result included in business analysis responses.
+    """
+    import urllib.parse
+
+    found_essential: set = set()
+    page_type_counts: Dict[str, int] = {
+        'service': 0, 'location': 0, 'city_service': 0,
+        'blog': 0, 'media': 0, 'other': 0,
+    }
+
+    for page in pages:
+        url       = page.get('url', '')
+        page_type = page.get('page_type', 'other')
+
+        page_type_counts[page_type] = page_type_counts.get(page_type, 0) + 1
+
+        # Essential page detection via first URL path segment
+        path     = urllib.parse.urlparse(url).path.lower().rstrip('/')
+        segments = [s for s in path.split('/') if s]
+        first    = segments[0] if segments else ''
+        for essential, slugs in ESSENTIAL_PAGE_SLUGS.items():
+            if first in slugs:
+                found_essential.add(essential)
+
+    missing_essential = [e for e in ESSENTIAL_PAGE_SLUGS if e not in found_essential]
+
+    recommendations: List[dict] = []
+    if missing_essential:
+        recommendations.append({
+            'priority': 'high',
+            'type':     'missing_pages',
+            'message':  (
+                f"Missing essential pages: {', '.join(missing_essential)}. "
+                "Every site should have About, Contact, and Privacy pages."
+            ),
+        })
+    if page_type_counts['city_service'] == 0 and page_type_counts['location'] > 0:
+        recommendations.append({
+            'priority': 'medium',
+            'type':     'missing_local_landing_pages',
+            'message':  (
+                "Location pages found but no city+service local landing pages detected. "
+                "Create dedicated pages targeting each service+city combination."
+            ),
+        })
+    if page_type_counts['service'] == 0 and page_type_counts['city_service'] > 0:
+        recommendations.append({
+            'priority': 'medium',
+            'type':     'missing_service_pages',
+            'message':  (
+                "Local landing pages found but no top-level service pages detected. "
+                "Add non-geo-targeted service pages to build topical authority."
+            ),
+        })
+    if page_type_counts['location'] == 0 and page_type_counts['city_service'] > 0:
+        recommendations.append({
+            'priority': 'medium',
+            'type':     'missing_location_pages',
+            'message':  (
+                "Local landing pages found but no top-level location pages detected. "
+                "Add a dedicated page for each city served."
+            ),
+        })
+
+    return {
+        'missing_essential_pages': missing_essential,
+        'page_type_summary':       page_type_counts,
+        'total_pages_analyzed':    len(pages),
+        'recommendations':         recommendations,
+        'internal_linking_rules':  INTERNAL_LINKING_RULES,
+    }
+
+
 def _make_page_record(url: str, title: str = '', h1: str = '') -> dict:
     c = classify_page_type(url, title, h1)
     return {
-        'url': url,
-        'title': title[:200],
-        'h1': h1[:200],
-        'page_type': c['type'],
+        'url':             url,
+        'title':           title[:200],
+        'h1':              h1[:200],
+        'page_type':       c['type'],
         'primary_service': c['primary_service'],
-        'primary_city': c['primary_city'],
+        'primary_city':    c['primary_city'],
     }
 
 
@@ -1464,6 +1729,7 @@ async def analyze_business(request: Request, body: BusinessAnalysisRequest):
         )
 
     status = 'complete' if pages else 'partial'
+    architecture = analyze_site_architecture(pages) if pages else None
 
     return BusinessAnalysisResponse(
         existing_pages=pages,
@@ -1471,6 +1737,7 @@ async def analyze_business(request: Request, body: BusinessAnalysisRequest):
         differentiators=llm_result.get('differentiators', []),
         pages_crawled=len(pages),
         analysis_status=status,
+        site_architecture=architecture,
     )
 
 
