@@ -324,9 +324,14 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
         f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
     ).decode()
 
+    # Locations table stores country-first ("United States, California, Anaheim")
+    # but DataForSEO SERP API expects city-first ("Anaheim, California, United States")
+    parts = [p.strip() for p in location.split(",")]
+    serp_location = ", ".join(reversed(parts)) if len(parts) > 1 else location
+
     payload = [{
         "keyword": keyword,
-        "location_name": location,
+        "location_name": serp_location,
         "language_name": "English",
         "depth": SERP_RESULT_COUNT,
         "se_domain": "google.com",
