@@ -346,10 +346,15 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
         data = response.json()
 
         urls = []
+        task_error_detail = None
         for task in (data.get("tasks") or []):
             task_status = task.get("status_message", "")
-            task_code = task.get("status_code", "")
+            task_code = task.get("status_code", 0)
             logger.info(f"DataForSEO task status: {task_code} {task_status}")
+            if task_code != 20000:
+                task_error_detail = f"DataForSEO task error {task_code}: {task_status}"
+                logger.warning(task_error_detail)
+                continue
             for result in (task.get("result") or []):
                 total_count = result.get("se_results_count", "?")
                 logger.info(f"DataForSEO se_results_count: {total_count}")
@@ -371,6 +376,8 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
                         break
 
         logger.info(f"DataForSEO returned {len(urls)} usable URLs for '{keyword}' @ '{location}'")
+        if not urls and task_error_detail:
+            raise ValueError(task_error_detail)
         return urls
 
     except Exception as e:
@@ -677,10 +684,13 @@ async def analyze(request: Request, body: AnalysisRequest):
         urls = body.urls
         logger.info(f"Using {len(urls)} manually provided URLs")
     else:
-        async with httpx.AsyncClient() as client:
-            urls = await fetch_serp_urls(body.keyword, body.location, client)
+        try:
+            async with httpx.AsyncClient() as client:
+                urls = await fetch_serp_urls(body.keyword, body.location, client)
+        except ValueError as e:
+            raise HTTPException(status_code=502, detail=str(e))
         if not urls:
-            raise HTTPException(status_code=502, detail="DataForSEO returned no usable URLs")
+            raise HTTPException(status_code=502, detail="DataForSEO returned no usable URLs for this keyword/location combination")
 
     # Step 2: scrape
     pages = await scrape_urls(urls)
