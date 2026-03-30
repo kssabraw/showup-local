@@ -24,6 +24,7 @@ dist-ssr
 *.sw?
 
 # Environment variables
-.env
+# .env is committed (all values are client-side/public VITE_ vars)
+# .env.local and *.local files are for local-only secret overrides
 .env.local
 .env.*.local
