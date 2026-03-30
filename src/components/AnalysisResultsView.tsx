@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { ChevronDown, ChevronUp, ExternalLink, Loader2, CheckCircle2, XCircle, AlertCircle } from "lucide-react";
+import { useState, useEffect } from "react";
+import { ChevronDown, ChevronUp, ExternalLink, Loader2, CheckCircle2, XCircle, AlertCircle, Sparkles, X } from "lucide-react";
 
 const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
 const NLP_API_KEY = import.meta.env.VITE_NLP_API_KEY ?? "";
@@ -149,6 +149,15 @@ function SignalIcon({ status }: { status: string }) {
   return <XCircle className="w-4 h-4 text-red-400 flex-shrink-0" />;
 }
 
+interface ClassifyResult {
+  intent: "local" | "service_only";
+  city: string;
+  raw_service_terms: string[];
+  match_words: string[];
+  match_phrases: string[];
+  haiku_expansions: Record<string, string[]>;  // unknown abbrev → up to 3 suggestions
+}
+
 function YourSiteTab({
   existingPages,
   businessWebsite,
@@ -161,25 +170,122 @@ function YourSiteTab({
   location: string;
 }) {
   const [scores, setScores] = useState<Record<string, PageScore | "loading" | "error">>({});
+  const [classify, setClassify] = useState<ClassifyResult | null>(null);
+  // pendingExpansions: what the user is editing in the confirmation card
+  const [pendingExpansions, setPendingExpansions] = useState<Record<string, string[]>>({});
+  // customInputs: the "add term" text boxes, one per abbreviation
+  const [customInputs, setCustomInputs] = useState<Record<string, string>>({});
+  // expansionsConfirmed: user clicked "Confirm" (or no haiku expansions exist)
+  const [expansionsConfirmed, setExpansionsConfirmed] = useState(false);
 
+  // Fetch backend classification on mount
+  useEffect(() => {
+    if (!keyword || !location) return;
+    setClassify(null);
+    setExpansionsConfirmed(false);
+    setPendingExpansions({});
+    setCustomInputs({});
+    fetch(`${NLP_SERVICE_URL}/classify-keyword`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
+      body: JSON.stringify({ keyword, location }),
+    })
+      .then((r) => r.ok ? r.json() : null)
+      .then((data: ClassifyResult | null) => {
+        if (!data) return;
+        setClassify(data);
+        const hx = data.haiku_expansions ?? {};
+        setPendingExpansions(hx);
+        // No abbreviations found → nothing to confirm, treat as already confirmed
+        if (Object.keys(hx).length === 0) setExpansionsConfirmed(true);
+      })
+      .catch(() => { setExpansionsConfirmed(true); /* fallback path, skip confirmation */ });
+  }, [keyword, location]);
+
+  // Fallback (while classify is loading or call failed)
   const city = location.split(",")[0].trim().toLowerCase();
-  const kwWords = keyword.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
-  // Service terms = keyword words that are not the city name
-  const serviceTerms = kwWords.filter((w) => !city.includes(w) && !w.includes(city.split(" ")[0]));
+  const kwLower = keyword.toLowerCase();
+  const NEAR_ME_SIGNALS_FB = ["near me", "nearby", "near by", "closest", "open now", "open 24"];
+  const fallbackIsLocal = city.split(" ").some(
+    (w) => w.length > 2 && new RegExp(`\\b${w}\\b`, "i").test(kwLower)
+  ) || NEAR_ME_SIGNALS_FB.some((s) => kwLower.includes(s));
+  const fallbackCityWords = new Set(city.split(" ").filter((w) => w.length > 2));
+  const fallbackServiceTerms = kwLower.split(/\s+/).filter(
+    (w) => w.length > 3 && !fallbackCityWords.has(w)
+  );
+
+  // Active classification — prefer backend result, fall back to local
+  const isLocalKeyword = classify ? classify.intent === "local" : fallbackIsLocal;
+  const activeCity = classify ? classify.city : city;
+  const serviceTerms: string[] = classify ? classify.raw_service_terms : fallbackServiceTerms;
+
+  // Build effective match terms: static expansion (always applied) + confirmed Haiku expansions
+  const effectiveMatchWords: string[] = (() => {
+    const base = classify ? [...classify.match_words] : [];
+    if (expansionsConfirmed) {
+      Object.values(pendingExpansions).flat().forEach((exp) => {
+        if (!exp.includes(" ")) base.push(exp);
+      });
+    }
+    return base;
+  })();
+
+  const effectiveMatchPhrases: string[] = (() => {
+    const base = classify ? [...classify.match_phrases] : [];
+    if (expansionsConfirmed) {
+      Object.values(pendingExpansions).flat().forEach((exp) => {
+        if (exp.includes(" ")) base.push(exp);
+      });
+    }
+    return base;
+  })();
 
   const matchesCity = (p: ExistingPage) => {
     const text = `${p.url} ${p.title ?? ""} ${p.h1 ?? ""} ${p.primary_city ?? ""}`.toLowerCase();
-    return text.includes(city);
-  };
-  const matchesService = (p: ExistingPage) => {
-    if (serviceTerms.length === 0) return true;
-    const text = `${p.url} ${p.title ?? ""} ${p.h1 ?? ""}`.toLowerCase();
-    return serviceTerms.some((t) => text.includes(t));
+    return text.includes(activeCity);
   };
 
-  const queryPages    = existingPages.filter((p) => matchesCity(p) && matchesService(p));
-  const servicePages  = existingPages.filter((p) => !matchesCity(p) && matchesService(p) && p.page_type === "service");
-  const locationPages = existingPages.filter((p) => matchesCity(p) && !matchesService(p) && p.page_type === "location");
+  const matchesService = (p: ExistingPage) => {
+    const text = `${p.url} ${p.title ?? ""} ${p.h1 ?? ""}`.toLowerCase();
+    if (classify && expansionsConfirmed) {
+      if (effectiveMatchPhrases.some((ph) => text.includes(ph))) return true;
+      if (effectiveMatchWords.some((w) => new RegExp(`\\b${w}\\b`).test(text))) return true;
+      return effectiveMatchWords.length === 0 && effectiveMatchPhrases.length === 0;
+    }
+    if (classify && !expansionsConfirmed) {
+      // Static matches only while waiting for confirmation
+      if (classify.match_phrases.some((ph) => text.includes(ph))) return true;
+      if (classify.match_words.some((w) => new RegExp(`\\b${w}\\b`).test(text))) return true;
+      return classify.match_words.length === 0 && classify.match_phrases.length === 0;
+    }
+    if (fallbackServiceTerms.length === 0) return true;
+    return fallbackServiceTerms.some((t) => text.includes(t));
+  };
+
+  const addCustomTerm = (abbrev: string) => {
+    const val = (customInputs[abbrev] ?? "").trim().toLowerCase();
+    if (!val) return;
+    setPendingExpansions((prev) => ({
+      ...prev,
+      [abbrev]: [...(prev[abbrev] ?? []), val],
+    }));
+    setCustomInputs((prev) => ({ ...prev, [abbrev]: "" }));
+  };
+
+  // Classification differs by intent:
+  // Local keyword  → query pages need both service + city match (city_service pages)
+  // Service keyword → query pages need only service match (service pages, no geo required)
+  const queryPages = isLocalKeyword
+    ? existingPages.filter((p) => matchesCity(p) && matchesService(p))
+    : existingPages.filter((p) => matchesService(p) && p.page_type === "service");
+
+  const servicePages = isLocalKeyword
+    ? existingPages.filter((p) => !matchesCity(p) && matchesService(p) && p.page_type === "service")
+    : []; // not meaningful for service-only keywords
+
+  const locationPages = isLocalKeyword
+    ? existingPages.filter((p) => matchesCity(p) && !matchesService(p) && p.page_type === "location")
+    : existingPages.filter((p) => matchesCity(p) && p.page_type === "location");
 
   const handleScore = async (url: string) => {
     setScores((s) => ({ ...s, [url]: "loading" }));
@@ -264,17 +370,123 @@ function YourSiteTab({
     );
   }
 
+  // Whether we have unconfirmed Haiku suggestions to show
+  const hasPendingConfirmation = classify && !expansionsConfirmed && Object.keys(pendingExpansions).length > 0;
+  // All active match terms (for display once confirmed)
+  const allActiveTerms = [...effectiveMatchPhrases, ...effectiveMatchWords];
+
   return (
     <div className="space-y-6">
-      <p className="text-xs text-muted-foreground">
-        Pages found on the business website, classified against your keyword and city.
-        Click <strong>Score</strong> to scrape and evaluate any page.
-      </p>
+      <div className="space-y-1">
+        <p className="text-xs text-muted-foreground">
+          Pages found on the business website, classified against your keyword and city.
+          Click <strong>Score</strong> to scrape and evaluate any page.
+        </p>
+        {classify && expansionsConfirmed && allActiveTerms.length > 0 && (
+          <p className="text-[10px] text-muted-foreground">
+            Matching on:{" "}
+            <span className="text-foreground">{allActiveTerms.join(", ")}</span>
+          </p>
+        )}
+        {!classify && (
+          <p className="text-[10px] text-muted-foreground italic">Classifying keyword…</p>
+        )}
+      </div>
+
+      {/* Haiku expansion confirmation card */}
+      {hasPendingConfirmation && (
+        <div className="bg-accent/5 border border-accent/20 rounded-xl p-4 space-y-4">
+          <div className="flex items-start gap-2">
+            <Sparkles className="w-4 h-4 text-accent mt-0.5 shrink-0" />
+            <div>
+              <p className="text-sm font-semibold text-foreground">Confirm term expansions</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                We detected possible abbreviations in your keyword. Confirm what each means
+                so we can find matching pages correctly. Remove any that are wrong, or add your own.
+              </p>
+            </div>
+          </div>
+
+          {Object.entries(pendingExpansions).map(([abbrev, expansions]) => (
+            <div key={abbrev} className="space-y-2">
+              <p className="text-xs font-medium text-foreground">
+                <span className="font-mono bg-muted px-1.5 py-0.5 rounded">{abbrev}</span>
+                {" "}refers to:
+              </p>
+              <div className="flex flex-wrap gap-1.5 items-center">
+                {expansions.length === 0 && (
+                  <span className="text-xs text-muted-foreground italic">No expansions — add one below or confirm to skip.</span>
+                )}
+                {expansions.map((exp) => (
+                  <span
+                    key={exp}
+                    className="inline-flex items-center gap-1 text-xs bg-muted text-foreground px-2.5 py-1 rounded-full"
+                  >
+                    {exp}
+                    <button
+                      onClick={() =>
+                        setPendingExpansions((prev) => ({
+                          ...prev,
+                          [abbrev]: prev[abbrev].filter((e) => e !== exp),
+                        }))
+                      }
+                      className="hover:text-destructive ml-0.5 flex-shrink-0"
+                      aria-label={`Remove ${exp}`}
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                ))}
+                {/* Add custom term */}
+                <div className="flex items-center gap-1">
+                  <input
+                    type="text"
+                    value={customInputs[abbrev] ?? ""}
+                    onChange={(e) =>
+                      setCustomInputs((prev) => ({ ...prev, [abbrev]: e.target.value }))
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") addCustomTerm(abbrev);
+                    }}
+                    placeholder="Add term…"
+                    className="text-xs bg-background border border-input rounded-full px-2.5 py-1 w-28 focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                  <button
+                    onClick={() => addCustomTerm(abbrev)}
+                    className="text-xs text-primary hover:underline"
+                  >
+                    Add
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+
+          <button
+            onClick={() => setExpansionsConfirmed(true)}
+            className="text-sm font-semibold text-accent-foreground bg-accent hover:opacity-90 px-4 py-2 rounded-lg"
+          >
+            Confirm and search
+          </button>
+        </div>
+      )}
       <div className="grid grid-cols-3 gap-3">
         {[
-          { label: "Query pages", count: queryPages.length, desc: `${keyword}` },
-          { label: "Service pages", count: servicePages.length, desc: serviceTerms.join(" ") || keyword },
-          { label: "Location pages", count: locationPages.length, desc: location.split(",")[0] },
+          {
+            label: isLocalKeyword ? "Query pages" : "Service pages",
+            count: queryPages.length,
+            desc: keyword,
+          },
+          {
+            label: "Supporting service pages",
+            count: servicePages.length,
+            desc: serviceTerms.join(" ") || keyword,
+          },
+          {
+            label: "Location pages",
+            count: locationPages.length,
+            desc: location.split(",")[0],
+          },
         ].map(({ label, count, desc }) => (
           <div key={label} className="bg-card border border-border rounded-xl p-3 text-center">
             <p className="text-2xl font-bold">{count}</p>
@@ -285,18 +497,32 @@ function YourSiteTab({
       </div>
       <PageList
         pages={queryPages}
-        label={`Directly targeting query — "${keyword}"`}
-        emptyMsg="No pages found targeting both service and city."
+        label={
+          isLocalKeyword
+            ? `Local landing pages — "${keyword}"`
+            : `Service pages targeting "${keyword}"`
+        }
+        emptyMsg={
+          isLocalKeyword
+            ? "No pages found targeting both service and city."
+            : "No top-level service page found for this keyword."
+        }
       />
-      <PageList
-        pages={servicePages}
-        label={`Service pages — no geo`}
-        emptyMsg="No pure service pages found."
-      />
+      {isLocalKeyword && (
+        <PageList
+          pages={servicePages}
+          label={`Supporting service pages — "${serviceTerms.join(" ") || keyword}" (no geo)`}
+          emptyMsg="No top-level service page found. Consider adding one to build topical authority."
+        />
+      )}
       <PageList
         pages={locationPages}
         label={`Location pages — "${location.split(",")[0]}"`}
-        emptyMsg="No location-only pages found for this city."
+        emptyMsg={
+          isLocalKeyword
+            ? "No location page found for this city."
+            : `No location page found for "${location.split(",")[0]}".`
+        }
       />
     </div>
   );

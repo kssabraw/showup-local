@@ -3,6 +3,7 @@ import os
 import logging
 import asyncio
 import base64
+import json
 
 # Configure logging to stderr so Railway captures it
 logging.basicConfig(
@@ -29,6 +30,7 @@ try:
     from slowapi.errors import RateLimitExceeded
     import re
     from collections import defaultdict
+    from nltk.stem import PorterStemmer
     logger.info("Basic imports done")
 
     from sklearn.feature_extraction.text import TfidfVectorizer
@@ -139,6 +141,140 @@ SKIP_DOMAINS = {
     "wikipedia.org", "amazon.com", "ebay.com",
     "angieslist.com", "nextdoor.com", "mapquest.com", "maps.google.com",
 }
+
+
+# ── Service abbreviation / synonym expansion map ──────────────────────────────
+# Keys: lowercase abbreviations/short-forms users type in keywords.
+# Values: expanded terms that should ALSO match pages about that service.
+# Covers the major local SEO niches: HVAC, plumbing, electrical, legal, medical,
+# IT/MSP, roofing, automotive, marketing, real estate.
+SERVICE_ABBREVIATION_MAP: Dict[str, List[str]] = {
+    # HVAC / Climate control
+    "ac":       ["air conditioning", "air conditioner", "cooling", "hvac"],
+    "a/c":      ["air conditioning", "air conditioner", "cooling", "hvac"],
+    "hvac":     ["air conditioning", "heating", "cooling", "furnace", "heat pump"],
+    # Plumbing
+    "hw":       ["hot water", "water heater"],
+    # Electrical
+    "ev":       ["electric vehicle", "ev charging", "electric car charger"],
+    "led":      ["led lighting", "energy efficient lighting"],
+    # IT / MSP
+    "msp":      ["managed service provider", "managed services", "it support", "it services"],
+    "it":       ["information technology", "tech support", "computer support", "it services"],
+    "voip":     ["voip", "business phone", "hosted phone"],
+    "cybersec": ["cybersecurity", "cyber security", "network security"],
+    # Legal
+    "dui":      ["drunk driving", "driving under the influence", "dwi"],
+    "dwi":      ["drunk driving", "driving while intoxicated", "dui"],
+    "pi":       ["personal injury", "accident attorney", "injury lawyer"],
+    "ovi":      ["operating vehicle impaired", "drunk driving", "dui"],
+    # Medical / Health
+    "pt":       ["physical therapy", "physical therapist"],
+    "ot":       ["occupational therapy", "occupational therapist"],
+    "chiro":    ["chiropractor", "chiropractic"],
+    "obgyn":    ["obgyn", "gynecologist", "obstetrics"],
+    # Roofing / Solar
+    "solar":    ["solar panel", "solar energy", "photovoltaic", "solar installation"],
+    # Security
+    "cctv":     ["security camera", "surveillance", "video surveillance"],
+    # Marketing / Digital
+    "seo":      ["search engine optimization", "seo services"],
+    "ppc":      ["pay per click", "paid advertising", "google ads"],
+    "smm":      ["social media marketing", "social media management"],
+    "cro":      ["conversion rate optimization"],
+    # Finance / Accounting
+    "cpa":      ["certified public accountant", "accountant", "tax preparation"],
+    "cfo":      ["chief financial officer", "financial consulting", "fractional cfo"],
+    # Property / Real Estate
+    "hoa":      ["homeowners association", "hoa management"],
+    "re":       ["real estate", "realtor", "realty"],
+    "pm":       ["property management", "property manager"],
+    # Staffing
+    "hr":       ["human resources", "hr services", "human resource"],
+    # Auto
+    "awd":      ["all wheel drive", "awd service"],
+    "4wd":      ["four wheel drive", "4x4"],
+}
+
+NEAR_ME_SIGNALS = ["near me", "nearby", "near by", "closest", "open now", "open 24"]
+
+# Singleton stemmer — created once at module load
+_stemmer = PorterStemmer()
+
+# In-process cache for Haiku abbreviation expansions (survives for the lifetime
+# of the Railway process — cheap and avoids redundant API calls for common terms)
+_haiku_expansion_cache: Dict[str, List[str]] = {}
+
+
+def _is_likely_abbreviation(token: str) -> bool:
+    """
+    Returns True if a token looks like an industry abbreviation that Haiku
+    should try to expand. Heuristics:
+    - ≤ 4 chars (ac, msp, dui, pt, etc.)
+    - Mixed alphanumeric like 4wd, b2b, b2c
+    Already-known stopwords and city words are filtered before this is called.
+    """
+    if len(token) <= 4:
+        return True
+    if re.match(r'^[a-z0-9]+$', token) and any(c.isdigit() for c in token):
+        return True
+    return False
+
+
+async def _haiku_expand_abbreviations(tokens: List[str]) -> Dict[str, List[str]]:
+    """
+    Sends a batch of suspected abbreviations to Claude Haiku and returns a
+    dict mapping each token → up to 3 expanded forms (lowercase).
+    Returns {} if ANTHROPIC_API_KEY is not set or call fails.
+    Only non-empty lists are included for real abbreviations; complete words
+    get an empty list which is then omitted from the returned dict.
+    """
+    if not tokens or not ANTHROPIC_API_KEY:
+        return {}
+
+    import anthropic
+    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+    terms_str = ", ".join(f'"{t}"' for t in tokens)
+    prompt = (
+        "You are a local SEO specialist.\n"
+        "The following terms were extracted from a local service keyword.\n"
+        "For each term, if it looks like an industry abbreviation or short form, "
+        "list up to 3 common full-form alternatives that would appear in a "
+        "business's page titles, H1s, or URLs.\n"
+        "If the term is already a complete, common English word (not an abbreviation), "
+        "return an empty list for it.\n\n"
+        f"Terms: {terms_str}\n\n"
+        "Respond with ONLY valid JSON in this exact format:\n"
+        '{"term1": ["expansion1", "expansion2"], "term2": [], ...}\n\n'
+        "Examples:\n"
+        '- "ac" → ["air conditioning", "air conditioner", "cooling"]\n'
+        '- "msp" → ["managed service provider", "managed services", "it services"]\n'
+        '- "dui" → ["drunk driving", "dui defense", "driving under the influence"]\n'
+        '- "hvls" → ["high volume low speed fans", "industrial fans", "warehouse fans"]\n'
+        '- "repair" → []  (already a complete word)\n'
+        '- "plumber" → []  (already a complete word)'
+    )
+
+    try:
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = response.content[0].text.strip()
+        # Strip markdown code fences if Haiku wrapped the JSON
+        raw = re.sub(r'^```(?:json)?\s*', '', raw)
+        raw = re.sub(r'\s*```$', '', raw)
+        data = json.loads(raw)
+        return {
+            k.lower(): [str(x).lower() for x in v[:3]]
+            for k, v in data.items()
+            if isinstance(v, list) and v  # omit empty lists
+        }
+    except Exception as e:
+        logger.warning(f"Haiku abbreviation expansion failed: {e}")
+        return {}
 
 
 # ── Request / Response models ─────────────────────────────────────────────────
@@ -576,6 +712,108 @@ async def analyze(request: Request, body: AnalysisRequest):
 @app.get('/health')
 async def health():
     return {'status': 'ok'}
+
+
+# ── Keyword classifier ────────────────────────────────────────────────────────
+
+class ClassifyKeywordRequest(BaseModel):
+    keyword: str
+    location: str   # e.g. "Anaheim, California, United States"
+
+
+class ClassifyKeywordResponse(BaseModel):
+    intent: str                              # "local" | "service_only"
+    city: str                                # lowercase city extracted from location
+    raw_service_terms: List[str]             # tokens after city + stopword removal
+    match_words: List[str]                   # single words — use \b word-boundary matching
+    match_phrases: List[str]                 # multi-word phrases — use substring matching
+    haiku_expansions: Dict[str, List[str]]   # unknown abbrevs → Haiku suggestions (need user confirmation)
+
+
+@app.post('/classify-keyword', response_model=ClassifyKeywordResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("60/minute")
+async def classify_keyword_endpoint(request: Request, body: ClassifyKeywordRequest):
+    """
+    Extracts service terms from a keyword and expands abbreviations/synonyms so
+    the frontend can find matching pages regardless of how the page titles phrase
+    the same concept (e.g. "AC" vs "Air Conditioning" vs "HVAC").
+
+    Steps:
+    1. Detect intent: local (city in keyword or proximity signal) vs service-only
+    2. Tokenise keyword; identify and expand abbreviations before stopword removal
+    3. For tokens in SERVICE_ABBREVIATION_MAP → expand immediately (no confirmation needed)
+    4. For tokens that look like unknown abbreviations → ask Haiku (cached), return in
+       haiku_expansions so frontend can confirm/edit before applying
+    5. Porter-stem known terms and collect single-word + multi-word phrase buckets
+    """
+    kw = body.keyword.lower().strip()
+    city = body.location.split(",")[0].strip().lower()
+    city_words = [w for w in city.split() if w]
+
+    # Intent detection
+    city_in_kw = any(
+        re.search(r'\b' + re.escape(w) + r'\b', kw)
+        for w in city_words if len(w) > 2
+    )
+    proximity = any(s in kw for s in NEAR_ME_SIGNALS)
+    intent = "local" if (city_in_kw or proximity) else "service_only"
+
+    city_word_set = set(city_words)
+
+    # Tokenise: keep letters, digits, slashes (for "a/c")
+    tokens = re.findall(r'[a-z][a-z0-9/]*', kw)
+
+    raw_service_terms: List[str] = []
+    abbrev_expanded_words: List[str] = []
+    abbrev_expanded_phrases: List[str] = []
+    unknown_abbrev_candidates: List[str] = []   # go to Haiku
+
+    for tok in tokens:
+        if tok in city_word_set:
+            continue
+        if tok in SERVICE_ABBREVIATION_MAP:
+            raw_service_terms.append(tok)
+            for exp in SERVICE_ABBREVIATION_MAP[tok]:
+                if " " in exp:
+                    abbrev_expanded_phrases.append(exp)
+                else:
+                    abbrev_expanded_words.append(exp)
+        elif tok not in STOP_WORDS:
+            raw_service_terms.append(tok)
+            if _is_likely_abbreviation(tok):
+                unknown_abbrev_candidates.append(tok)
+
+    # Build match_words + match_phrases from known terms (static map + stems)
+    match_words_set: set = set()
+    for term in raw_service_terms + abbrev_expanded_words:
+        match_words_set.add(term)
+        stemmed = _stemmer.stem(term)
+        if len(stemmed) >= 3:
+            match_words_set.add(stemmed)
+
+    match_phrases_set: set = set(abbrev_expanded_phrases)
+
+    # Haiku expansion for unknown abbreviation candidates
+    # Check cache first; only call Haiku for tokens we haven't seen before
+    haiku_expansions: Dict[str, List[str]] = {}
+    uncached = [t for t in unknown_abbrev_candidates if t not in _haiku_expansion_cache]
+    if uncached:
+        new_expansions = await _haiku_expand_abbreviations(uncached)
+        _haiku_expansion_cache.update({t: new_expansions.get(t, []) for t in uncached})
+
+    for tok in unknown_abbrev_candidates:
+        cached = _haiku_expansion_cache.get(tok, [])
+        if cached:
+            haiku_expansions[tok] = cached
+
+    return ClassifyKeywordResponse(
+        intent=intent,
+        city=city,
+        raw_service_terms=raw_service_terms,
+        match_words=sorted(match_words_set),
+        match_phrases=sorted(match_phrases_set),
+        haiku_expansions=haiku_expansions,
+    )
 
 
 # ── Existing page scorer ──────────────────────────────────────────────────────
