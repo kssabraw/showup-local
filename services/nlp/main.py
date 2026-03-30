@@ -199,7 +199,12 @@ SERVICE_ABBREVIATION_MAP: Dict[str, List[str]] = {
 NEAR_ME_SIGNALS = ["near me", "nearby", "near by", "closest", "open now", "open 24"]
 
 # Singleton stemmer — created once at module load
-_stemmer = PorterStemmer()
+try:
+    _stemmer = PorterStemmer()
+    logger.info("PorterStemmer initialised")
+except Exception as e:
+    logger.error(f"PorterStemmer init failed: {e}")
+    raise
 
 # In-process cache for Haiku abbreviation expansions (survives for the lifetime
 # of the Railway process — cheap and avoids redundant API calls for common terms)

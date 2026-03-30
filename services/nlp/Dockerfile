@@ -1,5 +1,6 @@
 FROM python:3.11-slim
 
+# cache-bust: 2026-03-30-b (force fresh layer after smarter keyword matching PR)
 WORKDIR /app
 
 COPY requirements.txt .
