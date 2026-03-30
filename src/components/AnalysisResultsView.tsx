@@ -1,5 +1,8 @@
 import { useState } from "react";
-import { ChevronDown, ChevronUp, ExternalLink } from "lucide-react";
+import { ChevronDown, ChevronUp, ExternalLink, Loader2, CheckCircle2, XCircle, AlertCircle } from "lucide-react";
+
+const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
+const NLP_API_KEY = import.meta.env.VITE_NLP_API_KEY ?? "";
 
 // Only allow http/https URLs in rendered links to prevent javascript: injection
 const isSafeUrl = (url: string) => /^https?:\/\//i.test(url);
@@ -106,16 +109,213 @@ function KeywordZoneTable({ keywords, zone }: { keywords: RelatedKeyword[]; zone
   );
 }
 
-const TABS = ["Related Keywords", "Quadgrams", "Entities", "Sources"] as const;
+interface ExistingPage {
+  url: string;
+  title?: string;
+  h1?: string;
+  page_type?: string;
+  primary_service?: string | null;
+  primary_city?: string | null;
+}
+
+interface PageScore {
+  title: string;
+  h1: string;
+  word_count: number;
+  score: number;
+  keyword_in_title: boolean;
+  city_in_title: boolean;
+  keyword_in_h1: boolean;
+  city_in_h1: boolean;
+  keyword_mentions: number;
+  city_mentions: number;
+  has_phone: boolean;
+  signals: { signal: string; status: string; points: number }[];
+}
+
+function ScoreBadge({ score }: { score: number }) {
+  const color =
+    score >= 80 ? "text-green-600 bg-green-500/10" :
+    score >= 60 ? "text-yellow-600 bg-yellow-500/10" :
+    "text-red-600 bg-red-500/10";
+  return (
+    <span className={`text-sm font-bold px-2 py-0.5 rounded ${color}`}>{score}/100</span>
+  );
+}
+
+function SignalIcon({ status }: { status: string }) {
+  if (status === "pass") return <CheckCircle2 className="w-4 h-4 text-green-500 flex-shrink-0" />;
+  if (status === "partial") return <AlertCircle className="w-4 h-4 text-yellow-500 flex-shrink-0" />;
+  return <XCircle className="w-4 h-4 text-red-400 flex-shrink-0" />;
+}
+
+function YourSiteTab({
+  existingPages,
+  businessWebsite,
+  keyword,
+  location,
+}: {
+  existingPages: ExistingPage[];
+  businessWebsite: string;
+  keyword: string;
+  location: string;
+}) {
+  const [scores, setScores] = useState<Record<string, PageScore | "loading" | "error">>({});
+
+  const city = location.split(",")[0].trim().toLowerCase();
+  const kwWords = keyword.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+  // Service terms = keyword words that are not the city name
+  const serviceTerms = kwWords.filter((w) => !city.includes(w) && !w.includes(city.split(" ")[0]));
+
+  const matchesCity = (p: ExistingPage) => {
+    const text = `${p.url} ${p.title ?? ""} ${p.h1 ?? ""} ${p.primary_city ?? ""}`.toLowerCase();
+    return text.includes(city);
+  };
+  const matchesService = (p: ExistingPage) => {
+    if (serviceTerms.length === 0) return true;
+    const text = `${p.url} ${p.title ?? ""} ${p.h1 ?? ""}`.toLowerCase();
+    return serviceTerms.some((t) => text.includes(t));
+  };
+
+  const queryPages    = existingPages.filter((p) => matchesCity(p) && matchesService(p));
+  const servicePages  = existingPages.filter((p) => !matchesCity(p) && matchesService(p) && p.page_type === "service");
+  const locationPages = existingPages.filter((p) => matchesCity(p) && !matchesService(p) && p.page_type === "location");
+
+  const handleScore = async (url: string) => {
+    setScores((s) => ({ ...s, [url]: "loading" }));
+    try {
+      const res = await fetch(`${NLP_SERVICE_URL}/score-existing-page`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
+        body: JSON.stringify({ url, keyword, city: location.split(",")[0].trim() }),
+      });
+      if (!res.ok) throw new Error();
+      const data: PageScore = await res.json();
+      setScores((s) => ({ ...s, [url]: data }));
+    } catch {
+      setScores((s) => ({ ...s, [url]: "error" }));
+    }
+  };
+
+  const PageList = ({ pages, label, emptyMsg }: { pages: ExistingPage[]; label: string; emptyMsg: string }) => (
+    <div>
+      <div className="flex items-center gap-2 mb-2">
+        <h3 className="text-sm font-semibold text-foreground">{label}</h3>
+        <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">{pages.length}</span>
+      </div>
+      {pages.length === 0 ? (
+        <p className="text-xs text-muted-foreground italic py-2">{emptyMsg}</p>
+      ) : (
+        <div className="border border-border rounded-lg overflow-hidden divide-y divide-border">
+          {pages.map((p) => {
+            const scoreState = scores[p.url];
+            const scored = scoreState && scoreState !== "loading" && scoreState !== "error" ? scoreState as PageScore : null;
+            return (
+              <div key={p.url} className="px-4 py-3 space-y-2">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-foreground truncate">{p.title || p.url}</p>
+                    <a href={isSafeUrl(p.url) ? p.url : "#"} target="_blank" rel="noopener noreferrer"
+                      className="text-xs text-muted-foreground hover:text-foreground truncate block">
+                      {p.url}
+                    </a>
+                    {p.h1 && <p className="text-xs text-muted-foreground mt-0.5 italic">H1: {p.h1}</p>}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {scored && <ScoreBadge score={scored.score} />}
+                    {scoreState === "error" && <span className="text-xs text-red-500">Error</span>}
+                    <button
+                      onClick={() => handleScore(p.url)}
+                      disabled={scoreState === "loading"}
+                      className="text-xs text-primary hover:underline disabled:opacity-50 flex items-center gap-1"
+                    >
+                      {scoreState === "loading" && <Loader2 className="w-3 h-3 animate-spin" />}
+                      {scored ? "Re-score" : "Score"}
+                    </button>
+                  </div>
+                </div>
+                {scored && (
+                  <div className="bg-muted/40 rounded-md p-3 space-y-1.5">
+                    <p className="text-xs font-medium text-foreground mb-2">
+                      {scored.word_count.toLocaleString()} words · {scored.keyword_mentions} keyword mentions · {scored.city_mentions} city mentions
+                    </p>
+                    {scored.signals.map((sig, i) => (
+                      <div key={i} className="flex items-center gap-2">
+                        <SignalIcon status={sig.status} />
+                        <span className="text-xs text-foreground flex-1">{sig.signal}</span>
+                        <span className="text-xs text-muted-foreground">{sig.points}pt</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+
+  if (existingPages.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground text-center py-8">
+        No existing pages found for this business. Run a business analysis from the Locations page first.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <p className="text-xs text-muted-foreground">
+        Pages found on the business website, classified against your keyword and city.
+        Click <strong>Score</strong> to scrape and evaluate any page.
+      </p>
+      <div className="grid grid-cols-3 gap-3">
+        {[
+          { label: "Query pages", count: queryPages.length, desc: `${keyword}` },
+          { label: "Service pages", count: servicePages.length, desc: serviceTerms.join(" ") || keyword },
+          { label: "Location pages", count: locationPages.length, desc: location.split(",")[0] },
+        ].map(({ label, count, desc }) => (
+          <div key={label} className="bg-card border border-border rounded-xl p-3 text-center">
+            <p className="text-2xl font-bold">{count}</p>
+            <p className="text-xs font-medium text-foreground mt-0.5">{label}</p>
+            <p className="text-[10px] text-muted-foreground truncate mt-0.5">{desc}</p>
+          </div>
+        ))}
+      </div>
+      <PageList
+        pages={queryPages}
+        label={`Directly targeting query — "${keyword}"`}
+        emptyMsg="No pages found targeting both service and city."
+      />
+      <PageList
+        pages={servicePages}
+        label={`Service pages — no geo`}
+        emptyMsg="No pure service pages found."
+      />
+      <PageList
+        pages={locationPages}
+        label={`Location pages — "${location.split(",")[0]}"`}
+        emptyMsg="No location-only pages found for this city."
+      />
+    </div>
+  );
+}
+
+const TABS = ["Related Keywords", "Quadgrams", "Entities", "Sources", "Your Site"] as const;
 type Tab = typeof TABS[number];
 
 const AnalysisResultsView = ({
   result,
   businessName,
+  existingPages = [],
+  businessWebsite = "",
   onBack,
 }: {
   result: AnalysisResult;
   businessName: string;
+  existingPages?: ExistingPage[];
+  businessWebsite?: string;
   onBack: () => void;
 }) => {
   const [activeTab, setActiveTab] = useState<Tab>("Related Keywords");
@@ -145,11 +345,12 @@ const AnalysisResultsView = ({
       </div>
 
       {/* Summary cards */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-4 gap-4">
         {[
           { label: "Related Keywords", value: totalRelated },
           { label: "Quadgrams", value: result.top_quadgrams.length },
           { label: "Key Entities", value: result.google_entities.length },
+          { label: "Existing Pages", value: existingPages.length },
         ].map(({ label, value }) => (
           <div key={label} className="bg-card border border-border rounded-xl p-4 text-center">
             <p className="text-2xl font-bold text-foreground">{value}</p>
@@ -286,6 +487,15 @@ const AnalysisResultsView = ({
             ))}
           </div>
         </div>
+      )}
+
+      {activeTab === "Your Site" && (
+        <YourSiteTab
+          existingPages={existingPages}
+          businessWebsite={businessWebsite}
+          keyword={result.keyword}
+          location={result.location}
+        />
       )}
     </div>
   );

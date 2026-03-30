@@ -578,6 +578,152 @@ async def health():
     return {'status': 'ok'}
 
 
+# ── Existing page scorer ──────────────────────────────────────────────────────
+
+class ScorePageRequest(BaseModel):
+    url: str
+    keyword: str
+    city: str       # Just the city name, e.g. "Anaheim"
+    business_name: str = ""
+
+
+class ScorePageResponse(BaseModel):
+    url: str
+    title: str
+    h1: str
+    word_count: int
+    score: int      # 0–100
+    keyword_in_title: bool
+    city_in_title: bool
+    keyword_in_h1: bool
+    city_in_h1: bool
+    keyword_mentions: int
+    city_mentions: int
+    has_phone: bool
+    signals: List[dict]
+
+
+def compute_page_score(html: str, keyword: str, city: str) -> dict:
+    """
+    Lightweight signal check for a single page.
+    Returns a 0–100 score based on basic on-page SEO signals.
+    Total possible: 100 pts.
+    """
+    zones = extract_zones(html)
+
+    kw = keyword.lower().strip()
+    cy = city.lower().strip()
+
+    title  = zones["title"].lower()
+    h1     = zones["h1"].lower()
+    h2h3   = zones["h2_h3"].lower()
+    body   = zones["body"].lower()
+
+    word_count   = len(body.split())
+    kw_in_title  = kw in title
+    cy_in_title  = cy in title
+    kw_in_h1     = kw in h1
+    cy_in_h1     = cy in h1
+    kw_in_h2h3   = kw in h2h3
+    cy_in_h2h3   = cy in h2h3
+    kw_mentions  = body.count(kw)
+    cy_mentions  = body.count(cy)
+    has_phone    = bool(re.search(r'\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}', zones["body"]))
+    has_h2h3     = len(h2h3.strip()) > 30
+
+    score   = 0
+    signals = []
+
+    def sig(label: str, status: str, pts: int) -> int:
+        signals.append({"signal": label, "status": status, "points": pts})
+        return pts
+
+    # Title (20 pts)
+    score += sig("Keyword in title", "pass" if kw_in_title else "fail", 10 if kw_in_title else 0)
+    score += sig("City in title",    "pass" if cy_in_title else "fail", 10 if cy_in_title else 0)
+
+    # H1 (20 pts)
+    score += sig("Keyword in H1", "pass" if kw_in_h1 else "fail", 10 if kw_in_h1 else 0)
+    score += sig("City in H1",    "pass" if cy_in_h1 else "fail", 10 if cy_in_h1 else 0)
+
+    # H2/H3 (10 pts)
+    score += sig("Keyword in H2/H3", "pass" if kw_in_h2h3 else "fail", 5 if kw_in_h2h3 else 0)
+    score += sig("City in H2/H3",    "pass" if cy_in_h2h3 else "fail", 5 if cy_in_h2h3 else 0)
+
+    # Word count (15 pts)
+    if word_count >= 1500:
+        wc_pts, wc_status = 15, "pass"
+    elif word_count >= 800:
+        wc_pts, wc_status = 10, "partial"
+    elif word_count >= 400:
+        wc_pts, wc_status = 5, "partial"
+    else:
+        wc_pts, wc_status = 0, "fail"
+    score += sig(f"Word count ({word_count:,} words)", wc_status, wc_pts)
+
+    # City mentions (15 pts)
+    if cy_mentions >= 5:
+        cm_pts, cm_status = 15, "pass"
+    elif cy_mentions >= 3:
+        cm_pts, cm_status = 10, "partial"
+    elif cy_mentions >= 1:
+        cm_pts, cm_status = 5, "partial"
+    else:
+        cm_pts, cm_status = 0, "fail"
+    score += sig(f"City mentions ({cy_mentions}×)", cm_status, cm_pts)
+
+    # Keyword mentions (10 pts)
+    if kw_mentions >= 3:
+        km_pts, km_status = 10, "pass"
+    elif kw_mentions >= 1:
+        km_pts, km_status = 5, "partial"
+    else:
+        km_pts, km_status = 0, "fail"
+    score += sig(f"Keyword mentions ({kw_mentions}×)", km_status, km_pts)
+
+    # H2/H3 headings (5 pts)
+    score += sig("H2/H3 headings present", "pass" if has_h2h3 else "fail", 5 if has_h2h3 else 0)
+
+    # Phone number (5 pts)
+    score += sig("Phone number present", "pass" if has_phone else "fail", 5 if has_phone else 0)
+
+    return {
+        "title":           zones["title"],
+        "h1":              zones["h1"],
+        "word_count":      word_count,
+        "score":           score,
+        "keyword_in_title": kw_in_title,
+        "city_in_title":   cy_in_title,
+        "keyword_in_h1":   kw_in_h1,
+        "city_in_h1":      cy_in_h1,
+        "keyword_mentions": kw_mentions,
+        "city_mentions":   cy_mentions,
+        "has_phone":       has_phone,
+        "signals":         signals,
+    }
+
+
+@app.post('/score-existing-page', response_model=ScorePageResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("20/minute")
+async def score_existing_page(request: Request, body: ScorePageRequest):
+    """
+    Scrapes one URL and returns a 0–100 on-page score against keyword + city.
+    Used to evaluate the business's best existing city+service page before
+    generating new content.
+    """
+    if not re.match(r'^https?://', body.url, re.I):
+        raise HTTPException(status_code=422, detail="URL must start with http:// or https://")
+
+    async with httpx.AsyncClient() as client:
+        html = await scrape_url(body.url, client)
+
+    if not html:
+        raise HTTPException(status_code=502, detail="Could not fetch page — ScrapeOwl returned no content")
+
+    result = compute_page_score(html, body.keyword, body.city)
+    return ScorePageResponse(url=body.url, **result)
+
+
 # ── Business Analysis: website crawl + ICP/differentiator extraction ──────────
 
 class BusinessAnalysisRequest(BaseModel):
