@@ -347,7 +347,12 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
 
         urls = []
         for task in (data.get("tasks") or []):
+            task_status = task.get("status_message", "")
+            task_code = task.get("status_code", "")
+            logger.info(f"DataForSEO task status: {task_code} {task_status}")
             for result in (task.get("result") or []):
+                total_count = result.get("se_results_count", "?")
+                logger.info(f"DataForSEO se_results_count: {total_count}")
                 for item in (result.get("items") or []):
                     if item.get("type") != "organic":
                         continue
@@ -365,7 +370,7 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
                     if len(urls) >= SERP_RESULT_COUNT:
                         break
 
-        logger.info(f"DataForSEO returned {len(urls)} usable URLs for '{keyword}'")
+        logger.info(f"DataForSEO returned {len(urls)} usable URLs for '{keyword}' @ '{location}'")
         return urls
 
     except Exception as e:

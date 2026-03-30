@@ -244,7 +244,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         {/* Location */}
         <div className="space-y-2" ref={locationContainerRef}>
           <label className="text-sm font-medium text-foreground">Location</label>
-          <p className="text-xs text-muted-foreground -mt-1">Start typing to search DataForSEO locations</p>
+          <p className="text-xs text-muted-foreground -mt-1">Type to search — you must select from the list</p>
           <div className="relative">
             <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground z-10" />
             <input
@@ -252,10 +252,19 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
               value={locationInput}
               onChange={(e) => handleLocationInput(e.target.value)}
               onFocus={() => { if (locationSuggestions.length > 0) setShowSuggestions(true); }}
-              placeholder="e.g. Anaheim, California, United States"
-              className="w-full bg-background border border-input rounded-lg pl-9 pr-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              placeholder="Search locations..."
+              className={`w-full bg-background border rounded-lg pl-9 pr-8 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring ${location ? "border-green-500" : "border-input"}`}
             />
-            {locationLoading && (
+            {location && (
+              <button
+                type="button"
+                onMouseDown={() => { setLocation(""); setLocationInput(""); setLocationSuggestions([]); }}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              >
+                ×
+              </button>
+            )}
+            {locationLoading && !location && (
               <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground animate-spin" />
             )}
             {showSuggestions && locationSuggestions.length > 0 && (
@@ -272,6 +281,9 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
               </ul>
             )}
           </div>
+          {locationInput && !location && (
+            <p className="text-xs text-amber-500">Select a location from the dropdown to continue</p>
+          )}
         </div>
 
         {/* Error */}
