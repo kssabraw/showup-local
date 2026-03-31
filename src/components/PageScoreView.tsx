@@ -313,7 +313,7 @@ export default function PageScoreView({
             ) : (
               <>
                 <p className="text-sm text-green-500 font-medium text-center">
-                  This page is well optimized — no reoptimization needed.
+                  No content reoptimizations advised.
                 </p>
                 <Button
                   variant="outline"
