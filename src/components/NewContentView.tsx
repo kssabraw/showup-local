@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { MapPin, Sparkles, ChevronDown, Building2, Loader2, FileSearch, FilePlus, PhoneCall, FileText, Trash2 } from "lucide-react";
+import { MapPin, Sparkles, ChevronDown, Building2, Loader2, FileSearch, FilePlus, PhoneCall, FileText, Trash2, CheckCircle2, PlusCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import AnalysisResultsView from "@/components/AnalysisResultsView";
@@ -83,6 +83,9 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
   const [loadingSaved, setLoadingSaved] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
+  const [relatedPages, setRelatedPages] = useState<any[] | null>(null);
+  const [relatedLoading, setRelatedLoading] = useState(false);
+
   const locationDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const locationContainerRef = useRef<HTMLDivElement>(null);
 
@@ -109,6 +112,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
   // Reset check state when inputs change
   useEffect(() => {
     setCheckState({ status: "idle" });
+    setRelatedPages(null);
     setError("");
   }, [keyword, location, selectedBusinessId]);
 
@@ -251,15 +255,37 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
 
     setError("");
     setCheckState({ status: "scanning" });
+    setRelatedPages(null);
+    setRelatedLoading(true);
 
-    // Step 1: Scan site for existing page
+    // Step 1: Scan site for existing page + fetch related pages in parallel
     let foundPage: { url: string; title: string; h1?: string } | null = null;
     try {
-      const scanRes = await fetch(`${NLP_SERVICE_URL}/find-page-for-keyword`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-        body: JSON.stringify({ website_url: b.website, keyword: keyword.trim() }),
-      });
+      const [scanRes] = await Promise.all([
+        fetch(`${NLP_SERVICE_URL}/find-page-for-keyword`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
+          body: JSON.stringify({ website_url: b.website, keyword: keyword.trim() }),
+        }),
+        // Fire related-pages in background; results stored separately
+        fetch(`${NLP_SERVICE_URL}/related-pages`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
+          body: JSON.stringify({
+            keyword: keyword.trim(),
+            location: location.trim(),
+            business_name: b.business_name,
+            gbp_category: b.gbp_category,
+            address: b.address,
+            website: b.website,
+          }),
+        }).then(r => r.json()).then(d => {
+          setRelatedPages(d.items ?? []);
+          setRelatedLoading(false);
+        }).catch(() => {
+          setRelatedLoading(false);
+        }),
+      ]);
       if (!scanRes.ok) {
         const d = await scanRes.json().catch(() => ({}));
         throw new Error(d.detail || `Site scan error: ${scanRes.status}`);
@@ -271,6 +297,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     } catch (e: any) {
       setError(e.message || "Site scan failed");
       setCheckState({ status: "idle" });
+      setRelatedLoading(false);
       return;
     }
 
@@ -663,6 +690,61 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
                 </div>
               </div>
             </div>
+            {/* Related pages panel for high_score state */}
+            {(relatedLoading || relatedPages) && (
+              <div className="bg-card border border-border rounded-xl overflow-hidden">
+                <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+                  <p className="text-sm font-semibold text-foreground">Related Pages</p>
+                  {relatedLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
+                </div>
+                {relatedLoading && !relatedPages && (
+                  <div className="px-4 py-3 text-xs text-muted-foreground">Discovering related keywords…</div>
+                )}
+                {relatedPages && relatedPages.length > 0 && (
+                  <div className="divide-y divide-border">
+                    {(["parents", "siblings", "children"] as const).map(group => {
+                      const items = relatedPages.filter(p => p.group === group);
+                      if (!items.length) return null;
+                      const groupLabel = group === "parents" ? "Parent Pages" : group === "siblings" ? "Sibling Pages" : "Child Pages";
+                      return (
+                        <div key={group}>
+                          <div className="px-4 py-2 bg-muted/30">
+                            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{groupLabel}</p>
+                          </div>
+                          {items.map((item: any) => (
+                            <div key={item.keyword} className="px-4 py-3 flex items-center gap-3">
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium text-foreground truncate">{item.keyword}</p>
+                                {item.status === "found" && item.url && (
+                                  <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground underline truncate block">{item.url}</a>
+                                )}
+                              </div>
+                              {item.status === "found" ? (
+                                <div className="flex items-center gap-2 shrink-0">
+                                  <span className={`text-xs font-semibold ${item.composite_score >= 80 ? "text-green-500" : item.composite_score >= 60 ? "text-amber-500" : "text-red-500"}`}>
+                                    {item.composite_score ?? "–"}
+                                  </span>
+                                  <Button size="sm" variant="outline" className="text-xs h-7 px-2"
+                                    onClick={() => handleRelatedAction({ mode: "reoptimize", keyword: item.keyword, existingUrl: item.url })}>
+                                    Reoptimize
+                                  </Button>
+                                </div>
+                              ) : (
+                                <Button size="sm" variant="outline" className="text-xs h-7 px-2 shrink-0"
+                                  onClick={() => handleRelatedAction({ mode: "new", keyword: item.keyword })}>
+                                  <PlusCircle className="w-3 h-3 mr-1" /> Create
+                                </Button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
             <button
               onClick={() => setCheckState({ status: "idle" })}
               className="w-full text-sm text-muted-foreground hover:text-foreground text-center py-2 transition-colors"
@@ -685,6 +767,73 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
             >
               <Sparkles className="w-4 h-4 mr-2" /> Create New Page
             </Button>
+
+            {/* Related pages panel */}
+            {(relatedLoading || relatedPages) && (
+              <div className="bg-card border border-border rounded-xl overflow-hidden">
+                <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+                  <p className="text-sm font-semibold text-foreground">Related Pages</p>
+                  {relatedLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
+                </div>
+                {relatedLoading && !relatedPages && (
+                  <div className="px-4 py-3 text-xs text-muted-foreground">Discovering related keywords…</div>
+                )}
+                {relatedPages && relatedPages.length === 0 && (
+                  <div className="px-4 py-3 text-xs text-muted-foreground">No related pages found.</div>
+                )}
+                {relatedPages && relatedPages.length > 0 && (
+                  <div className="divide-y divide-border">
+                    {(["parents", "siblings", "children"] as const).map(group => {
+                      const items = relatedPages.filter(p => p.group === group);
+                      if (!items.length) return null;
+                      const groupLabel = group === "parents" ? "Parent Pages" : group === "siblings" ? "Sibling Pages" : "Child Pages";
+                      return (
+                        <div key={group}>
+                          <div className="px-4 py-2 bg-muted/30">
+                            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{groupLabel}</p>
+                          </div>
+                          {items.map((item: any) => (
+                            <div key={item.keyword} className="px-4 py-3 flex items-center gap-3">
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium text-foreground truncate">{item.keyword}</p>
+                                {item.status === "found" && item.url && (
+                                  <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground underline truncate block">{item.url}</a>
+                                )}
+                              </div>
+                              {item.status === "found" ? (
+                                <div className="flex items-center gap-2 shrink-0">
+                                  <span className={`text-xs font-semibold ${item.composite_score >= 80 ? "text-green-500" : item.composite_score >= 60 ? "text-amber-500" : "text-red-500"}`}>
+                                    {item.composite_score ?? "–"}
+                                  </span>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="text-xs h-7 px-2"
+                                    onClick={() => handleRelatedAction({ mode: "reoptimize", keyword: item.keyword, existingUrl: item.url })}
+                                  >
+                                    Reoptimize
+                                  </Button>
+                                </div>
+                              ) : (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="text-xs h-7 px-2 shrink-0"
+                                  onClick={() => handleRelatedAction({ mode: "new", keyword: item.keyword })}
+                                >
+                                  <PlusCircle className="w-3 h-3 mr-1" /> Create
+                                </Button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
             <button
               onClick={() => setCheckState({ status: "idle" })}
               className="w-full text-sm text-muted-foreground hover:text-foreground text-center py-1 transition-colors"
