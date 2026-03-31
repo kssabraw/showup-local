@@ -274,7 +274,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         fetch(`${NLP_SERVICE_URL}/find-page-for-keyword`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-          body: JSON.stringify({ website_url: b.website, keyword: keyword.trim() }),
+          body: JSON.stringify({ website_url: b.website, keyword: keyword.trim(), location: location.trim() }),
         }),
         // Fire related-pages in background; results stored separately
         fetch(`${NLP_SERVICE_URL}/related-pages`, {

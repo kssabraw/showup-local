@@ -2087,6 +2087,7 @@ def _serp_context(serp_analysis: Optional[dict]) -> str:
 class FindPageRequest(BaseModel):
     website_url: str
     keyword: str
+    location: Optional[str] = None
 
 class FindPageResponse(BaseModel):
     found: bool
@@ -2222,11 +2223,14 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             for i, u in enumerate(candidate_pool[:15]):
                 logger.info(f"  candidate #{i+1} (score={scored_pairs[scored_urls.index(u)][1]}): {u}")
 
-            # Detect whether keyword contains a location component
-            # Common geo indicators: state names, directional words, or multi-word keywords
-            # Simple heuristic: if any kw_word is >= 5 chars and NOT in common service words,
-            # it may be a location. We let Haiku figure it out from context.
-            has_location_hint = len(kw_words) >= 3  # keywords with 3+ words often have a location
+            # Build service and location context for Haiku
+            # Location: prefer explicitly passed location, else try to infer from keyword
+            biz_location = (body.location or "").strip()
+            # Extract location words from keyword (words not in kw_words are likely location words)
+            all_kw_words = [w for w in re.split(r'[\W_]+', kw) if w and len(w) > 1 and w not in STOP_WORDS]
+            location_words_from_kw = [w for w in all_kw_words if w not in kw_words and w not in _BUSINESS_DESCRIPTORS]
+            # Service words are the kw_words (already stripped of descriptors and location words)
+            service_words = kw_words
 
             # Use Haiku to pick the best matching URL from the candidate list
             haiku_pick: Optional[str] = None
@@ -2234,10 +2238,20 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                 try:
                     _ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
                     url_list_text = "\n".join(f"{i+1}. {u}" for i, u in enumerate(candidate_pool))
+
+                    # Build location context line
+                    location_context_parts = []
+                    if location_words_from_kw:
+                        location_context_parts.append(f"location words in keyword: {location_words_from_kw}")
+                    if biz_location:
+                        location_context_parts.append(f"business location: {biz_location}")
+                    location_context = " | ".join(location_context_parts) if location_context_parts else "unknown"
+
                     location_rule = (
-                        "  - If the keyword includes a location (city/area), strongly prefer URLs that contain both the service AND location words in the slug.\n"
-                        "  - If the keyword has no location, just find the best service page for the service type.\n"
-                    ) if has_location_hint else (
+                        f"  - Target location: {location_context}\n"
+                        f"  - Strongly prefer URLs whose slug contains BOTH the service words ({service_words}) AND location words.\n"
+                        f"  - A URL with just the service words (no location in slug) is acceptable if no location-specific page exists.\n"
+                    ) if (biz_location or location_words_from_kw) else (
                         "  - Find the best dedicated service page for this service type.\n"
                     )
                     _msg = await _ac.messages.create(
@@ -2245,11 +2259,12 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                         max_tokens=64,
                         messages=[{"role": "user", "content": (
                             f"Keyword: \"{body.keyword}\"\n"
-                            f"Service words: {kw_words}\n\n"
-                            f"Pick the single best URL below that is a DEDICATED SERVICE PAGE for this keyword.\n"
+                            f"Service: {service_words}\n"
+                            f"Location: {location_context}\n\n"
+                            f"Pick the single best URL below that is a DEDICATED SERVICE PAGE targeting this service for this location.\n"
                             f"Guidelines:\n"
                             f"{location_rule}"
-                            f"  - Prefer URLs with more keyword words in the slug\n"
+                            f"  - Prefer URLs with more keyword/service words in the slug\n"
                             f"  - Reject blog posts, news, guides, how-to articles, about pages, homepages\n"
                             f"  - A near-match service page is better than no result — prefer the closest match over 0\n\n"
                             f"Reply with ONLY the number of the best URL, or 0 only if every URL is clearly a blog post or unrelated.\n\n"
