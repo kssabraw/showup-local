@@ -142,12 +142,13 @@ export default function GeneratedPageView({
     }
   };
 
-  // Auto-fetch when related tab is opened for the first time
+  // Start fetching related pages in the background as soon as the component mounts
   useEffect(() => {
-    if (activeTab === "related" && relatedItems === null && !relatedLoading) {
-      fetchRelatedPages();
-    }
-  }, [activeTab]);
+    fetchRelatedPages();
+  }, []);
+
+  // Also re-fetch if user manually retries from the related tab
+  // (fetchRelatedPages is called directly from the Retry button)
 
   const toggleSelection = (kw: string, value: "reoptimize" | "new") => {
     setSelections(prev => ({
