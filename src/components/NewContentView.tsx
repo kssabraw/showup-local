@@ -89,6 +89,8 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
   const [bulkCreating, setBulkCreating] = useState(false);
   const [bulkProgress, setBulkProgress] = useState<{ current: number; total: number; currentKw: string } | null>(null);
   const [bulkDone, setBulkDone] = useState(0);
+  const [manualUrl, setManualUrl] = useState("");
+  const [showManualUrl, setShowManualUrl] = useState(false);
 
   const locationDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const locationContainerRef = useRef<HTMLDivElement>(null);
@@ -119,6 +121,8 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     setRelatedPages(null);
     setSelectedForCreate(new Set());
     setBulkDone(0);
+    setManualUrl("");
+    setShowManualUrl(false);
     setError("");
   }, [keyword, location, selectedBusinessId]);
 
@@ -462,6 +466,51 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     fetchSavedPages();
   };
 
+  const handleScoreManualUrl = async () => {
+    let u = manualUrl.trim();
+    if (!u) return;
+    if (!u.startsWith("http://") && !u.startsWith("https://")) u = `https://${u}`;
+    const b = businesses.find(b => b.id === selectedBusinessId);
+    if (!b) return;
+    const page = { url: u, title: u };
+    setCheckState({ status: "scoring", page });
+    setShowManualUrl(false);
+    setError("");
+    try {
+      const [serpData, scoreRes] = await Promise.all([
+        runAnalysis(),
+        fetch(`${NLP_SERVICE_URL}/score-page`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
+          body: JSON.stringify({
+            keyword: keyword.trim(),
+            location: location.trim(),
+            page_url: u,
+            business_name: b.business_name,
+            gbp_category: b.gbp_category,
+            address: b.address,
+          }),
+        }),
+      ]);
+      if (!scoreRes.ok) {
+        const d = await scoreRes.json().catch(() => ({}));
+        throw new Error(d.detail || `Scoring error: ${scoreRes.status}`);
+      }
+      const scoreData = await scoreRes.json();
+      await saveTokenUsage(scoreData.token_usage);
+      await saveAnalysisToSupabase(serpData);
+      if (scoreData.composite_score >= 90) {
+        setCheckState({ status: "high_score", page, score: scoreData.composite_score });
+      } else {
+        setView({ kind: "score", pageMatch: page, serpAnalysis: serpData, initialScoreResult: scoreData });
+        setCheckState({ status: "idle" });
+      }
+    } catch (e: any) {
+      setError(e.message || "Scoring failed");
+      setCheckState({ status: "not_found" });
+    }
+  };
+
   const handleRelatedAction = async ({
     mode,
     keyword: relKw,
@@ -709,9 +758,11 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         {/* Scoring state */}
         {checkState.status === "scoring" && (
           <div className="space-y-2">
-            <div className="flex items-center gap-2 px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs text-amber-600">
-              <FileSearch className="w-3.5 h-3.5 shrink-0" />
-              <span>Found: <a href={checkState.page.url} target="_blank" rel="noopener noreferrer" className="underline font-medium">{checkState.page.title}</a></span>
+            <div className="flex items-center justify-between gap-2 px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs text-amber-600">
+              <span className="flex items-center gap-2 min-w-0">
+                <FileSearch className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">Found: <a href={checkState.page.url} target="_blank" rel="noopener noreferrer" className="underline font-medium">{checkState.page.title}</a></span>
+              </span>
             </div>
             {checkState.page.isBlogPost && (
               <div className="flex items-center gap-2 px-3 py-2 bg-orange-500/10 border border-orange-500/20 rounded-lg text-xs text-orange-600">
@@ -728,10 +779,24 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         {/* High score — well optimized */}
         {checkState.status === "high_score" && (
           <div className="space-y-3">
-            <div className="flex items-center gap-2 px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs text-amber-600">
-              <FileSearch className="w-3.5 h-3.5 shrink-0" />
-              <span>Found: <a href={checkState.page.url} target="_blank" rel="noopener noreferrer" className="underline font-medium">{checkState.page.title}</a></span>
+            <div className="flex items-center justify-between gap-2 px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs text-amber-600">
+              <span className="flex items-center gap-2 min-w-0">
+                <FileSearch className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">Found: <a href={checkState.page.url} target="_blank" rel="noopener noreferrer" className="underline font-medium">{checkState.page.title}</a></span>
+              </span>
+              <button onClick={() => setShowManualUrl(v => !v)} className="shrink-0 underline hover:text-amber-800 whitespace-nowrap">Wrong page?</button>
             </div>
+            {showManualUrl && (
+              <div className="flex gap-2">
+                <input type="url" placeholder="https://example.com/correct-page" value={manualUrl}
+                  onChange={e => setManualUrl(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && handleScoreManualUrl()}
+                  className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent"
+                  autoFocus />
+                <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score</Button>
+                <Button size="sm" variant="ghost" onClick={() => { setShowManualUrl(false); setManualUrl(""); }}>✕</Button>
+              </div>
+            )}
             {checkState.page.isBlogPost && (
               <div className="flex items-center gap-2 px-3 py-2 bg-orange-500/10 border border-orange-500/20 rounded-lg text-xs text-orange-600">
                 <span>⚠️ This appears to be a blog post, not a service page. Consider creating a dedicated service page for this keyword.</span>
@@ -868,6 +933,28 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
             >
               <Sparkles className="w-4 h-4 mr-2" /> Create New Page
             </Button>
+
+            {/* Manual URL input */}
+            {!showManualUrl ? (
+              <button onClick={() => setShowManualUrl(true)}
+                className="w-full text-xs text-muted-foreground hover:text-foreground text-center py-1 transition-colors">
+                Already have a page? Score a specific URL instead →
+              </button>
+            ) : (
+              <div className="flex gap-2">
+                <input
+                  type="url"
+                  placeholder="https://example.com/your-page"
+                  value={manualUrl}
+                  onChange={e => setManualUrl(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && handleScoreManualUrl()}
+                  className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent"
+                  autoFocus
+                />
+                <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score</Button>
+                <Button size="sm" variant="ghost" onClick={() => { setShowManualUrl(false); setManualUrl(""); }}>✕</Button>
+              </div>
+            )}
 
             {/* Related pages panel */}
             {(relatedLoading || relatedPages) && (() => {
