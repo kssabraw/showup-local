@@ -287,9 +287,16 @@ async def scrape_urls(urls: List[str]) -> List[str]:
     """
     Scrapes all URLs concurrently via ScrapeOwl.
     Returns only non-empty HTML strings — failed pages are silently dropped.
+    Limits concurrency to 10 to stay within ScrapeOwl's concurrent request cap.
     """
+    sem = asyncio.Semaphore(10)
+
+    async def scrape_with_sem(url: str, client: httpx.AsyncClient) -> Optional[str]:
+        async with sem:
+            return await scrape_url(url, client)
+
     async with httpx.AsyncClient() as client:
-        results = await asyncio.gather(*[scrape_url(url, client) for url in urls])
+        results = await asyncio.gather(*[scrape_with_sem(url, client) for url in urls])
 
     pages = [html for html in results if html]
     logger.info(f"Successfully scraped {len(pages)}/{len(urls)} pages")
@@ -1921,7 +1928,25 @@ async def _find_page_for_keyword_reuse(
         slug_words = set(re.split(r'[\W/_-]+', path))
         return sum(1 for w in kw_words if w in slug_words)
 
+    _blog_seg = re.compile(
+        r'/(blog|news|articles?|posts?|insights?|resources?|guides?|tips?|'
+        r'updates?|press|media|events?|stories|announcements?|learn)(/|$)',
+        re.IGNORECASE,
+    )
+    _blog_slug = re.compile(
+        r'/\d{4}/\d{2}/|/\d{4}-\d{2}-\d{2}[-_]|'
+        r'-(why|how|what|when|where|top-\d+|best-\d+|\d+-tips|\d+-ways|'
+        r'everything-you-need|ultimate-guide|beginners?-guide|complete-guide)-',
+        re.IGNORECASE,
+    )
+
+    def _is_blog(u: str) -> bool:
+        path = _up.urlparse(u).path
+        return bool(_blog_seg.search(path) or _blog_slug.search(path))
+
     async def _check(u: str) -> Optional[dict]:
+        if _is_blog(u):
+            return None
         try:
             resp = await client.get(u, timeout=8.0)
             if resp.status_code != 200:
@@ -2089,7 +2114,28 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
         slug_words = set(re.split(r'[\W/_-]+', path))
         return sum(1 for w in kw_words if w in slug_words)
 
+    _BLOG_SEGMENTS = re.compile(
+        r'/(blog|news|articles?|posts?|insights?|resources?|guides?|tips?|'
+        r'updates?|press|media|events?|stories|announcements?|learn)(/|$)',
+        re.IGNORECASE,
+    )
+    _BLOG_SLUG_PATTERNS = re.compile(
+        r'/\d{4}/\d{2}/|'                      # /2024/03/ date path
+        r'/\d{4}-\d{2}-\d{2}[-_]|'             # /2024-03-15-title
+        r'-(why|how|what|when|where|top-\d+|'
+        r'best-\d+|\d+-tips|\d+-ways|'
+        r'everything-you-need|ultimate-guide|'
+        r'beginners?-guide|complete-guide)-',
+        re.IGNORECASE,
+    )
+
+    def _is_likely_blog_post(u: str) -> bool:
+        path = urllib.parse.urlparse(u).path
+        return bool(_BLOG_SEGMENTS.search(path) or _BLOG_SLUG_PATTERNS.search(path))
+
     async def _check_page(u: str, client: httpx.AsyncClient) -> Optional[dict]:
+        if _is_likely_blog_post(u):
+            return None
         try:
             resp = await client.get(u, timeout=8.0)
             if resp.status_code != 200:
@@ -2193,7 +2239,7 @@ async def score_page(request: Request, body: ScorePageRequest):
     try:
         msg = await client.messages.create(
             model=GENERATION_MODEL,
-            max_tokens=2000,
+            max_tokens=4000,
             messages=[{"role": "user", "content": prompt}],
         )
     except Exception as e:
