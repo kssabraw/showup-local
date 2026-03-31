@@ -37,8 +37,8 @@ interface AnalysisResult {
 type CheckState =
   | { status: "idle" }
   | { status: "scanning" }
-  | { status: "scoring"; page: { url: string; title: string; h1?: string } }
-  | { status: "high_score"; page: { url: string; title: string }; score: number }
+  | { status: "scoring"; page: { url: string; title: string; h1?: string; isBlogPost?: boolean } }
+  | { status: "high_score"; page: { url: string; title: string; isBlogPost?: boolean }; score: number }
   | { status: "not_found" }
   | { status: "creating" };
 
@@ -266,7 +266,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
       }
       const scanData = await scanRes.json();
       if (scanData.found && scanData.page) {
-        foundPage = scanData.page;
+        foundPage = { ...scanData.page, isBlogPost: scanData.is_blog_post === true };
       }
     } catch (e: any) {
       setError(e.message || "Site scan failed");
@@ -617,6 +617,11 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
               <FileSearch className="w-3.5 h-3.5 shrink-0" />
               <span>Found: <a href={checkState.page.url} target="_blank" rel="noopener noreferrer" className="underline font-medium">{checkState.page.title}</a></span>
             </div>
+            {checkState.page.isBlogPost && (
+              <div className="flex items-center gap-2 px-3 py-2 bg-orange-500/10 border border-orange-500/20 rounded-lg text-xs text-orange-600">
+                <span>⚠️ This appears to be a blog post, not a service page. Consider creating a dedicated service page for this keyword.</span>
+              </div>
+            )}
             <div className="flex items-center gap-3 px-4 py-3 bg-muted/30 rounded-lg text-sm text-muted-foreground">
               <Loader2 className="w-4 h-4 animate-spin shrink-0" />
               <span>Fetching competitor data and scoring this page…</span>
@@ -631,6 +636,11 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
               <FileSearch className="w-3.5 h-3.5 shrink-0" />
               <span>Found: <a href={checkState.page.url} target="_blank" rel="noopener noreferrer" className="underline font-medium">{checkState.page.title}</a></span>
             </div>
+            {checkState.page.isBlogPost && (
+              <div className="flex items-center gap-2 px-3 py-2 bg-orange-500/10 border border-orange-500/20 rounded-lg text-xs text-orange-600">
+                <span>⚠️ This appears to be a blog post, not a service page. Consider creating a dedicated service page for this keyword.</span>
+              </div>
+            )}
             <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-5 space-y-3">
               <div className="flex items-start gap-3">
                 <div className="text-3xl font-bold text-green-500">{Math.round(checkState.score)}</div>

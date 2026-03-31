@@ -1946,8 +1946,6 @@ async def _find_page_for_keyword_reuse(
         return bool(_blog_seg.search(path) or _blog_slug.search(path))
 
     async def _check(u: str) -> Optional[dict]:
-        if _is_blog(u):
-            return None
         try:
             resp = await client.get(u, timeout=8.0)
             if resp.status_code != 200:
@@ -1959,17 +1957,17 @@ async def _find_page_for_keyword_reuse(
             h1_text = h.get_text(strip=True) if h else ''
             combined = set(re.split(r'[\W]+', f"{title_text} {h1_text}".lower()))
             if all(w in combined for w in kw_words):
-                return {'url': str(resp.url), 'title': title_text or u, 'h1': h1_text}
+                return {'url': str(resp.url), 'title': title_text or u, 'h1': h1_text,
+                        'is_blog_post': _is_blog(u)}
         except Exception:
             pass
         return None
 
     scored = sorted(discovered_urls, key=_slug_score_local, reverse=True)[:20]
     results = await asyncio.gather(*[_check(u) for u in scored], return_exceptions=True)
-    for r in results:
-        if isinstance(r, dict) and r:
-            return r
-    return None
+    matches = [r for r in results if isinstance(r, dict) and r]
+    matches.sort(key=lambda r: r.get('is_blog_post', False))
+    return matches[0] if matches else None
 
 
 async def _score_page_for_related(
@@ -2077,6 +2075,7 @@ class FindPageRequest(BaseModel):
 class FindPageResponse(BaseModel):
     found: bool
     page: Optional[dict] = None  # { url, title, h1 }
+    is_blog_post: bool = False
 
 @app.post('/find-page-for-keyword', response_model=FindPageResponse, dependencies=[Depends(verify_api_key)])
 @limiter.limit("20/minute")
@@ -2135,8 +2134,6 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
         return bool(_BLOG_SEGMENTS.search(path) or _BLOG_SLUG_PATTERNS.search(path))
 
     async def _check_page(u: str, client: httpx.AsyncClient) -> Optional[dict]:
-        if _is_likely_blog_post(u):
-            return None
         try:
             resp = await client.get(u, timeout=8.0)
             if resp.status_code != 200:
@@ -2148,7 +2145,8 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             h1_text = h1_tag.get_text(strip=True) if h1_tag else ''
             combined_words = set(re.split(r'[\W]+', f"{title_text} {h1_text}".lower()))
             if all(w in combined_words for w in kw_words):
-                return {'url': str(resp.url), 'title': title_text or u, 'h1': h1_text}
+                return {'url': str(resp.url), 'title': title_text or u, 'h1': h1_text,
+                        'is_blog_post': _is_likely_blog_post(u)}
         except Exception:
             pass
         return None
@@ -2177,10 +2175,14 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
 
             # Fetch pages concurrently and check title + H1
             results = await asyncio.gather(*[_check_page(u, client) for u in to_check])
-            for res in results:
-                if res:
-                    logger.info(f"find-page-for-keyword: found match → {res['url']}")
-                    return FindPageResponse(found=True, page=res)
+            matches = [r for r in results if r]
+            # Prefer service pages over blog posts
+            matches.sort(key=lambda r: r.get('is_blog_post', False))
+            if matches:
+                res = matches[0]
+                is_blog = res.get('is_blog_post', False)
+                logger.info(f"find-page-for-keyword: found {'blog' if is_blog else 'service'} page → {res['url']}")
+                return FindPageResponse(found=True, page=res, is_blog_post=is_blog)
 
     except Exception as e:
         logger.warning(f"find-page-for-keyword error ({url}): {e}")
