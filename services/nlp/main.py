@@ -324,9 +324,12 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
         f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
     ).decode()
 
+    # Normalize: ensure spaces after commas ("Anaheim,California,United States" → "Anaheim, California, United States")
+    serp_location = ", ".join(p.strip() for p in location.split(","))
+
     payload = [{
         "keyword": keyword,
-        "location_name": location,
+        "location_name": serp_location,
         "language_name": "English",
         "depth": SERP_RESULT_COUNT,
         "se_domain": "google.com",
@@ -375,7 +378,7 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
                     if len(urls) >= SERP_RESULT_COUNT:
                         break
 
-        logger.info(f"DataForSEO returned {len(urls)} usable URLs for '{keyword}' @ '{location}'")
+        logger.info(f"DataForSEO returned {len(urls)} usable URLs for '{keyword}' @ '{serp_location}'")
         if not urls and task_error_detail:
             raise ValueError(task_error_detail)
         return urls
