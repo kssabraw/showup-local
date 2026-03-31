@@ -107,7 +107,11 @@ async def verify_api_key(api_key: str = Security(_api_key_header)):
 
 GOOGLE_NLP_ENDPOINT  = "https://language.googleapis.com/v1/documents:analyzeEntities"
 DATAFORSEO_ENDPOINT  = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced"
+DATAFORSEO_LOCATIONS_ENDPOINT = "https://api.dataforseo.com/v3/serp/google/locations"
 SCRAPEOWL_ENDPOINT   = "https://app.scrapeowl.com/api/scrape"
+
+# In-process cache: location name → location_code (int)
+_location_code_cache: Dict[str, int] = {}
 
 logger.info("App initialized, ready to serve")
 for name, val in [
@@ -317,11 +321,40 @@ def _normalize_location(location: str) -> str:
     """Ensure spaces after commas: 'Anaheim,California,United States' → 'Anaheim, California, United States'"""
     return ", ".join(p.strip() for p in location.split(","))
 
-async def _call_dataforseo(keyword: str, serp_location: str, client: httpx.AsyncClient) -> dict:
+async def _get_location_code(location_name: str, client: httpx.AsyncClient) -> int | None:
+    """
+    Resolves a location name to a DataForSEO location_code.
+    Uses an in-process cache to avoid repeated calls.
+    """
+    if location_name in _location_code_cache:
+        return _location_code_cache[location_name]
+    try:
+        response = await client.get(
+            DATAFORSEO_LOCATIONS_ENDPOINT,
+            headers={"Authorization": f"Basic {_make_dataforseo_credentials()}"},
+            params={"country": "United States"},
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        data = response.json()
+        for item in (data.get("tasks") or [{}])[0].get("result") or []:
+            name = item.get("location_name", "")
+            code = item.get("location_code")
+            if code:
+                _location_code_cache[name] = code
+        result = _location_code_cache.get(location_name)
+        logger.info(f"Location code lookup: '{location_name}' → {result}")
+        return result
+    except Exception as e:
+        logger.warning(f"Location code lookup failed: {e}")
+        return None
+
+async def _call_dataforseo(keyword: str, serp_location: str, client: httpx.AsyncClient, location_code: int | None = None) -> dict:
     """Raw DataForSEO call — returns the full response dict or raises on HTTP error."""
+    location_field = {"location_code": location_code} if location_code else {"location_name": serp_location}
     payload = [{
         "keyword": keyword,
-        "location_name": serp_location,
+        **location_field,
         "language_name": "English",
         "depth": SERP_RESULT_COUNT,
         "se_domain": "google.com",
@@ -347,10 +380,11 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
         return [], "DataForSEO credentials not configured"
 
     serp_location = _normalize_location(location)
-    logger.info(f"Calling DataForSEO: keyword='{keyword}' location='{serp_location}'")
+    location_code = await _get_location_code(serp_location, client)
+    logger.info(f"Calling DataForSEO: keyword='{keyword}' location='{serp_location}' code={location_code}")
 
     try:
-        data = await _call_dataforseo(keyword, serp_location, client)
+        data = await _call_dataforseo(keyword, serp_location, client, location_code)
     except Exception as e:
         logger.warning(f"DataForSEO HTTP error: {e}")
         return [], f"DataForSEO request failed: {e}"
@@ -678,10 +712,11 @@ async def debug_dataforseo(keyword: str, location: str):
         return {"error": "DataForSEO credentials not set"}
     serp_location = _normalize_location(location)
     async with httpx.AsyncClient() as client:
+        location_code = await _get_location_code(serp_location, client)
         try:
-            data = await _call_dataforseo(keyword, serp_location, client)
+            data = await _call_dataforseo(keyword, serp_location, client, location_code)
         except Exception as e:
-            return {"error": str(e)}
+            return {"error": str(e), "location_sent": serp_location, "location_code": location_code}
     tasks = data.get("tasks") or []
     summary = []
     for task in tasks:
