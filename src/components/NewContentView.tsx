@@ -90,10 +90,10 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
       try {
         const { data } = await supabase
           .from("Locations")
-          .select("Location")
-          .ilike("Location", `%${value}%`)
+          .select("location")
+          .ilike("location", `%${value}%`)
           .limit(8);
-        setLocationSuggestions((data || []).map((r: any) => r.Location));
+        setLocationSuggestions((data || []).map((r: any) => r.location));
       } finally {
         setLocationLoading(false);
       }
