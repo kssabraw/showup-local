@@ -105,7 +105,7 @@ async def verify_api_key(api_key: str = Security(_api_key_header)):
 
 GOOGLE_NLP_ENDPOINT  = "https://language.googleapis.com/v1/documents:analyzeEntities"
 DATAFORSEO_ENDPOINT  = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced"
-SCRAPEOWL_ENDPOINT   = "https://app.scrapeowl.com/api/scrape"
+SCRAPEOWL_ENDPOINT   = "https://api.scrapeowl.com/v1/scrape"
 
 logger.info("App initialized, ready to serve")
 for name, val in [
@@ -237,27 +237,25 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
 
 # ── Step 2: ScrapeOwl — fetch raw HTML for each URL ──────────────────────────
 
-SCRAPE_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-}
-
 async def scrape_url(url: str, client: httpx.AsyncClient) -> Optional[str]:
     """
-    Fetches raw HTML directly via httpx.
+    Fetches raw HTML via ScrapeOwl v1 API with premium proxies.
     Returns None on failure so the pipeline continues with remaining pages.
     """
     try:
-        response = await client.get(url, timeout=20.0, headers=SCRAPE_HEADERS)
+        payload = {
+            "api_key": SCRAPEOWL_API_KEY,
+            "url": url,
+            "premium_proxies": True,
+            "country": "us",
+            "json_response": True,
+        }
+        response = await client.post(SCRAPEOWL_ENDPOINT, json=payload, timeout=30.0)
         if response.status_code != 200:
-            logger.warning(f"Scrape HTTP {response.status_code} for {url}")
+            logger.warning(f"ScrapeOwl HTTP {response.status_code} for {url}: {response.text[:200]}")
             return None
-        html = response.text
+        data = response.json()
+        html = data.get("body") or data.get("html") or ""
         if len(html.strip()) < 200:
             logger.warning(f"Thin content ({len(html)} chars) for {url}")
             return None
