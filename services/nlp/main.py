@@ -1923,10 +1923,17 @@ async def _find_page_for_keyword_reuse(
     if not kw_words:
         kw_words = kw_lower.split()
 
+    def _kw_match_local(kw_word: str, page_words: set) -> bool:
+        if kw_word in page_words:
+            return True
+        if len(kw_word) >= 4:
+            return any(pw.startswith(kw_word) or kw_word.startswith(pw) for pw in page_words if len(pw) >= 4)
+        return False
+
     def _slug_score_local(u: str) -> int:
         path = _up.urlparse(u).path.lower()
         slug_words = set(re.split(r'[\W/_-]+', path))
-        return sum(1 for w in kw_words if w in slug_words)
+        return sum(1 for w in kw_words if any(sw == w or sw.startswith(w) or w.startswith(sw) for sw in slug_words if len(sw) >= 3))
 
     _blog_seg = re.compile(
         r'/(blog|news|articles?|posts?|insights?|resources?|guides?|tips?|'
@@ -1956,7 +1963,7 @@ async def _find_page_for_keyword_reuse(
             title_text = t.get_text(strip=True) if t else ''
             h1_text = h.get_text(strip=True) if h else ''
             combined = set(re.split(r'[\W]+', f"{title_text} {h1_text}".lower()))
-            if all(w in combined for w in kw_words):
+            if all(_kw_match_local(w, combined) for w in kw_words):
                 return {'url': str(resp.url), 'title': title_text or u, 'h1': h1_text,
                         'is_blog_post': _is_blog(u)}
         except Exception:
@@ -2109,10 +2116,18 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             return False
 
     def _slug_score(u: str) -> int:
-        """Count how many keyword words appear in the URL path slug."""
+        """Count how many keyword words appear in the URL path slug (prefix-aware)."""
         path = urllib.parse.urlparse(u).path.lower()
         slug_words = set(re.split(r'[\W/_-]+', path))
-        return sum(1 for w in kw_words if w in slug_words)
+        return sum(1 for w in kw_words if any(sw == w or sw.startswith(w) or w.startswith(sw) for sw in slug_words if len(sw) >= 3))
+
+    def _kw_match(kw_word: str, page_words: set) -> bool:
+        """Match a keyword word against page words, allowing plural/suffix variants."""
+        if kw_word in page_words:
+            return True
+        if len(kw_word) >= 4:
+            return any(pw.startswith(kw_word) or kw_word.startswith(pw) for pw in page_words if len(pw) >= 4)
+        return False
 
     _BLOG_SEGMENTS = re.compile(
         r'/(blog|news|articles?|posts?|insights?|resources?|guides?|tips?|'
@@ -2144,7 +2159,7 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             title_text = title_tag.get_text(strip=True) if title_tag else ''
             h1_text = h1_tag.get_text(strip=True) if h1_tag else ''
             combined_words = set(re.split(r'[\W]+', f"{title_text} {h1_text}".lower()))
-            if all(w in combined_words for w in kw_words):
+            if all(_kw_match(w, combined_words) for w in kw_words):
                 return {'url': str(resp.url), 'title': title_text or u, 'h1': h1_text,
                         'is_blog_post': _is_likely_blog_post(u)}
         except Exception:
