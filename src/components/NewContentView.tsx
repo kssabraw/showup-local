@@ -552,22 +552,28 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         {/* Creating state — step tracker */}
         {checkState.status === "creating" && (() => {
           const serpDone = creatingPhase === "generating";
+          // Step estimates in seconds: SERP fetch ~5s, scraping ~40s, Claude ~30s
+          const STEP_ESTIMATES = [5, 40, 30];
+          const TOTAL_EST = STEP_ESTIMATES.reduce((a, b) => a + b, 0);
           const steps = [
             {
               label: "Fetching top Google results",
               detail: "DataForSEO organic SERP",
+              est: STEP_ESTIMATES[0],
               done: serpDone,
               active: !serpDone,
             },
             {
               label: "Scraping & analysing competitor pages",
               detail: "Up to 20 pages — TF-IDF, quadgrams, entities",
+              est: STEP_ESTIMATES[1],
               done: serpDone,
               active: !serpDone,
             },
             {
               label: "Generating page with Claude",
               detail: "13-section structure + JSON-LD schema",
+              est: STEP_ESTIMATES[2],
               done: false,
               active: creatingPhase === "generating",
             },
@@ -575,11 +581,17 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
           const mins = Math.floor(elapsedSeconds / 60);
           const secs = elapsedSeconds % 60;
           const elapsed = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+          const remaining = Math.max(0, TOTAL_EST - elapsedSeconds);
+          const remMins = Math.floor(remaining / 60);
+          const remSecs = remaining % 60;
+          const remLabel = remaining <= 0 ? "almost done…"
+            : remMins > 0 ? `~${remMins}m ${remSecs}s remaining`
+            : `~${remSecs}s remaining`;
           return (
             <div className="px-4 py-4 bg-muted/30 rounded-lg space-y-3">
               <div className="flex items-center justify-between text-xs text-muted-foreground">
                 <span className="font-medium">Building your page…</span>
-                <span>{elapsed}</span>
+                <span>{elapsed} · {remLabel}</span>
               </div>
               <div className="space-y-2">
                 {steps.map((step, i) => (
@@ -595,10 +607,15 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
                         <div className="w-4 h-4 rounded-full border border-border" />
                       )}
                     </div>
-                    <div className="min-w-0">
-                      <p className={`text-sm ${step.active ? "text-foreground font-medium" : step.done ? "text-muted-foreground line-through" : "text-muted-foreground"}`}>
-                        {step.label}
-                      </p>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <p className={`text-sm ${step.active ? "text-foreground font-medium" : step.done ? "text-muted-foreground line-through" : "text-muted-foreground"}`}>
+                          {step.label}
+                        </p>
+                        {!step.done && (
+                          <span className="text-xs text-muted-foreground shrink-0">~{step.est}s</span>
+                        )}
+                      </div>
                       {step.active && (
                         <p className="text-xs text-muted-foreground mt-0.5">{step.detail}</p>
                       )}
