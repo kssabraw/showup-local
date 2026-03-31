@@ -3,6 +3,8 @@ import os
 import logging
 import asyncio
 import base64
+import json
+import re
 
 # Configure logging to stderr so Railway captures it
 logging.basicConfig(
@@ -105,15 +107,18 @@ async def verify_api_key(api_key: str = Security(_api_key_header)):
 
 GOOGLE_NLP_ENDPOINT  = "https://language.googleapis.com/v1/documents:analyzeEntities"
 DATAFORSEO_ENDPOINT  = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced"
-SCRAPEOWL_ENDPOINT   = "https://app.scrapeowl.com/api/scrape"
+SCRAPEOWL_ENDPOINT   = "https://api.scrapeowl.com/v1/scrape"
 
 logger.info("App initialized, ready to serve")
 for name, val in [
     ("GOOGLE_NLP_API_KEY", GOOGLE_NLP_API_KEY),
     ("DATAFORSEO_LOGIN",   DATAFORSEO_LOGIN),
     ("SCRAPEOWL_API_KEY",  SCRAPEOWL_API_KEY),
+    ("ANTHROPIC_API_KEY",  ANTHROPIC_API_KEY),
 ]:
-    if not val:
+    if val:
+        logger.info(f"{name} is set (length={len(val)})")
+    else:
         logger.warning(f"{name} not set — related feature will be skipped")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -128,7 +133,7 @@ ENTITY_MIN_SALIENCE      = 0.40
 GOOGLE_NLP_MAX_BYTES     = 100_000
 
 # DataForSEO: how many organic results to request
-SERP_RESULT_COUNT = 10
+SERP_RESULT_COUNT = 20
 
 # Domains to skip — directories, aggregators, social, video
 # Intentionally whitelisted: reddit.com, linkedin.com, facebook.com, quora.com
@@ -146,6 +151,7 @@ SKIP_DOMAINS = {
 class AnalysisRequest(BaseModel):
     keyword: str
     location: str                        # e.g. "Anaheim, California, United States"
+    location_code: Optional[int] = None  # DataForSEO numeric location code (preferred)
     urls: Optional[List[str]] = None     # override SERP lookup — pass URLs directly
 
 
@@ -163,11 +169,12 @@ class AnalysisResponse(BaseModel):
     related_keywords: ZoneKeywords
     top_quadgrams: List[dict]
     google_entities: List[dict]
+    zone_targets: Dict[str, dict] = {}   # max term/entity counts per zone across competitors
 
 
 # ── Step 1: DataForSEO — fetch top organic SERP URLs ─────────────────────────
 
-async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient) -> List[str]:
+async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient, location_code: Optional[int] = None) -> List[str]:
     """
     Calls DataForSEO organic live/advanced to get the top SERP_RESULT_COUNT
     organic URLs for keyword + location. Filters out skip-listed domains and
@@ -181,9 +188,10 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
         f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
     ).decode()
 
+    loc_field = {"location_code": location_code} if location_code else {"location_name": location}
     payload = [{
         "keyword": keyword,
-        "location_name": location,
+        **loc_field,
         "language_name": "English",
         "depth": SERP_RESULT_COUNT,
         "se_domain": "google.com",
@@ -234,31 +242,34 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
 
 async def scrape_url(url: str, client: httpx.AsyncClient) -> Optional[str]:
     """
-    Fetches raw HTML for a single URL via ScrapeOwl.
+    Fetches raw HTML via ScrapeOwl v1 API with premium proxies.
     Returns None on failure so the pipeline continues with remaining pages.
     """
-    if not SCRAPEOWL_API_KEY:
-        return None
-
     try:
+        payload = json.dumps({
+            "api_key": SCRAPEOWL_API_KEY,
+            "url": url,
+            "premium_proxies": True,
+            "country": "us",
+            "json_response": True,
+        })
         response = await client.post(
             SCRAPEOWL_ENDPOINT,
-            json={
-                "api_key": SCRAPEOWL_API_KEY,
-                "url": url,
-                "render_js": False,   # static HTML is enough for NLP; faster + cheaper
-            },
+            content=payload,
+            headers={"Content-Type": "application/json"},
             timeout=30.0,
         )
-        response.raise_for_status()
+        if response.status_code != 200:
+            logger.warning(f"ScrapeOwl HTTP {response.status_code} for {url}: {response.text[:200]}")
+            return None
         data = response.json()
-        html = data.get("html") or data.get("body") or ""
+        html = data.get("html") or ""
         if len(html.strip()) < 200:
-            logger.warning(f"ScrapeOwl returned thin content for {url}")
+            logger.warning(f"Thin content ({len(html)} chars) for {url}")
             return None
         return html
     except Exception as e:
-        logger.warning(f"ScrapeOwl error for {url}: {e}")
+        logger.warning(f"Scrape error for {url}: {type(e).__name__}: {e}")
         return None
 
 
@@ -530,7 +541,7 @@ async def analyze(request: Request, body: AnalysisRequest):
         logger.info(f"Using {len(urls)} manually provided URLs")
     else:
         async with httpx.AsyncClient() as client:
-            urls = await fetch_serp_urls(body.keyword, body.location, client)
+            urls = await fetch_serp_urls(body.keyword, body.location, client, body.location_code)
         if not urls:
             raise HTTPException(status_code=502, detail="DataForSEO returned no usable URLs")
 
@@ -560,6 +571,7 @@ async def analyze(request: Request, body: AnalysisRequest):
     )
     quadgrams = get_top_quadgrams(zone_buckets["paragraphs"], body.keyword)
     google_entities = await get_google_entities(zone_buckets["paragraphs"])
+    zone_targets = compute_zone_targets(zone_buckets, related, google_entities)
 
     return AnalysisResponse(
         keyword=body.keyword,
@@ -568,6 +580,7 @@ async def analyze(request: Request, body: AnalysisRequest):
         related_keywords=related,
         top_quadgrams=quadgrams,
         google_entities=google_entities,
+        zone_targets=zone_targets,
     )
 
 
@@ -1690,22 +1703,265 @@ def _parse_claude_json(text: str) -> dict:
         text = re.sub(r'\s*```$', '', text.strip())
     return json_lib.loads(text)
 
+def compute_zone_targets(
+    zone_buckets: Dict[str, List[str]],
+    related: ZoneKeywords,
+    google_entities: List[dict],
+) -> Dict[str, dict]:
+    """
+    For each zone, count how many of the filtered related-keyword terms appear in
+    each competitor page's zone text, then return the max count as the target.
+    Also computes an entity target from the paragraph zone.
+    """
+    targets: Dict[str, dict] = {}
+    for zone_name in ZONES:
+        terms = getattr(related, zone_name)
+        if not terms:
+            targets[zone_name] = {"target": 0}
+            continue
+        term_set = {t["term"].lower() for t in terms}
+        max_count = 0
+        for page_text in zone_buckets.get(zone_name, []):
+            if not page_text:
+                continue
+            cleaned = clean_text(page_text).lower()
+            count = sum(1 for term in term_set if term in cleaned)
+            max_count = max(max_count, count)
+        targets[zone_name] = {"target": max_count}
+
+    # Entity target: count distinct Google entities present in each page's paragraphs
+    if google_entities:
+        entity_names = {e["name"].lower() for e in google_entities}
+        max_entity_count = 0
+        for page_text in zone_buckets.get("paragraphs", []):
+            if not page_text:
+                continue
+            cleaned = clean_text(page_text).lower()
+            count = sum(1 for name in entity_names if name in cleaned)
+            max_entity_count = max(max_entity_count, count)
+        targets["entities"] = {"target": max_entity_count}
+
+    return targets
+
+
+def _build_score_prompt(
+    business_name: str,
+    gbp_category: str,
+    keyword: str,
+    city: str,
+    address: Optional[str],
+    serp_ctx: str,
+    page_text: str,
+) -> str:
+    return f"""You are an expert local SEO analyst. Score this page against all 7 engines below.
+
+CONTEXT
+Business: {business_name}
+Category: {gbp_category}
+Keyword: {keyword}
+City: {city}
+Address: {address or "Not provided"}
+{serp_ctx}
+
+PAGE CONTENT (first 8,000 chars):
+{page_text}
+
+SCORING CRITERIA — score each engine 0–100:
+
+1. organic_ranking (weight 20%): keyword in title + H1 + opening ¶; service/transactional tone (not blog); CTA + phone visible; clear service offering.
+
+2. gbp_maps (weight 25%): exact city name present; service matches GBP category; brand+service+city entity triplet; NAP signals consistent; multiple service mentions.
+
+3. entity_establishment (weight 15%): brand+service+city co-occurrence in ≥3 sections; sub-services mentioned; descriptive anchor text signals; topical depth.
+
+4. icp_alignment (weight 10%): detect ICP from keyword modifier (emergency→urgent tone; commercial→B2B tone; general→professional/reliable); CTA matches ICP; pain points addressed.
+
+5. aeo_llm_retrieval (weight 10%): answer-first formatting (direct claim before explanation); FAQ with ≥4 entries; each section ≤300 words; Q&A heading structure; specific operational details (not generic filler).
+
+6. geographic_legitimacy (weight 10%): city in title+H1+opening ¶; ≥2 neighborhood references in sentence context; ≥1 landmark reference; ≥3 zip codes in visible content; geo signals in ≥3 page sections.
+
+7. nearme_intent (weight 10%): phone above fold; availability language in opening block; response time stated explicitly; ≥2 neighborhood+service+availability blocks; ≥1 street reference; ≥2 proximity FAQs (availability/response/coverage/emergency).
+
+Return ONLY valid JSON — no markdown, no explanation:
+{{
+  "organic_ranking":       {{"score": 0, "issues": [], "recommendations": []}},
+  "gbp_maps":              {{"score": 0, "issues": [], "recommendations": []}},
+  "entity_establishment":  {{"score": 0, "issues": [], "recommendations": []}},
+  "icp_alignment":         {{"score": 0, "icp_detected": "", "issues": [], "recommendations": []}},
+  "aeo_llm_retrieval":     {{"score": 0, "issues": [], "recommendations": []}},
+  "geographic_legitimacy": {{"score": 0, "issues": [], "recommendations": []}},
+  "nearme_intent":         {{"score": 0, "issues": [], "recommendations": []}}
+}}
+
+Be specific — reference actual content found (or missing) in the page."""
+
+
+async def _derive_related_keywords(keyword: str, location: str, haiku_client) -> tuple:
+    """Uses Claude Haiku to derive related keywords per site architecture SOP."""
+    city = location.split(",")[0].strip()
+    prompt = f"""You are a local SEO site architecture expert.
+
+Given the keyword: "{keyword}"
+And the city: "{city}"
+
+Derive related keywords following these STRICT rules:
+
+PARENTS (2-3 items):
+- The bare service with no geo (e.g. "emergency plumber" → "plumber")
+- The modifier + base service, no city (e.g. "emergency plumber")
+- The base service + city (e.g. "plumber {city}")
+Do NOT include the original keyword itself.
+
+SIBLINGS (5-8 items):
+- Other common sub-services under the SAME parent service + SAME city
+- Format: [sub-service] {city} (e.g. "drain cleaning {city}")
+- Peer services only — not the original keyword, not parent keywords
+
+CHILDREN (3-4 items):
+- Original keyword + specific NEIGHBORHOODS that are geographically WITHIN {city} only
+- NOT adjacent cities, NOT county names, NOT broader regions
+- Only include neighborhoods you are confident exist inside {city} city limits
+- If uncertain, return fewer items
+
+Return ONLY valid JSON, no markdown:
+{{"parents": ["...", "..."], "siblings": ["...", ...], "children": ["...", ...]}}"""
+
+    response = await haiku_client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    token_rec = _token_record(
+        "related-pages/derive", "claude-haiku-4-5-20251001",
+        response.usage.input_tokens, response.usage.output_tokens,
+    )
+    result = _parse_claude_json(response.content[0].text)
+    result["siblings"] = result.get("siblings", [])[:8]
+    result["children"] = result.get("children", [])[:4]
+    return result, token_rec
+
+
+async def _find_page_for_keyword_reuse(
+    kw: str,
+    discovered_urls: List[str],
+    client: httpx.AsyncClient,
+) -> Optional[dict]:
+    """Checks pre-discovered URLs for a page matching kw. Returns {url, title, h1} or None."""
+    import urllib.parse as _up
+    kw_lower = kw.lower().strip()
+    kw_words = [w for w in re.split(r'[\W_]+', kw_lower) if w and len(w) > 1 and w not in STOP_WORDS]
+    if not kw_words:
+        kw_words = kw_lower.split()
+
+    def _slug_score_local(u: str) -> int:
+        path = _up.urlparse(u).path.lower()
+        slug_words = set(re.split(r'[\W/_-]+', path))
+        return sum(1 for w in kw_words if w in slug_words)
+
+    async def _check(u: str) -> Optional[dict]:
+        try:
+            resp = await client.get(u, timeout=8.0)
+            if resp.status_code != 200:
+                return None
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            t = soup.find('title')
+            h = soup.find('h1')
+            title_text = t.get_text(strip=True) if t else ''
+            h1_text = h.get_text(strip=True) if h else ''
+            combined = set(re.split(r'[\W]+', f"{title_text} {h1_text}".lower()))
+            if all(w in combined for w in kw_words):
+                return {'url': str(resp.url), 'title': title_text or u, 'h1': h1_text}
+        except Exception:
+            pass
+        return None
+
+    scored = sorted(discovered_urls, key=_slug_score_local, reverse=True)[:20]
+    results = await asyncio.gather(*[_check(u) for u in scored], return_exceptions=True)
+    for r in results:
+        if isinstance(r, dict) and r:
+            return r
+    return None
+
+
+async def _score_page_for_related(
+    keyword: str,
+    location: str,
+    page_url: str,
+    business_name: str,
+    gbp_category: str,
+    address: Optional[str],
+    haiku_client,
+) -> tuple:
+    """Scores a single found page using Haiku. Returns (score_dict, token_rec)."""
+    from bs4 import BeautifulSoup as _BS2
+    async with httpx.AsyncClient() as _fc:
+        _resp = await _fc.get(page_url, timeout=15.0,
+                              headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"})
+        _resp.raise_for_status()
+        page_html = _resp.text
+    page_text = _BS2(page_html, "html.parser").get_text(separator="\n", strip=True)[:8000]
+    city = location.split(",")[0].strip()
+    prompt = _build_score_prompt(business_name, gbp_category, keyword, city, address, "", page_text)
+    msg = await haiku_client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=2000,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    token_rec = _token_record(
+        "related-pages/score", "claude-haiku-4-5-20251001",
+        msg.usage.input_tokens, msg.usage.output_tokens,
+    )
+    scores = _parse_claude_json(msg.content[0].text)
+    composite, status = _composite_from_scores(scores)
+    return {
+        "composite_score": composite,
+        "composite_status": status,
+        "engine_scores": scores,
+        "deficiencies": _build_deficiencies(scores),
+    }, token_rec
+
+
 def _serp_context(serp_analysis: Optional[dict]) -> str:
     if not serp_analysis:
         return ""
-    parts = []
-    entities = serp_analysis.get("google_entities", [])[:12]
-    quadgrams = serp_analysis.get("top_quadgrams", [])[:12]
-    body_kw = serp_analysis.get("related_keywords", {}).get("body", [])[:12]
+
+    rk = serp_analysis.get("related_keywords", {})
+    zt = serp_analysis.get("zone_targets", {})
+    entities = serp_analysis.get("google_entities", [])
+    quadgrams = serp_analysis.get("top_quadgrams", [])
+
+    zone_labels = [
+        ("title",  "PAGE TITLE (<title> tag)"),
+        ("h1",     "H1 HEADING"),
+        ("h2_h3",  "H2/H3 SUBHEADINGS"),
+        ("body",   "BODY TEXT"),
+    ]
+
+    parts = ["COMPETITOR SIGNAL DATA — match or exceed these targets in the corresponding zones:"]
+
+    for zone_key, zone_label in zone_labels:
+        terms = rk.get(zone_key, [])[:20]
+        target = zt.get(zone_key, {}).get("target", 0)
+        if not terms:
+            continue
+        parts.append(f"\n{zone_label}:")
+        if target:
+            parts.append(f"  Target: include ~{target} of these terms (best competitor used {target})")
+        parts.append(f"  Terms (ranked by relevance): {', '.join(t['term'] for t in terms)}")
+
     if entities:
-        parts.append("Top competitor entities (include these naturally): " +
-                     ", ".join(e["name"] for e in entities))
+        entity_target = zt.get("entities", {}).get("target", 0)
+        parts.append(f"\nGOOGLE ENTITIES (named entities from competitor pages):")
+        if entity_target:
+            parts.append(f"  Target: reference ~{entity_target} of these in body content (best competitor used {entity_target})")
+        top_entities = sorted(entities, key=lambda e: e["page_spread"], reverse=True)[:15]
+        ent_items = [f"{e['name']} (×{e['recommended_mentions']})" for e in top_entities]
+        parts.append(f"  Entities: {', '.join(ent_items)}")
+
     if quadgrams:
-        parts.append("Top competitor phrases (use these naturally): " +
-                     ", ".join(q["phrase"] for q in quadgrams))
-    if body_kw:
-        parts.append("Related keywords to weave in: " +
-                     ", ".join(k["term"] for k in body_kw))
+        parts.append(f"\nTOP COMPETITOR PHRASES (4-word phrases — use naturally in body):")
+        parts.append(f"  {', '.join(q['phrase'] for q in quadgrams[:15])}")
+
     return "\n".join(parts)
 
 
@@ -1855,47 +2111,7 @@ async def score_page(request: Request, body: ScorePageRequest):
     city = body.location.split(",")[0].strip()
     serp_ctx = _serp_context(body.serp_analysis)
 
-    prompt = f"""You are an expert local SEO analyst. Score this page against all 7 engines below.
-
-CONTEXT
-Business: {body.business_name}
-Category: {body.gbp_category}
-Keyword: {body.keyword}
-City: {city}
-Address: {body.address or "Not provided"}
-{serp_ctx}
-
-PAGE CONTENT (first 8,000 chars):
-{page_text}
-
-SCORING CRITERIA — score each engine 0–100:
-
-1. organic_ranking (weight 20%): keyword in title + H1 + opening ¶; service/transactional tone (not blog); CTA + phone visible; clear service offering.
-
-2. gbp_maps (weight 25%): exact city name present; service matches GBP category; brand+service+city entity triplet; NAP signals consistent; multiple service mentions.
-
-3. entity_establishment (weight 15%): brand+service+city co-occurrence in ≥3 sections; sub-services mentioned; descriptive anchor text signals; topical depth.
-
-4. icp_alignment (weight 10%): detect ICP from keyword modifier (emergency→urgent tone; commercial→B2B tone; general→professional/reliable); CTA matches ICP; pain points addressed.
-
-5. aeo_llm_retrieval (weight 10%): answer-first formatting (direct claim before explanation); FAQ with ≥4 entries; each section ≤300 words; Q&A heading structure; specific operational details (not generic filler).
-
-6. geographic_legitimacy (weight 10%): city in title+H1+opening ¶; ≥2 neighborhood references in sentence context; ≥1 landmark reference; ≥3 zip codes in visible content; geo signals in ≥3 page sections.
-
-7. nearme_intent (weight 10%): phone above fold; availability language in opening block; response time stated explicitly; ≥2 neighborhood+service+availability blocks; ≥1 street reference; ≥2 proximity FAQs (availability/response/coverage/emergency).
-
-Return ONLY valid JSON — no markdown, no explanation:
-{{
-  "organic_ranking":       {{"score": 0, "issues": [], "recommendations": []}},
-  "gbp_maps":              {{"score": 0, "issues": [], "recommendations": []}},
-  "entity_establishment":  {{"score": 0, "issues": [], "recommendations": []}},
-  "icp_alignment":         {{"score": 0, "icp_detected": "", "issues": [], "recommendations": []}},
-  "aeo_llm_retrieval":     {{"score": 0, "issues": [], "recommendations": []}},
-  "geographic_legitimacy": {{"score": 0, "issues": [], "recommendations": []}},
-  "nearme_intent":         {{"score": 0, "issues": [], "recommendations": []}}
-}}
-
-Be specific — reference actual content found (or missing) in the page."""
+    prompt = _build_score_prompt(body.business_name, body.gbp_category, body.keyword, city, body.address, serp_ctx, page_text)
 
     try:
         msg = await client.messages.create(
@@ -1932,12 +2148,15 @@ class GeneratePageRequest(BaseModel):
     hours: Optional[str] = None
     differentiators: Optional[List[dict]] = None
     icp_type: Optional[str] = None
+    brand_voice: Optional[dict] = None
+    detected_icp: Optional[dict] = None
     reviews: Optional[List[dict]] = None
     serp_analysis: Optional[dict] = None
 
 class GeneratePageResponse(BaseModel):
     content_html: str
     schema_json: str
+    page_title: str
     token_usage: dict
 
 
@@ -1968,6 +2187,59 @@ async def generate_page(request: Request, body: GeneratePageRequest):
 
     icp = body.icp_type or "General Homeowner"
 
+    # Build brand voice block
+    brand_voice_text = ""
+    if body.brand_voice:
+        bv = body.brand_voice
+        # Use recommended_accepted voice if user accepted one, otherwise fall back to recommended, then current
+        accepted = bv.get("recommended_accepted")
+        if accepted == "recommended":
+            voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
+        elif accepted == "current":
+            voice = bv.get("current_voice") or {}
+        else:
+            voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
+        guide = bv.get("writer_execution_guide", "")
+        if voice or guide:
+            lines = ["BRAND VOICE (match this exactly):"]
+            if voice.get("tone"):
+                lines.append(f"  Tone: {voice['tone']}")
+            if voice.get("personality"):
+                lines.append(f"  Personality: {', '.join(voice['personality'])}")
+            ws = voice.get("writing_style", {})
+            if ws:
+                lines.append(f"  Writing style: {ws.get('sentence_length','')} sentences, {ws.get('person','')} person, {ws.get('formality','')} formality")
+            vocab = voice.get("vocabulary", {})
+            if vocab.get("use"):
+                lines.append(f"  Words/phrases to use: {', '.join(vocab['use'])}")
+            if vocab.get("avoid"):
+                lines.append(f"  Words/phrases to avoid: {', '.join(vocab['avoid'])}")
+            if guide:
+                lines.append(f"  Writer instructions: {guide}")
+            brand_voice_text = "\n".join(lines)
+
+    # Build ICP block
+    icp_text = ""
+    if body.detected_icp:
+        segments = body.detected_icp.get("segments", [])
+        if segments:
+            lines = ["TARGET CUSTOMER PROFILES (write to these):"]
+            for seg in segments[:3]:  # cap at 3 segments
+                name = seg.get("name", "")
+                desc = seg.get("description", "")
+                msg = seg.get("messaging", {})
+                tone = msg.get("tone", "")
+                hooks = msg.get("hooks", [])
+                pain = msg.get("trust_signals", [])
+                lines.append(f"  [{name}] {desc}")
+                if tone:
+                    lines.append(f"    Messaging tone: {tone}")
+                if hooks:
+                    lines.append(f"    Headline hooks: {'; '.join(hooks[:2])}")
+                if pain:
+                    lines.append(f"    Trust signals: {'; '.join(pain[:2])}")
+            icp_text = "\n".join(lines)
+
     prompt = f"""You are an expert local SEO content writer. Generate a complete, publish-ready local service page following the exact structure below.
 
 BUSINESS DATA
@@ -1982,28 +2254,42 @@ Target city: {city}
 Full location: {body.location}
 ICP: {icp}
 
+{brand_voice_text}
+{icp_text}
 {diff_text}
 {reviews_text}
 {serp_ctx}
 
 OUTPUT FORMAT
 Return valid HTML only. No markdown. No explanations outside the HTML. Structure:
+<title>[SEE TITLE FORMULA BELOW]</title>
 <article>
   [13 sections as specified below]
 </article>
 Then on a NEW LINE after </article>, output the JSON-LD schema block starting with <script type="application/ld+json"> (3 schema blocks in one script tag).
 
+TITLE TAG FORMULA (follow exactly — do not deviate):
+<title>[Power Word]! [Exact Match Keyword] | [Brand Name] | [Justification using entities] | [Additional persuasion + entities]</title>
+- Power Word: a single urgent/emotional word (e.g. Trusted, Fast, Expert, Certified, Local, Licensed)
+- Exact Match Keyword: the primary keyword verbatim
+- Brand Name: the business name
+- Justification: a short phrase using 1–2 Google entities that validates the claim (e.g. "Serving Anaheim Hills & Orange County")
+- Additional persuasion: a benefit or proof point that includes 1–2 more entities (e.g. "Same-Day Response, No Overtime Fees")
+- Total title length: 60–70 characters ideal, 80 max
+
 MANDATORY 13-SECTION STRUCTURE
 
 Section 1 — Intro / Direct Answer Block (100–150 words)
 <section id="intro">
-  <h1>[Primary keyword variation] in {city} | [Differentiator]</h1>
+  <h1>[Exact Match Keyword] + [1–2 entities that reinforce location or service scope]</h1>
+  H1 FORMULA: Write the primary keyword verbatim, then append relevant entities naturally (e.g. "Emergency Plumber Anaheim — Serving Anaheim Hills, Yorba Linda & Orange County")
   <p>[Brand] provides [service] to [city] — [primary differentiator stated in first sentence]. [2–3 sentences: service confirmation, availability, phone CTA.] [Close with direct service claim + city.]</p>
 </section>
 
 Section 2 — USP / Value Proposition (150–200 words)
 <section id="usp">
-  <h2>[Outcome-focused H2 — not "Our Services"]</h2>
+  <h2>[Single sentence combining: exact match keyword + persuasion/outcome + 1–2 entities]</h2>
+  FIRST H2 FORMULA: Must be a complete sentence (not a fragment) that includes the primary keyword, a persuasive outcome or differentiator, and 1–2 entities. (e.g. "When Anaheim Homeowners Need an Emergency Plumber Fast, [Brand] Delivers Same-Day Repairs Across Orange County")
   [Min 3 differentiators with mechanisms. One contrast statement. One proof signal.]
 </section>
 
@@ -2048,7 +2334,7 @@ Section 9 — Getting Started (150–200 words)
 Section 10 — Geographic / Local SEO Section (200–300 words)
 <section id="local">
   <h2>[City + service in heading]</h2>
-  [City + min 3 neighborhoods in sentence context (not just a list) + min 1 landmark + min 2 streets + zip codes (min 3). Generate real neighborhoods/landmarks/streets/zips for {city} from your knowledge if not provided. Coverage + response time.]
+  [City + min 3 neighborhoods in sentence context (not just a list) + min 1 landmark + min 2 streets + zip codes (min 3). Use only real, verifiable geographic details. If neighborhood/landmark/street/zip data is not provided in the business data above, include only what you are certain is accurate for {city}. Do not invent or guess street names, zip codes, or landmarks. Coverage + response time.]
 </section>
 
 Section 11 — CTA Block Tertiary (50–75 words — urgency-forward)
@@ -2074,7 +2360,8 @@ HARD RULES — NEVER:
 - Use "near me" literally in body content
 - Include placeholder text like [Insert here]
 - Fabricate reviews
-- Use vague differentiators ("trusted", "professional", "high quality") without a mechanism"""
+- Use vague differentiators ("trusted", "professional", "high quality") without a mechanism
+- Invent or guess phone numbers, addresses, hours, zip codes, street names, or landmarks not explicitly provided in the business data above"""
 
     try:
         msg = await client.messages.create(
@@ -2087,6 +2374,17 @@ HARD RULES — NEVER:
 
     token_rec = _token_record("generate-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
     raw = msg.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
+        raw = re.sub(r'\n?```$', '', raw)
+        raw = raw.strip()
+
+    # Extract <title> tag
+    title_match = re.search(r'<title>(.*?)</title>', raw, re.IGNORECASE | re.DOTALL)
+    page_title = title_match.group(1).strip() if title_match else ""
+    if title_match:
+        raw = raw[:title_match.start()] + raw[title_match.end():]
+        raw = raw.strip()
 
     # Split content_html from schema_json
     schema_split = raw.find('<script type="application/ld+json">')
@@ -2100,6 +2398,7 @@ HARD RULES — NEVER:
     return GeneratePageResponse(
         content_html=content_html,
         schema_json=schema_json,
+        page_title=page_title,
         token_usage=token_rec,
     )
 
@@ -2193,6 +2492,10 @@ Return the complete rewritten page HTML only — no markdown, no explanations.""
 
     token_rec = _token_record("reoptimize-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
     raw = msg.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
+        raw = re.sub(r'\n?```$', '', raw)
+        raw = raw.strip()
 
     schema_split = raw.find('<script type="application/ld+json">')
     if schema_split != -1:
@@ -2207,3 +2510,136 @@ Return the complete rewritten page HTML only — no markdown, no explanations.""
         schema_json=schema_json,
         token_usage=token_rec,
     )
+
+
+# ── /related-pages ─────────────────────────────────────────────────────────────
+
+class RelatedPagesRequest(BaseModel):
+    keyword: str
+    location: str
+    business_name: str
+    gbp_category: str
+    address: Optional[str] = None
+    website: Optional[str] = None
+
+
+class RelatedPageItem(BaseModel):
+    keyword: str
+    group: str  # "parents" | "siblings" | "children"
+    status: str  # "found" | "missing"
+    url: Optional[str] = None
+    page_title: Optional[str] = None
+    composite_score: Optional[float] = None
+    composite_status: Optional[str] = None
+    engine_scores: Optional[dict] = None
+    deficiencies: Optional[List[dict]] = None
+
+
+class RelatedPagesResponse(BaseModel):
+    items: List[RelatedPageItem]
+    token_usage: dict
+
+
+@app.post('/related-pages', response_model=RelatedPagesResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("5/minute")
+async def related_pages(request: Request, body: RelatedPagesRequest):
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+
+    import anthropic as _anthropic
+    haiku_client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+    total_input_tokens = 0
+    total_output_tokens = 0
+
+    # Step 1: Derive related keywords via Haiku
+    related_kws, derive_tok = await _derive_related_keywords(body.keyword, body.location, haiku_client)
+    total_input_tokens += derive_tok.get("input_tokens", 0)
+    total_output_tokens += derive_tok.get("output_tokens", 0)
+
+    all_keywords: List[tuple] = []  # (kw, group)
+    for kw in related_kws.get("parents", []):
+        all_keywords.append((kw, "parents"))
+    for kw in related_kws.get("siblings", []):
+        all_keywords.append((kw, "siblings"))
+    for kw in related_kws.get("children", []):
+        all_keywords.append((kw, "children"))
+
+    # Step 2: Discover sitemap / crawlable URLs once
+    discovered_urls: List[str] = []
+    if body.website:
+        base = body.website.rstrip("/")
+        async with httpx.AsyncClient(follow_redirects=True,
+                                     headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"},
+                                     timeout=15.0) as http_client:
+            # Try sitemap.xml
+            try:
+                sm_resp = await http_client.get(f"{base}/sitemap.xml")
+                if sm_resp.status_code == 200:
+                    soup_sm = BeautifulSoup(sm_resp.text, "xml")
+                    locs = [tag.get_text(strip=True) for tag in soup_sm.find_all("loc")]
+                    discovered_urls = [u for u in locs if u.startswith("http")][:200]
+            except Exception:
+                pass
+
+            # Fallback: sitemap_index or robots.txt
+            if not discovered_urls:
+                try:
+                    robots_resp = await http_client.get(f"{base}/robots.txt")
+                    if robots_resp.status_code == 200:
+                        for line in robots_resp.text.splitlines():
+                            if line.lower().startswith("sitemap:"):
+                                sm_url = line.split(":", 1)[1].strip()
+                                sm2 = await http_client.get(sm_url)
+                                if sm2.status_code == 200:
+                                    soup2 = BeautifulSoup(sm2.text, "xml")
+                                    locs2 = [t.get_text(strip=True) for t in soup2.find_all("loc")]
+                                    discovered_urls = [u for u in locs2 if u.startswith("http")][:200]
+                                    break
+                except Exception:
+                    pass
+
+            # Step 3: For each keyword, find matching page + score concurrently
+            async def _process_keyword(kw: str, group: str) -> RelatedPageItem:
+                nonlocal total_input_tokens, total_output_tokens
+                found = await _find_page_for_keyword_reuse(kw, discovered_urls, http_client)
+                if found:
+                    try:
+                        score_dict, score_tok = await _score_page_for_related(
+                            kw, body.location, found["url"],
+                            body.business_name, body.gbp_category, body.address, haiku_client,
+                        )
+                        total_input_tokens += score_tok.get("input_tokens", 0)
+                        total_output_tokens += score_tok.get("output_tokens", 0)
+                        return RelatedPageItem(
+                            keyword=kw,
+                            group=group,
+                            status="found",
+                            url=found["url"],
+                            page_title=found.get("title"),
+                            composite_score=score_dict["composite_score"],
+                            composite_status=score_dict["composite_status"],
+                            engine_scores=score_dict["engine_scores"],
+                            deficiencies=score_dict["deficiencies"],
+                        )
+                    except Exception:
+                        return RelatedPageItem(keyword=kw, group=group, status="found",
+                                               url=found["url"], page_title=found.get("title"))
+                else:
+                    return RelatedPageItem(keyword=kw, group=group, status="missing")
+
+            results = await asyncio.gather(
+                *[_process_keyword(kw, group) for kw, group in all_keywords],
+                return_exceptions=True,
+            )
+            items = [r for r in results if isinstance(r, RelatedPageItem)]
+    else:
+        # No website — all keywords are "missing"
+        items = [RelatedPageItem(keyword=kw, group=group, status="missing")
+                 for kw, group in all_keywords]
+
+    token_rec = _token_record(
+        "related-pages", "claude-haiku-4-5-20251001",
+        total_input_tokens, total_output_tokens,
+    )
+    return RelatedPagesResponse(items=items, token_usage=token_rec)
