@@ -7,9 +7,6 @@ const NLP_API_KEY = import.meta.env.VITE_NLP_API_KEY ?? "";
 // Only allow http/https URLs in rendered links to prevent javascript: injection
 const isSafeUrl = (url: string) => /^https?:\/\//i.test(url);
 
-// Only allow http/https URLs in rendered links to prevent javascript: injection
-const isSafeUrl = (url: string) => /^https?:\/\//i.test(url);
-
 interface RelatedKeyword {
   term: string;
   score: number;
