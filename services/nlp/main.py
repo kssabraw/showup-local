@@ -247,6 +247,8 @@ async def scrape_url(url: str, client: httpx.AsyncClient) -> Optional[str]:
         payload = json.dumps({
             "api_key": SCRAPEOWL_API_KEY,
             "url": url,
+            "premium_proxies": True,
+            "country": "us",
             "json_response": True,
         })
         response = await client.post(
