@@ -60,6 +60,9 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
   const [error, setError] = useState("");
   const [checkState, setCheckState] = useState<CheckState>({ status: "idle" });
   const [view, setView] = useState<ViewState>({ kind: "form" });
+  const [creatingPhase, setCreatingPhase] = useState<"serp" | "generating">("serp");
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const locationDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const locationContainerRef = useRef<HTMLDivElement>(null);
@@ -257,14 +260,16 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
 
   const handleCreateNewPage = async () => {
     setCheckState({ status: "creating" });
-    setLoadingLabel("Fetching competitor SERP data…");
+    setCreatingPhase("serp");
+    setElapsedSeconds(0);
     setError("");
+    elapsedRef.current = setInterval(() => setElapsedSeconds(s => s + 1), 1000);
     try {
       const serpData = await runAnalysis();
       await saveAnalysisToSupabase(serpData);
 
       const b = businesses.find(b => b.id === selectedBusinessId)!;
-      setLoadingLabel("Generating page with Claude…");
+      setCreatingPhase("generating");
       const genRes = await fetch(`${NLP_SERVICE_URL}/generate-page`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
@@ -293,6 +298,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
       setCheckState({ status: "not_found" });
     } finally {
       setLoadingLabel("");
+      if (elapsedRef.current) clearInterval(elapsedRef.current);
     }
   };
 
@@ -543,13 +549,66 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
           </div>
         )}
 
-        {/* Creating state */}
-        {checkState.status === "creating" && (
-          <div className="flex items-center gap-3 px-4 py-3 bg-muted/30 rounded-lg text-sm text-muted-foreground">
-            <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-            <span>{loadingLabel || "Analyzing competitors and generating page…"}</span>
-          </div>
-        )}
+        {/* Creating state — step tracker */}
+        {checkState.status === "creating" && (() => {
+          const serpDone = creatingPhase === "generating";
+          const steps = [
+            {
+              label: "Fetching top Google results",
+              detail: "DataForSEO organic SERP",
+              done: serpDone,
+              active: !serpDone,
+            },
+            {
+              label: "Scraping & analysing competitor pages",
+              detail: "Up to 20 pages — TF-IDF, quadgrams, entities",
+              done: serpDone,
+              active: !serpDone,
+            },
+            {
+              label: "Generating page with Claude",
+              detail: "13-section structure + JSON-LD schema",
+              done: false,
+              active: creatingPhase === "generating",
+            },
+          ];
+          const mins = Math.floor(elapsedSeconds / 60);
+          const secs = elapsedSeconds % 60;
+          const elapsed = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+          return (
+            <div className="px-4 py-4 bg-muted/30 rounded-lg space-y-3">
+              <div className="flex items-center justify-between text-xs text-muted-foreground">
+                <span className="font-medium">Building your page…</span>
+                <span>{elapsed}</span>
+              </div>
+              <div className="space-y-2">
+                {steps.map((step, i) => (
+                  <div key={i} className="flex items-start gap-3">
+                    <div className="mt-0.5 shrink-0">
+                      {step.done ? (
+                        <div className="w-4 h-4 rounded-full bg-green-500 flex items-center justify-center">
+                          <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 10 10"><path d="M2 5l2.5 2.5L8 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                        </div>
+                      ) : step.active ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-accent" />
+                      ) : (
+                        <div className="w-4 h-4 rounded-full border border-border" />
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <p className={`text-sm ${step.active ? "text-foreground font-medium" : step.done ? "text-muted-foreground line-through" : "text-muted-foreground"}`}>
+                        {step.label}
+                      </p>
+                      {step.active && (
+                        <p className="text-xs text-muted-foreground mt-0.5">{step.detail}</p>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Idle — show Check My Site button */}
         {checkState.status === "idle" && (
