@@ -2368,3 +2368,498 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
         )
 
     return BrandVoiceResponse(brand_voice=brand_voice, pages_sampled=pages_sampled)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Content Generation — Score, Generate, Reoptimize
+# ══════════════════════════════════════════════════════════════════════════════
+
+GENERATION_MODEL = "claude-sonnet-4-6"
+
+# Pricing per million tokens
+_MODEL_PRICING: Dict[str, Dict[str, float]] = {
+    "claude-sonnet-4-6":          {"input": 3.00,  "output": 15.00},
+    "claude-haiku-4-5-20251001":  {"input": 0.80,  "output":  4.00},
+}
+
+def _calc_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+    p = _MODEL_PRICING.get(model, {"input": 3.00, "output": 15.00})
+    return (input_tokens * p["input"] / 1_000_000) + (output_tokens * p["output"] / 1_000_000)
+
+def _token_record(endpoint: str, model: str, input_tokens: int, output_tokens: int) -> dict:
+    cost = _calc_cost(model, input_tokens, output_tokens)
+    logger.info(f"[tokens] {endpoint} model={model} in={input_tokens} out={output_tokens} cost=${cost:.5f}")
+    return {
+        "endpoint": endpoint,
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cost_usd": round(cost, 6),
+    }
+
+_ENGINE_WEIGHTS = {
+    "organic_ranking":      0.20,
+    "gbp_maps":             0.25,
+    "entity_establishment": 0.15,
+    "icp_alignment":        0.10,
+    "aeo_llm_retrieval":    0.10,
+    "geographic_legitimacy":0.10,
+    "nearme_intent":        0.10,
+}
+
+_ENGINE_LABELS = {
+    "organic_ranking":       "Organic Ranking Engine",
+    "gbp_maps":              "GBP / Maps Relevance Engine",
+    "entity_establishment":  "Entity Establishment Engine",
+    "icp_alignment":         "ICP Alignment Engine",
+    "aeo_llm_retrieval":     "AEO / LLM Retrieval Engine",
+    "geographic_legitimacy": "Geographic Legitimacy Engine",
+    "nearme_intent":         "Hyperlocal / Near-Me Engine",
+}
+
+def _composite_from_scores(scores: dict) -> tuple[float, str]:
+    composite = sum(scores[k]["score"] * w for k, w in _ENGINE_WEIGHTS.items() if k in scores)
+    if composite >= 90:   status = "excellent"
+    elif composite >= 80: status = "good"
+    elif composite >= 70: status = "needs_improvement"
+    elif composite >= 60: status = "below_standard"
+    else:                 status = "fail"
+    return round(composite, 1), status
+
+def _build_deficiencies(scores: dict) -> List[dict]:
+    out = []
+    for key, label in _ENGINE_LABELS.items():
+        eng = scores.get(key, {})
+        if eng.get("score", 100) < 80:
+            out.append({
+                "engine": label,
+                "engine_key": key,
+                "score": eng.get("score", 0),
+                "issues": eng.get("issues", []),
+                "recommendations": eng.get("recommendations", []),
+            })
+    return out
+
+def _parse_claude_json(text: str) -> dict:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r'^```(?:json)?\s*', '', text)
+        text = re.sub(r'\s*```$', '', text.strip())
+    return json_lib.loads(text)
+
+def _serp_context(serp_analysis: Optional[dict]) -> str:
+    if not serp_analysis:
+        return ""
+    parts = []
+    entities = serp_analysis.get("google_entities", [])[:12]
+    quadgrams = serp_analysis.get("top_quadgrams", [])[:12]
+    body_kw = serp_analysis.get("related_keywords", {}).get("body", [])[:12]
+    if entities:
+        parts.append("Top competitor entities (include these naturally): " +
+                     ", ".join(e["name"] for e in entities))
+    if quadgrams:
+        parts.append("Top competitor phrases (use these naturally): " +
+                     ", ".join(q["phrase"] for q in quadgrams))
+    if body_kw:
+        parts.append("Related keywords to weave in: " +
+                     ", ".join(k["term"] for k in body_kw))
+    return "\n".join(parts)
+
+
+# ── /score-page ───────────────────────────────────────────────────────────────
+
+class ScorePageRequest(BaseModel):
+    keyword: str
+    location: str
+    page_url: Optional[str] = None
+    page_content: Optional[str] = None  # if omitted, fetched from page_url
+    business_name: str
+    gbp_category: str
+    address: Optional[str] = None
+    serp_analysis: Optional[dict] = None
+
+class ScorePageResponse(BaseModel):
+    composite_score: float
+    composite_status: str
+    engine_scores: dict
+    deficiencies: List[dict]
+    token_usage: dict
+
+
+@app.post('/score-page', response_model=ScorePageResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+async def score_page(request: Request, body: ScorePageRequest):
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+
+    import anthropic as _anthropic
+    client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+    from bs4 import BeautifulSoup as _BS
+    page_html = body.page_content
+    if not page_html and body.page_url:
+        try:
+            async with httpx.AsyncClient() as _fc:
+                _resp = await _fc.get(body.page_url, timeout=15.0,
+                                      headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"})
+                _resp.raise_for_status()
+                page_html = _resp.text
+        except Exception as _e:
+            raise HTTPException(status_code=422, detail=f"Could not fetch {body.page_url}: {_e}")
+    if not page_html:
+        raise HTTPException(status_code=422, detail="Either page_content or page_url is required")
+    page_text = _BS(page_html, "html.parser").get_text(separator="\n", strip=True)[:8000]
+    city = body.location.split(",")[0].strip()
+    serp_ctx = _serp_context(body.serp_analysis)
+
+    prompt = f"""You are an expert local SEO analyst. Score this page against all 7 engines below.
+
+CONTEXT
+Business: {body.business_name}
+Category: {body.gbp_category}
+Keyword: {body.keyword}
+City: {city}
+Address: {body.address or "Not provided"}
+{serp_ctx}
+
+PAGE CONTENT (first 8,000 chars):
+{page_text}
+
+SCORING CRITERIA — score each engine 0–100:
+
+1. organic_ranking (weight 20%): keyword in title + H1 + opening ¶; service/transactional tone (not blog); CTA + phone visible; clear service offering.
+
+2. gbp_maps (weight 25%): exact city name present; service matches GBP category; brand+service+city entity triplet; NAP signals consistent; multiple service mentions.
+
+3. entity_establishment (weight 15%): brand+service+city co-occurrence in ≥3 sections; sub-services mentioned; descriptive anchor text signals; topical depth.
+
+4. icp_alignment (weight 10%): detect ICP from keyword modifier (emergency→urgent tone; commercial→B2B tone; general→professional/reliable); CTA matches ICP; pain points addressed.
+
+5. aeo_llm_retrieval (weight 10%): answer-first formatting (direct claim before explanation); FAQ with ≥4 entries; each section ≤300 words; Q&A heading structure; specific operational details (not generic filler).
+
+6. geographic_legitimacy (weight 10%): city in title+H1+opening ¶; ≥2 neighborhood references in sentence context; ≥1 landmark reference; ≥3 zip codes in visible content; geo signals in ≥3 page sections.
+
+7. nearme_intent (weight 10%): phone above fold; availability language in opening block; response time stated explicitly; ≥2 neighborhood+service+availability blocks; ≥1 street reference; ≥2 proximity FAQs (availability/response/coverage/emergency).
+
+Return ONLY valid JSON — no markdown, no explanation:
+{{
+  "organic_ranking":       {{"score": 0, "issues": [], "recommendations": []}},
+  "gbp_maps":              {{"score": 0, "issues": [], "recommendations": []}},
+  "entity_establishment":  {{"score": 0, "issues": [], "recommendations": []}},
+  "icp_alignment":         {{"score": 0, "icp_detected": "", "issues": [], "recommendations": []}},
+  "aeo_llm_retrieval":     {{"score": 0, "issues": [], "recommendations": []}},
+  "geographic_legitimacy": {{"score": 0, "issues": [], "recommendations": []}},
+  "nearme_intent":         {{"score": 0, "issues": [], "recommendations": []}}
+}}
+
+Be specific — reference actual content found (or missing) in the page."""
+
+    try:
+        msg = await client.messages.create(
+            model=GENERATION_MODEL,
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Claude scoring error: {e}")
+
+    token_rec = _token_record("score-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
+    scores = _parse_claude_json(msg.content[0].text)
+    composite, status = _composite_from_scores(scores)
+
+    return ScorePageResponse(
+        composite_score=composite,
+        composite_status=status,
+        engine_scores=scores,
+        deficiencies=_build_deficiencies(scores),
+        token_usage=token_rec,
+    )
+
+
+# ── /generate-page ────────────────────────────────────────────────────────────
+
+class GeneratePageRequest(BaseModel):
+    keyword: str
+    location: str
+    business_name: str
+    gbp_category: str
+    address: str
+    phone: Optional[str] = None
+    website: Optional[str] = None
+    hours: Optional[str] = None
+    differentiators: Optional[List[dict]] = None
+    icp_type: Optional[str] = None
+    reviews: Optional[List[dict]] = None
+    serp_analysis: Optional[dict] = None
+
+class GeneratePageResponse(BaseModel):
+    content_html: str
+    schema_json: str
+    token_usage: dict
+
+
+@app.post('/generate-page', response_model=GeneratePageResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("5/minute")
+async def generate_page(request: Request, body: GeneratePageRequest):
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+
+    import anthropic as _anthropic
+    client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+    city = body.location.split(",")[0].strip()
+    serp_ctx = _serp_context(body.serp_analysis)
+
+    diff_text = ""
+    if body.differentiators:
+        diff_text = "Differentiators (use these — include mechanism for each):\n" + \
+            "\n".join(f"  - {d.get('claim','')} (mechanism: {d.get('mechanism','')})" for d in body.differentiators)
+
+    reviews_text = ""
+    if body.reviews:
+        qualifying = [r for r in body.reviews if r.get("rating", 0) >= 4][:5]
+        if qualifying:
+            reviews_text = "GBP Reviews (use verbatim in Section 7 — do NOT fabricate):\n" + \
+                "\n".join(f'  ★{r.get("rating")} — {r.get("reviewer","")}: "{r.get("text","")}" ({r.get("date","")})'
+                          for r in qualifying)
+
+    icp = body.icp_type or "General Homeowner"
+
+    prompt = f"""You are an expert local SEO content writer. Generate a complete, publish-ready local service page following the exact structure below.
+
+BUSINESS DATA
+Name: {body.business_name}
+Category: {body.gbp_category}
+Address: {body.address}
+Phone: {body.phone or "Not provided — use [PHONE] as placeholder"}
+Website: {body.website or ""}
+Hours: {body.hours or "Not provided"}
+Primary keyword: {body.keyword}
+Target city: {city}
+Full location: {body.location}
+ICP: {icp}
+
+{diff_text}
+{reviews_text}
+{serp_ctx}
+
+OUTPUT FORMAT
+Return valid HTML only. No markdown. No explanations outside the HTML. Structure:
+<article>
+  [13 sections as specified below]
+</article>
+Then on a NEW LINE after </article>, output the JSON-LD schema block starting with <script type="application/ld+json"> (3 schema blocks in one script tag).
+
+MANDATORY 13-SECTION STRUCTURE
+
+Section 1 — Intro / Direct Answer Block (100–150 words)
+<section id="intro">
+  <h1>[Primary keyword variation] in {city} | [Differentiator]</h1>
+  <p>[Brand] provides [service] to [city] — [primary differentiator stated in first sentence]. [2–3 sentences: service confirmation, availability, phone CTA.] [Close with direct service claim + city.]</p>
+</section>
+
+Section 2 — USP / Value Proposition (150–200 words)
+<section id="usp">
+  <h2>[Outcome-focused H2 — not "Our Services"]</h2>
+  [Min 3 differentiators with mechanisms. One contrast statement. One proof signal.]
+</section>
+
+Section 3 — Special Offers (omit this section if no offer data provided)
+<section id="offers">...</section>
+
+Section 4 — CTA Block Primary (50–75 words)
+<section id="cta-primary">
+  <h2>[Action-oriented H2]</h2>
+  [Differentiated CTA — not "Contact us today". Include phone.]
+</section>
+
+Section 5 — Features and Benefits (150–200 words)
+<section id="features">
+  <h2>[Benefit-focused H2]</h2>
+  <ul>[Min 4 feature/benefit pairs — outcome-first, ICP pain points addressed]</ul>
+</section>
+
+Section 6 — Main Service Body (600–900 words)
+<section id="services">
+  <h2>[Primary service + city in heading]</h2>
+  [Primary service description — answer-first. Then 3–5 sub-service H3 subsections.]
+  [Each H3: service+city in heading. 2–4 sentences: description, scenario, differentiator/availability, geo reference.]
+  [Naturally weave in competitor entities and phrases from SERP data.]
+</section>
+
+Section 7 — Testimonials (include only if reviews provided above; omit if none)
+<section id="testimonials">
+  <h2>[Social proof H2]</h2>
+  [Verbatim reviews only — first name + last initial, stars, date, full text]
+</section>
+
+Section 8 — CTA Block Secondary (50–75 words — different angle from Section 4)
+<section id="cta-secondary">...</section>
+
+Section 9 — Getting Started (150–200 words)
+<section id="getting-started">
+  <h2>[Process-focused H2]</h2>
+  <ol>[3–5 steps, plain language, close with CTA]</ol>
+</section>
+
+Section 10 — Geographic / Local SEO Section (200–300 words)
+<section id="local">
+  <h2>[City + service in heading]</h2>
+  [City + min 3 neighborhoods in sentence context (not just a list) + min 1 landmark + min 2 streets + zip codes (min 3). Generate real neighborhoods/landmarks/streets/zips for {city} from your knowledge if not provided. Coverage + response time.]
+</section>
+
+Section 11 — CTA Block Tertiary (50–75 words — urgency-forward)
+<section id="cta-tertiary">...</section>
+
+Section 12 — FAQ (min 6, max 10 entries — 40–80 words each)
+<section id="faq">
+  <h2>Frequently Asked Questions</h2>
+  [Must cover: availability, response time, coverage area, emergency service. Answer-first. Geographic + availability signal in each proximity FAQ.]
+</section>
+
+Section 13 — Schema (delivered AFTER </article> as a separate <script> block)
+Generate 3 schema blocks as a single JSON-LD array inside one <script type="application/ld+json"> tag:
+1. LocalBusiness (subtype from category: Plumber/HVACBusiness/Electrician etc.)
+2. Service
+3. FAQPage (auto-extracted from Section 12)
+
+HARD RULES — NEVER:
+- Start with "Welcome to [Brand]"
+- Use "We are a [city] [service] company" as first sentence
+- Write "Contact us today" as standalone CTA
+- Use generic headings ("About Us", "Our Services", "Why Choose Us")
+- Use "near me" literally in body content
+- Include placeholder text like [Insert here]
+- Fabricate reviews
+- Use vague differentiators ("trusted", "professional", "high quality") without a mechanism"""
+
+    try:
+        msg = await client.messages.create(
+            model=GENERATION_MODEL,
+            max_tokens=8000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Claude generation error: {e}")
+
+    token_rec = _token_record("generate-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
+    raw = msg.content[0].text.strip()
+
+    # Split content_html from schema_json
+    schema_split = raw.find('<script type="application/ld+json">')
+    if schema_split != -1:
+        content_html = raw[:schema_split].strip()
+        schema_json = raw[schema_split:].strip()
+    else:
+        content_html = raw
+        schema_json = ""
+
+    return GeneratePageResponse(
+        content_html=content_html,
+        schema_json=schema_json,
+        token_usage=token_rec,
+    )
+
+
+# ── /reoptimize-page ──────────────────────────────────────────────────────────
+
+class ReoptimizePageRequest(BaseModel):
+    keyword: str
+    location: str
+    existing_page_html: Optional[str] = None   # if omitted, fetched from existing_page_url
+    existing_page_url: Optional[str] = None
+    deficiencies: List[dict]
+    business_name: str
+    gbp_category: str
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    serp_analysis: Optional[dict] = None
+
+class ReoptimizePageResponse(BaseModel):
+    content_html: str
+    schema_json: Optional[str] = None
+    token_usage: dict
+
+
+@app.post('/reoptimize-page', response_model=ReoptimizePageResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("5/minute")
+async def reoptimize_page(request: Request, body: ReoptimizePageRequest):
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+
+    import anthropic as _anthropic
+    client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+    city = body.location.split(",")[0].strip()
+    serp_ctx = _serp_context(body.serp_analysis)
+
+    # Fetch existing page if URL given but no HTML
+    existing_html = body.existing_page_html or ""
+    if not existing_html and body.existing_page_url:
+        try:
+            async with httpx.AsyncClient() as _fc:
+                _resp = await _fc.get(body.existing_page_url, timeout=15.0,
+                                      headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"})
+                _resp.raise_for_status()
+                existing_html = _resp.text
+        except Exception as _e:
+            raise HTTPException(status_code=422, detail=f"Could not fetch {body.existing_page_url}: {_e}")
+    if not existing_html:
+        raise HTTPException(status_code=422, detail="Either existing_page_html or existing_page_url is required")
+
+    deficiency_text = "\n".join(
+        f"  Engine: {d['engine']} (score: {d['score']}/100)\n"
+        f"  Issues: {'; '.join(d.get('issues', []))}\n"
+        f"  Fixes needed: {'; '.join(d.get('recommendations', []))}"
+        for d in body.deficiencies
+    )
+
+    prompt = f"""You are an expert local SEO content writer. Rewrite the existing page below to fix all identified deficiencies.
+
+BUSINESS: {body.business_name} | CATEGORY: {body.gbp_category}
+KEYWORD: {body.keyword} | CITY: {city}
+PHONE: {body.phone or "[PHONE]"}
+ADDRESS: {body.address or "Not provided"}
+{serp_ctx}
+
+DEFICIENCIES TO FIX:
+{deficiency_text}
+
+EXISTING PAGE (rewrite this to fix all deficiencies above):
+{existing_html[:10000]}
+
+INSTRUCTIONS:
+1. Fix every issue listed in the deficiencies — be specific and thorough.
+2. Naturally incorporate the competitor entities and phrases from SERP data where missing.
+3. Preserve the overall structure and any sections that are already strong.
+4. Do not fabricate reviews or placeholder text.
+5. Do not use "near me" literally in body content.
+6. Return the full rewritten page as clean HTML.
+7. After the HTML, output an updated <script type="application/ld+json"> schema block if the schema needs updating.
+
+Return the complete rewritten page HTML only — no markdown, no explanations."""
+
+    try:
+        msg = await client.messages.create(
+            model=GENERATION_MODEL,
+            max_tokens=8000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Claude reoptimize error: {e}")
+
+    token_rec = _token_record("reoptimize-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
+    raw = msg.content[0].text.strip()
+
+    schema_split = raw.find('<script type="application/ld+json">')
+    if schema_split != -1:
+        content_html = raw[:schema_split].strip()
+        schema_json = raw[schema_split:].strip()
+    else:
+        content_html = raw
+        schema_json = None
+
+    return ReoptimizePageResponse(
+        content_html=content_html,
+        schema_json=schema_json,
+        token_usage=token_rec,
+    )
