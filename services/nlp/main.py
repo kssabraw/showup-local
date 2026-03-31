@@ -131,7 +131,7 @@ ENTITY_MIN_SALIENCE      = 0.40
 GOOGLE_NLP_MAX_BYTES     = 100_000
 
 # DataForSEO: how many organic results to request
-SERP_RESULT_COUNT = 10
+SERP_RESULT_COUNT = 20
 
 # Domains to skip — directories, aggregators, social, video
 # Intentionally whitelisted: reddit.com, linkedin.com, facebook.com, quora.com
