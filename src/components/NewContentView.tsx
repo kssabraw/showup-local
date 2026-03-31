@@ -150,11 +150,11 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     await supabase.from("token_usage").insert({ ...record, business_id: selectedBusinessId, keyword });
   };
 
-  const runAnalysis = async (): Promise<AnalysisResult> => {
+  const runAnalysisFor = async (kw: string, loc: string, locCode: number | null): Promise<AnalysisResult> => {
     const response = await fetch(`${NLP_SERVICE_URL}/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-      body: JSON.stringify({ keyword: keyword.trim(), location: location.trim(), location_code: locationCode }),
+      body: JSON.stringify({ keyword: kw.trim(), location: loc.trim(), location_code: locCode }),
     });
     if (!response.ok) {
       const d = await response.json().catch(() => ({}));
@@ -162,6 +162,8 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     }
     return response.json();
   };
+
+  const runAnalysis = () => runAnalysisFor(keyword, location, locationCode);
 
   const saveAnalysisToSupabase = async (data: AnalysisResult) => {
     await supabase.from("keyword_analyses").upsert(
@@ -304,6 +306,69 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     }
   };
 
+  const handleRelatedAction = async ({
+    mode,
+    keyword: relKw,
+    existingUrl,
+  }: { mode: "reoptimize" | "new"; keyword: string; existingUrl?: string }) => {
+    setKeyword(relKw);
+    setView({ kind: "form" });
+    setError("");
+
+    if (mode === "new") {
+      // Pre-fill keyword and show the "not found" state so user can confirm
+      setCheckState({ status: "not_found" });
+      return;
+    }
+
+    // mode === "reoptimize" — run analysis + score the existing page
+    if (!existingUrl) {
+      setCheckState({ status: "not_found" });
+      return;
+    }
+
+    const b = businesses.find(b => b.id === selectedBusinessId);
+    if (!b) return;
+
+    setCheckState({ status: "scoring", page: { url: existingUrl, title: existingUrl } });
+    try {
+      const [serpData, scoreRes] = await Promise.all([
+        runAnalysisFor(relKw, location, locationCode),
+        fetch(`${NLP_SERVICE_URL}/score-page`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
+          body: JSON.stringify({
+            keyword: relKw.trim(),
+            location: location.trim(),
+            page_url: existingUrl,
+            business_name: b.business_name,
+            gbp_category: b.gbp_category,
+            address: b.address,
+          }),
+        }),
+      ]);
+
+      if (!scoreRes.ok) {
+        const d = await scoreRes.json().catch(() => ({}));
+        throw new Error(d.detail || `Scoring error: ${scoreRes.status}`);
+      }
+      const scoreData = await scoreRes.json();
+      await saveTokenUsage(scoreData.token_usage);
+      await saveAnalysisToSupabase(serpData);
+
+      setView({
+        kind: "score",
+        pageMatch: { url: existingUrl, title: existingUrl },
+        serpAnalysis: serpData,
+        initialScoreResult: scoreData,
+      });
+      setCheckState({ status: "idle" });
+    } catch (e: any) {
+      setError(e.message || "Failed to load page score");
+      setCheckState({ status: "idle" });
+    }
+  };
+
   const selectedBusiness = businesses.find(b => b.id === selectedBusinessId);
   const canCheck = !!keyword.trim() && !!location && !!selectedBusinessId && businesses.length > 0;
 
@@ -343,8 +408,12 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         tokenUsage={view.tokenUsage}
         businessId={selectedBusinessId}
         businessName={selectedBusiness?.business_name || ""}
+        website={selectedBusiness?.website ?? undefined}
+        gbpCategory={selectedBusiness?.gbp_category || ""}
+        address={selectedBusiness?.address || ""}
         onBack={() => setView({ kind: "form" })}
         onNewPage={() => { setView({ kind: "form" }); setKeyword(""); setCheckState({ status: "idle" }); }}
+        onRelatedAction={handleRelatedAction}
       />
     );
   }
