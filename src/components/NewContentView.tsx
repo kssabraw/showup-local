@@ -350,14 +350,15 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     }
   };
 
-  const handleCreateNewPage = async () => {
+  const handleCreateNewPage = async (kwOverride?: string) => {
     setCheckState({ status: "creating" });
     setCreatingPhase("serp");
     setElapsedSeconds(0);
     setError("");
     elapsedRef.current = setInterval(() => setElapsedSeconds(s => s + 1), 1000);
+    const kw = kwOverride ?? keyword;
     try {
-      const serpData = await runAnalysis();
+      const serpData = await runAnalysisFor(kw, location, locationCode);
       await saveAnalysisToSupabase(serpData);
 
       const b = businesses.find(b => b.id === selectedBusinessId)!;
@@ -366,7 +367,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         method: "POST",
         headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
         body: JSON.stringify({
-          keyword: keyword.trim(),
+          keyword: kw.trim(),
           location: location.trim(),
           business_name: b.business_name,
           gbp_category: b.gbp_category,
@@ -399,15 +400,15 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     keyword: relKw,
     existingUrl,
   }: { mode: "reoptimize" | "new"; keyword: string; existingUrl?: string }) => {
-    setKeyword(relKw);
-    setView({ kind: "form" });
     setError("");
 
     if (mode === "new") {
-      // Pre-fill keyword and show the "not found" state so user can confirm
-      setCheckState({ status: "not_found" });
+      handleCreateNewPage(relKw);
       return;
     }
+
+    setKeyword(relKw);
+    setView({ kind: "form" });
 
     // mode === "reoptimize" — run analysis + score the existing page
     if (!existingUrl) {
