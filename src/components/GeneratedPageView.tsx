@@ -230,7 +230,7 @@ export default function GeneratedPageView({
           <div
             className="bg-card rounded-xl border border-border p-8 prose prose-sm max-w-none
                        prose-headings:text-foreground prose-p:text-foreground prose-li:text-foreground
-                       prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-p:mb-6"
+                       prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg [&_p]:!mb-10"
             dangerouslySetInnerHTML={{ __html: contentHtml }}
           />
         </div>
