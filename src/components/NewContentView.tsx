@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { MapPin, Sparkles, ChevronDown, Building2, Loader2, FileSearch, FilePlus, PhoneCall } from "lucide-react";
+import { MapPin, Sparkles, ChevronDown, Building2, Loader2, FileSearch, FilePlus, PhoneCall, FileText, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import AnalysisResultsView from "@/components/AnalysisResultsView";
@@ -48,6 +48,18 @@ type ViewState =
   | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; tokenUsage: any; costBreakdown: any }
   | { kind: "analysis"; result: AnalysisResult };
 
+interface SavedPage {
+  id: string;
+  business_id: string;
+  keyword: string;
+  location: string;
+  mode: string;
+  page_title: string | null;
+  content_html: string;
+  schema_json: string | null;
+  created_at: string;
+}
+
 const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; defaultLocation?: string }) => {
   const [businesses, setBusinesses] = useState<BusinessProfile[]>([]);
   const [selectedBusinessId, setSelectedBusinessId] = useState("");
@@ -67,10 +79,18 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const [savedPages, setSavedPages] = useState<SavedPage[]>([]);
+  const [loadingSaved, setLoadingSaved] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
   const locationDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const locationContainerRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => { fetchBusinesses(); }, []);
+  useEffect(() => { fetchBusinesses(); fetchSavedPages(); }, []);
+
+  useEffect(() => {
+    if (view.kind === "form") fetchSavedPages();
+  }, [view.kind]);
 
   useEffect(() => {
     if (selectedBusinessId) {
@@ -146,6 +166,44 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     } finally {
       setLoadingBusinesses(false);
     }
+  };
+
+  const fetchSavedPages = async () => {
+    setLoadingSaved(true);
+    try {
+      const { data } = await supabase
+        .from("generated_pages")
+        .select("id, business_id, keyword, location, mode, page_title, content_html, schema_json, created_at")
+        .order("created_at", { ascending: false })
+        .limit(50);
+      setSavedPages(data || []);
+    } finally {
+      setLoadingSaved(false);
+    }
+  };
+
+  const deleteSavedPage = async (id: string) => {
+    setDeletingId(id);
+    await supabase.from("generated_pages").delete().eq("id", id);
+    setSavedPages(prev => prev.filter(p => p.id !== id));
+    setDeletingId(null);
+  };
+
+  const openSavedPage = (page: SavedPage) => {
+    setKeyword(page.keyword);
+    setLocation(page.location);
+    setLocationInput(page.location);
+    const b = businesses.find(b => b.id === page.business_id);
+    if (b) setSelectedBusinessId(b.id);
+    setView({
+      kind: "generated",
+      mode: page.mode as "generate" | "reoptimize",
+      contentHtml: page.content_html,
+      schemaJson: page.schema_json ?? "",
+      pageTitle: page.page_title ?? "",
+      tokenUsage: {},
+      costBreakdown: {},
+    });
   };
 
   const saveTokenUsage = async (record: any) => {
@@ -712,6 +770,72 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
           >
             <FileSearch className="w-4 h-4 mr-2" /> Check My Site
           </Button>
+        )}
+      </div>
+
+      {/* ── Saved Pages ── */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-base font-semibold text-foreground flex items-center gap-2">
+            <FileText className="w-4 h-4 text-muted-foreground" /> Saved Pages
+          </h2>
+          {savedPages.length > 0 && (
+            <span className="text-xs text-muted-foreground">{savedPages.length} page{savedPages.length !== 1 ? "s" : ""}</span>
+          )}
+        </div>
+
+        {loadingSaved && (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
+            <Loader2 className="w-4 h-4 animate-spin" /> Loading saved pages…
+          </div>
+        )}
+
+        {!loadingSaved && savedPages.length === 0 && (
+          <p className="text-sm text-muted-foreground py-4 text-center">
+            No saved pages yet. Generate a page and click Save to store it here.
+          </p>
+        )}
+
+        {!loadingSaved && savedPages.length > 0 && (
+          <div className="rounded-xl border border-border overflow-hidden divide-y divide-border">
+            {savedPages.map(page => {
+              const biz = businesses.find(b => b.id === page.business_id);
+              const date = new Date(page.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+              return (
+                <div key={page.id} className="bg-card px-4 py-3 flex items-center gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-foreground truncate">
+                      {page.page_title || page.keyword}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {page.keyword} · {page.location.split(",")[0]}
+                      {biz && <> · <span className="text-foreground/70">{biz.business_name}</span></>}
+                      <span className="ml-2">{date}</span>
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-xs h-7 px-3"
+                      onClick={() => openSavedPage(page)}
+                    >
+                      View
+                    </Button>
+                    <button
+                      onClick={() => deleteSavedPage(page.id)}
+                      disabled={deletingId === page.id}
+                      className="text-muted-foreground hover:text-destructive transition-colors p-1 rounded"
+                    >
+                      {deletingId === page.id
+                        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        : <Trash2 className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
     </div>

@@ -96,8 +96,9 @@ export default function GeneratedPageView({
         keyword,
         location,
         mode,
+        page_title: pageTitle || null,
         content_html: contentHtml,
-        schema_json: schemaJson,
+        schema_json: schemaJson || null,
       });
       if (error) throw error;
       setSaved(true);
