@@ -308,25 +308,17 @@ class AnalysisResponse(BaseModel):
 
 # ── Step 1: DataForSEO — fetch top organic SERP URLs ─────────────────────────
 
-async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient) -> List[str]:
-    """
-    Calls DataForSEO organic live/advanced to get the top SERP_RESULT_COUNT
-    organic URLs for keyword + location. Filters out skip-listed domains and
-    non-HTML resources. Returns [] on any error.
-    """
-    if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
-        logger.warning("DataForSEO credentials not set — skipping SERP fetch")
-        return []
-
-    # Standard HTTP Basic Auth encoding — credentials come from Railway env vars,
-    # not source code. Base64 is transport encoding, not encryption.
-    credentials = base64.b64encode(
+def _make_dataforseo_credentials() -> str:
+    return base64.b64encode(
         f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
     ).decode()
 
-    # Normalize: ensure spaces after commas ("Anaheim,California,United States" → "Anaheim, California, United States")
-    serp_location = ", ".join(p.strip() for p in location.split(","))
+def _normalize_location(location: str) -> str:
+    """Ensure spaces after commas: 'Anaheim,California,United States' → 'Anaheim, California, United States'"""
+    return ", ".join(p.strip() for p in location.split(","))
 
+async def _call_dataforseo(keyword: str, serp_location: str, client: httpx.AsyncClient) -> dict:
+    """Raw DataForSEO call — returns the full response dict or raises on HTTP error."""
     payload = [{
         "keyword": keyword,
         "location_name": serp_location,
@@ -334,58 +326,66 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
         "depth": SERP_RESULT_COUNT,
         "se_domain": "google.com",
     }]
+    response = await client.post(
+        DATAFORSEO_ENDPOINT,
+        headers={
+            "Authorization": f"Basic {_make_dataforseo_credentials()}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    return response.json()
+
+async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient) -> tuple[List[str], str | None]:
+    """
+    Calls DataForSEO and returns (urls, error_detail).
+    error_detail is None on success, a string describing the failure otherwise.
+    """
+    if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
+        return [], "DataForSEO credentials not configured"
+
+    serp_location = _normalize_location(location)
+    logger.info(f"Calling DataForSEO: keyword='{keyword}' location='{serp_location}'")
 
     try:
-        response = await client.post(
-            DATAFORSEO_ENDPOINT,
-            headers={
-                "Authorization": f"Basic {credentials}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=30.0,
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        urls = []
-        task_error_detail = None
-        for task in (data.get("tasks") or []):
-            task_status = task.get("status_message", "")
-            task_code = task.get("status_code", 0)
-            logger.info(f"DataForSEO task status: {task_code} {task_status}")
-            if task_code != 20000:
-                task_error_detail = f"DataForSEO task error {task_code}: {task_status}"
-                logger.warning(task_error_detail)
-                continue
-            for result in (task.get("result") or []):
-                total_count = result.get("se_results_count", "?")
-                logger.info(f"DataForSEO se_results_count: {total_count}")
-                for item in (result.get("items") or []):
-                    if item.get("type") != "organic":
-                        continue
-                    url = item.get("url", "")
-                    if not url:
-                        continue
-                    # Skip non-HTML extensions
-                    if re.search(r'\.(pdf|docx?|xlsx?|pptx?|zip)$', url, re.I):
-                        continue
-                    # Skip blocklisted domains
-                    domain = re.sub(r'^www\.', '', httpx.URL(url).host)
-                    if any(domain == d or domain.endswith('.' + d) for d in SKIP_DOMAINS):
-                        continue
-                    urls.append(url)
-                    if len(urls) >= SERP_RESULT_COUNT:
-                        break
-
-        logger.info(f"DataForSEO returned {len(urls)} usable URLs for '{keyword}' @ '{serp_location}'")
-        if not urls and task_error_detail:
-            raise ValueError(task_error_detail)
-        return urls
-
+        data = await _call_dataforseo(keyword, serp_location, client)
     except Exception as e:
-        logger.warning(f"DataForSEO error: {e}")
-        return []
+        logger.warning(f"DataForSEO HTTP error: {e}")
+        return [], f"DataForSEO request failed: {e}"
+
+    urls = []
+    for task in (data.get("tasks") or []):
+        task_status = task.get("status_message", "")
+        task_code = task.get("status_code", 0)
+        logger.info(f"DataForSEO task status: {task_code} {task_status}")
+        if task_code != 20000:
+            error = f"DataForSEO error {task_code}: {task_status}"
+            logger.warning(error)
+            return [], error
+        for result in (task.get("result") or []):
+            item_count = len(result.get("items") or [])
+            se_count = result.get("se_results_count", "?")
+            logger.info(f"DataForSEO items={item_count} se_results_count={se_count}")
+            for item in (result.get("items") or []):
+                if item.get("type") != "organic":
+                    continue
+                url = item.get("url", "")
+                if not url:
+                    continue
+                if re.search(r'\.(pdf|docx?|xlsx?|pptx?|zip)$', url, re.I):
+                    continue
+                domain = re.sub(r'^www\.', '', httpx.URL(url).host)
+                if any(domain == d or domain.endswith('.' + d) for d in SKIP_DOMAINS):
+                    logger.info(f"Skipping blocklisted domain: {domain}")
+                    continue
+                urls.append(url)
+                if len(urls) >= SERP_RESULT_COUNT:
+                    break
+
+    logger.info(f"fetch_serp_urls: {len(urls)} usable URLs")
+    return urls, None
 
 
 # ── Step 2: ScrapeOwl — fetch raw HTML for each URL ──────────────────────────
@@ -669,6 +669,39 @@ async def get_google_entities(
     return results
 
 
+# ── Debug endpoint (temporary) ────────────────────────────────────────────────
+
+@app.get('/debug-dataforseo')
+async def debug_dataforseo(keyword: str, location: str):
+    """Returns raw DataForSEO response for debugging. Remove before production."""
+    if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
+        return {"error": "DataForSEO credentials not set"}
+    serp_location = _normalize_location(location)
+    async with httpx.AsyncClient() as client:
+        try:
+            data = await _call_dataforseo(keyword, serp_location, client)
+        except Exception as e:
+            return {"error": str(e)}
+    tasks = data.get("tasks") or []
+    summary = []
+    for task in tasks:
+        task_info = {
+            "status_code": task.get("status_code"),
+            "status_message": task.get("status_message"),
+            "results": []
+        }
+        for result in (task.get("result") or []):
+            items = result.get("items") or []
+            organic = [i.get("url") for i in items if i.get("type") == "organic"]
+            task_info["results"].append({
+                "se_results_count": result.get("se_results_count"),
+                "items_total": len(items),
+                "organic_urls": organic[:20],
+            })
+        summary.append(task_info)
+    return {"location_sent": serp_location, "tasks": summary}
+
+
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
 @app.post('/analyze', response_model=AnalysisResponse, dependencies=[Depends(verify_api_key)])
@@ -687,13 +720,12 @@ async def analyze(request: Request, body: AnalysisRequest):
         urls = body.urls
         logger.info(f"Using {len(urls)} manually provided URLs")
     else:
-        try:
-            async with httpx.AsyncClient() as client:
-                urls = await fetch_serp_urls(body.keyword, body.location, client)
-        except ValueError as e:
-            raise HTTPException(status_code=502, detail=str(e))
+        async with httpx.AsyncClient() as client:
+            urls, err = await fetch_serp_urls(body.keyword, body.location, client)
+        if err:
+            raise HTTPException(status_code=502, detail=err)
         if not urls:
-            raise HTTPException(status_code=502, detail="DataForSEO returned no usable URLs for this keyword/location combination")
+            raise HTTPException(status_code=502, detail="DataForSEO returned results but all URLs were filtered (blocklisted domains or non-HTML)")
 
     # Step 2: scrape
     pages = await scrape_urls(urls)
