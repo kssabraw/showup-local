@@ -2111,20 +2111,8 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
         url = f"https://{url}"
 
     kw = body.keyword.lower().strip()
-    # Words that describe a business type but never appear in service page URL slugs.
-    # Strip these before slug/Haiku matching so "tree service company" → ["tree", "service"].
-    _BUSINESS_DESCRIPTORS = {
-        "company", "companies", "contractor", "contractors", "professional", "professionals",
-        "provider", "providers", "specialist", "specialists", "expert", "experts",
-        "technician", "technicians", "team", "crew", "agency", "firm", "business",
-        "near", "me", "best", "top", "trusted", "reliable", "affordable", "licensed",
-        "certified", "local", "cheap", "fast",
-    }
-    # Build keyword word list — filter stopwords, single-char tokens, and business descriptors
-    kw_words = [w for w in re.split(r'[\W_]+', kw) if w and len(w) > 1 and w not in STOP_WORDS and w not in _BUSINESS_DESCRIPTORS]
-    if not kw_words:
-        # Fallback: keep everything except pure stopwords
-        kw_words = [w for w in re.split(r'[\W_]+', kw) if w and len(w) > 1 and w not in STOP_WORDS]
+    # Build keyword word list — filter stopwords and single-char tokens only
+    kw_words = [w for w in re.split(r'[\W_]+', kw) if w and len(w) > 1 and w not in STOP_WORDS]
     if not kw_words:
         kw_words = [w for w in re.split(r'\s+', kw) if w]
     # Extract location words from the business location field for boosted slug scoring.
@@ -2241,12 +2229,7 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                 logger.info(f"  candidate #{i+1} (score={scored_pairs[scored_urls.index(u)][1]}): {u}")
 
             # Build service and location context for Haiku
-            # Location: prefer explicitly passed location, else try to infer from keyword
             biz_location = (body.location or "").strip()
-            # Extract location words from keyword (words not in kw_words are likely location words)
-            all_kw_words = [w for w in re.split(r'[\W_]+', kw) if w and len(w) > 1 and w not in STOP_WORDS]
-            location_words_from_kw = [w for w in all_kw_words if w not in kw_words and w not in _BUSINESS_DESCRIPTORS]
-            # Service words are the kw_words (already stripped of descriptors and location words)
             service_words = kw_words
 
             # Use Haiku to pick the best matching URL from the candidate list
@@ -2257,18 +2240,13 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                     url_list_text = "\n".join(f"{i+1}. {u}" for i, u in enumerate(candidate_pool))
 
                     # Build location context line
-                    location_context_parts = []
-                    if location_words_from_kw:
-                        location_context_parts.append(f"location words in keyword: {location_words_from_kw}")
-                    if biz_location:
-                        location_context_parts.append(f"business location: {biz_location}")
-                    location_context = " | ".join(location_context_parts) if location_context_parts else "unknown"
+                    location_context = biz_location if biz_location else "unknown"
 
                     location_rule = (
                         f"  - Target location: {location_context}\n"
-                        f"  - Strongly prefer URLs whose slug contains BOTH the service words ({service_words}) AND location words.\n"
+                        f"  - Strongly prefer URLs whose slug contains BOTH the service words AND location words (e.g. city name).\n"
                         f"  - A URL with just the service words (no location in slug) is acceptable if no location-specific page exists.\n"
-                    ) if (biz_location or location_words_from_kw) else (
+                    ) if biz_location else (
                         "  - Find the best dedicated service page for this service type.\n"
                     )
                     _msg = await _ac.messages.create(
