@@ -37,6 +37,7 @@ interface AnalysisResult {
 type CheckState =
   | { status: "idle" }
   | { status: "scanning" }
+  | { status: "found"; page: { url: string; title: string; h1?: string; isBlogPost?: boolean } }
   | { status: "scoring"; page: { url: string; title: string; h1?: string; isBlogPost?: boolean } }
   | { status: "high_score"; page: { url: string; title: string; isBlogPost?: boolean }; score: number }
   | { status: "not_found" }
@@ -314,8 +315,15 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
       return;
     }
 
-    // Step 2: Page found — run SERP analysis + score-page in parallel
-    setCheckState({ status: "scoring", page: foundPage });
+    // Step 2: Pause — let user confirm or override the found page
+    setCheckState({ status: "found", page: foundPage });
+  };
+
+  const runScoreForPage = async (pageToScore: { url: string; title: string; h1?: string; isBlogPost?: boolean }) => {
+    const b = businesses.find(b => b.id === selectedBusinessId);
+    if (!b) return;
+    setCheckState({ status: "scoring", page: pageToScore });
+    setError("");
     try {
       const [serpData, scoreRes] = await Promise.all([
         runAnalysis(),
@@ -325,7 +333,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
           body: JSON.stringify({
             keyword: keyword.trim(),
             location: location.trim(),
-            page_url: foundPage.url,
+            page_url: pageToScore.url,
             business_name: b.business_name,
             gbp_category: b.gbp_category,
             address: b.address,
@@ -342,11 +350,11 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
       await saveAnalysisToSupabase(serpData);
 
       if (scoreData.composite_score >= 90) {
-        setCheckState({ status: "high_score", page: foundPage, score: scoreData.composite_score });
+        setCheckState({ status: "high_score", page: pageToScore, score: scoreData.composite_score });
       } else {
         setView({
           kind: "score",
-          pageMatch: foundPage,
+          pageMatch: pageToScore,
           serpAnalysis: serpData,
           initialScoreResult: scoreData,
         });
@@ -468,45 +476,8 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     let u = manualUrl.trim();
     if (!u) return;
     if (!u.startsWith("http://") && !u.startsWith("https://")) u = `https://${u}`;
-    const b = businesses.find(b => b.id === selectedBusinessId);
-    if (!b) return;
-    const page = { url: u, title: u };
-    setCheckState({ status: "scoring", page });
-    setShowManualUrl(false);
-    setError("");
-    try {
-      const [serpData, scoreRes] = await Promise.all([
-        runAnalysis(),
-        fetch(`${NLP_SERVICE_URL}/score-page`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-          body: JSON.stringify({
-            keyword: keyword.trim(),
-            location: location.trim(),
-            page_url: u,
-            business_name: b.business_name,
-            gbp_category: b.gbp_category,
-            address: b.address,
-          }),
-        }),
-      ]);
-      if (!scoreRes.ok) {
-        const d = await scoreRes.json().catch(() => ({}));
-        throw new Error(d.detail || `Scoring error: ${scoreRes.status}`);
-      }
-      const scoreData = await scoreRes.json();
-      await saveTokenUsage(scoreData.token_usage);
-      await saveAnalysisToSupabase(serpData);
-      if (scoreData.composite_score >= 90) {
-        setCheckState({ status: "high_score", page, score: scoreData.composite_score });
-      } else {
-        setView({ kind: "score", pageMatch: page, serpAnalysis: serpData, initialScoreResult: scoreData });
-        setCheckState({ status: "idle" });
-      }
-    } catch (e: any) {
-      setError(e.message || "Scoring failed");
-      setCheckState({ status: "not_found" });
-    }
+    setManualUrl("");
+    runScoreForPage({ url: u, title: u });
   };
 
   const handleRelatedAction = async ({
@@ -635,7 +606,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     );
   }
 
-  const isChecking = checkState.status === "scanning" || checkState.status === "scoring";
+  const isChecking = checkState.status === "scanning" || checkState.status === "scoring" || checkState.status === "found";
 
   // ── Main form ──────────────────────────────────────────────────────────────
   return (
@@ -750,6 +721,39 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
           <div className="flex items-center gap-3 px-4 py-3 bg-muted/30 rounded-lg text-sm text-muted-foreground">
             <Loader2 className="w-4 h-4 animate-spin shrink-0" />
             <span>Scanning <span className="font-medium text-foreground">{selectedBusiness?.website}</span> for "{keyword}" pages…</span>
+          </div>
+        )}
+
+        {/* Found — confirm or override before scoring */}
+        {checkState.status === "found" && (
+          <div className="space-y-3">
+            <div className="flex items-start gap-2 px-3 py-2.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs text-amber-600">
+              <FileSearch className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              <div className="min-w-0">
+                <p className="font-medium">Page found:</p>
+                <a href={checkState.page.url} target="_blank" rel="noopener noreferrer" className="underline break-all">{checkState.page.url}</a>
+              </div>
+            </div>
+            {checkState.page.isBlogPost && (
+              <div className="flex items-center gap-2 px-3 py-2 bg-orange-500/10 border border-orange-500/20 rounded-lg text-xs text-orange-600">
+                <span>⚠️ This appears to be a blog post, not a dedicated service page.</span>
+              </div>
+            )}
+            <Button className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
+              onClick={() => runScoreForPage(checkState.page)}>
+              Score This Page
+            </Button>
+            <div className="flex gap-2">
+              <input type="url" placeholder="Or enter a different URL…" value={manualUrl}
+                onChange={e => setManualUrl(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && handleScoreManualUrl()}
+                className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent" />
+              <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score</Button>
+            </div>
+            <button onClick={() => setCheckState({ status: "not_found" })}
+              className="w-full text-xs text-muted-foreground hover:text-foreground text-center py-1 transition-colors">
+              No page exists — create a new one instead
+            </button>
           </div>
         )}
 

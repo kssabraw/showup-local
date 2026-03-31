@@ -2211,12 +2211,29 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                 except Exception as _he:
                     logger.warning(f"find-page-for-keyword: Haiku selection failed ({_he}), falling back to regex")
 
-            # Fetch Haiku's pick first; fall back to top regex candidates if needed
-            to_check = ([haiku_pick] if haiku_pick else []) + [u for u in scored_urls[:20] if u != haiku_pick]
+            # If Haiku picked a URL, trust it — fetch just enough to get title/H1
+            if haiku_pick:
+                try:
+                    resp = await client.get(haiku_pick, timeout=8.0)
+                    if resp.status_code == 200:
+                        soup = BeautifulSoup(resp.text, 'html.parser')
+                        title_tag = soup.find('title')
+                        h1_tag = soup.find('h1')
+                        title_text = title_tag.get_text(strip=True) if title_tag else haiku_pick
+                        h1_text = h1_tag.get_text(strip=True) if h1_tag else ''
+                        is_blog = _is_likely_blog_post(haiku_pick)
+                        return FindPageResponse(
+                            found=True,
+                            page={'url': str(resp.url), 'title': title_text, 'h1': h1_text, 'is_blog_post': is_blog},
+                            is_blog_post=is_blog,
+                        )
+                except Exception as _fe:
+                    logger.warning(f"find-page-for-keyword: failed to fetch Haiku pick ({_fe}), falling back")
 
+            # Fallback: check top regex candidates with keyword-in-title gate
+            to_check = [u for u in scored_urls[:20] if u != haiku_pick]
             results = await asyncio.gather(*[_check_page(u, client) for u in to_check])
             matches = [r for r in results if r]
-            # Prefer service pages over blog posts
             matches.sort(key=lambda r: r.get('is_blog_post', False))
             if matches:
                 res = matches[0]
