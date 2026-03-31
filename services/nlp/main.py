@@ -2674,7 +2674,9 @@ async def related_pages(request: Request, body: RelatedPagesRequest):
     # Step 2: Discover sitemap / crawlable URLs once
     discovered_urls: List[str] = []
     if body.website:
-        base = body.website.rstrip("/")
+        base = body.website.strip().rstrip("/")
+        if not base.startswith(("http://", "https://")):
+            base = f"https://{base}"
         async with httpx.AsyncClient(follow_redirects=True,
                                      headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"},
                                      timeout=15.0) as http_client:
