@@ -30,6 +30,7 @@ interface AnalysisResult {
   top_quadgrams: any[];
   google_entities: any[];
   zone_targets: Record<string, { target: number }>;
+  competitor_headings: any[];
 }
 
 type CheckState =
@@ -176,6 +177,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         top_quadgrams: data.top_quadgrams,
         google_entities: data.google_entities,
         zone_targets: data.zone_targets,
+        competitor_headings: data.competitor_headings,
       },
       { onConflict: "business_id,keyword,location" }
     );

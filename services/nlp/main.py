@@ -169,7 +169,8 @@ class AnalysisResponse(BaseModel):
     related_keywords: ZoneKeywords
     top_quadgrams: List[dict]
     google_entities: List[dict]
-    zone_targets: Dict[str, dict] = {}   # max term/entity counts per zone across competitors
+    zone_targets: Dict[str, dict] = {}        # max term/entity counts per zone across competitors
+    competitor_headings: List[dict] = []      # H2/H3 strings scraped from competitor pages
 
 
 # ── Step 1: DataForSEO — fetch top organic SERP URLs ─────────────────────────
@@ -288,8 +289,8 @@ async def scrape_urls(urls: List[str]) -> List[str]:
 
 # ── HTML parsing ──────────────────────────────────────────────────────────────
 
-def extract_zones(html: str) -> Dict[str, str]:
-    """Parse HTML and return text extracted per zone."""
+def extract_zones(html: str) -> Dict:
+    """Parse HTML and return text extracted per zone plus raw heading lists."""
     soup = BeautifulSoup(html, "html.parser")
 
     title_tag = soup.find("title")
@@ -300,6 +301,12 @@ def extract_zones(html: str) -> Dict[str, str]:
 
     h2h3_tags = soup.find_all(["h2", "h3"])
     h2h3_text = " ".join(t.get_text(separator=" ", strip=True) for t in h2h3_tags)
+
+    # Raw heading strings for competitor heading analysis
+    h2_list = [t.get_text(separator=" ", strip=True) for t in soup.find_all("h2")
+               if t.get_text(strip=True)]
+    h3_list = [t.get_text(separator=" ", strip=True) for t in soup.find_all("h3")
+               if t.get_text(strip=True)]
 
     p_tags = soup.find_all("p")
     paragraph_text = " ".join(t.get_text(separator=" ", strip=True) for t in p_tags)
@@ -314,6 +321,8 @@ def extract_zones(html: str) -> Dict[str, str]:
         "h2_h3": h2h3_text,
         "body": body_text,
         "paragraphs": paragraph_text,
+        "h2_list": h2_list,
+        "h3_list": h3_list,
     }
 
 
@@ -555,11 +564,15 @@ async def analyze(request: Request, body: AnalysisRequest):
 
     # Step 3: parse zones
     zone_buckets: Dict[str, List[str]] = {z: [] for z in ZONES + ["paragraphs"]}
+    h2_per_page: List[List[str]] = []
+    h3_per_page: List[List[str]] = []
     scraped_urls: List[str] = []
     for url, html in zip(urls, pages):
         zones = extract_zones(html)
         for z in ZONES + ["paragraphs"]:
             zone_buckets[z].append(zones[z])
+        h2_per_page.append(zones.get("h2_list", []))
+        h3_per_page.append(zones.get("h3_list", []))
         scraped_urls.append(url)
 
     # Step 4: NLP analysis
@@ -573,6 +586,32 @@ async def analyze(request: Request, body: AnalysisRequest):
     google_entities = await get_google_entities(zone_buckets["paragraphs"])
     zone_targets = compute_zone_targets(zone_buckets, related, google_entities)
 
+    # Aggregate competitor headings by page spread
+    total_pages = len(scraped_urls)
+    competitor_headings: List[dict] = []
+    for tag_type, per_page in (("h2", h2_per_page), ("h3", h3_per_page)):
+        canonical: Dict[str, str] = {}   # lowercase -> first-seen original
+        page_count: Dict[str, int] = {}  # lowercase -> pages containing it
+        for page_headings in per_page:
+            seen_this_page: set = set()
+            for h in page_headings:
+                h_key = h.lower().strip()
+                if not h_key or len(h_key) < 3:
+                    continue
+                if h_key not in seen_this_page:
+                    seen_this_page.add(h_key)
+                    page_count[h_key] = page_count.get(h_key, 0) + 1
+                    if h_key not in canonical:
+                        canonical[h_key] = h
+        limit = 12 if tag_type == "h2" else 20
+        for h_key, count in sorted(page_count.items(), key=lambda x: -x[1])[:limit]:
+            competitor_headings.append({
+                "text": canonical[h_key],
+                "type": tag_type,
+                "page_count": count,
+                "page_pct": round(count / total_pages, 2),
+            })
+
     return AnalysisResponse(
         keyword=body.keyword,
         location=body.location,
@@ -581,6 +620,7 @@ async def analyze(request: Request, body: AnalysisRequest):
         top_quadgrams=quadgrams,
         google_entities=google_entities,
         zone_targets=zone_targets,
+        competitor_headings=competitor_headings,
     )
 
 
@@ -1962,6 +2002,20 @@ def _serp_context(serp_analysis: Optional[dict]) -> str:
         parts.append(f"\nTOP COMPETITOR PHRASES (4-word phrases — use naturally in body):")
         parts.append(f"  {', '.join(q['phrase'] for q in quadgrams[:15])}")
 
+    headings = serp_analysis.get("competitor_headings", [])
+    if headings:
+        h2s = [h for h in headings if h["type"] == "h2"]
+        h3s = [h for h in headings if h["type"] == "h3"]
+        parts.append("\nCOMPETITOR H2/H3 HEADINGS (scraped from top-ranking pages — use these to inform Section 6 structure):")
+        if h2s:
+            parts.append("  H2s by frequency:")
+            for h in h2s[:12]:
+                parts.append(f"    \"{h['text']}\" ({h['page_count']} pages)")
+        if h3s:
+            parts.append("  H3s by frequency:")
+            for h in h3s[:20]:
+                parts.append(f"    \"{h['text']}\" ({h['page_count']} pages)")
+
     return "\n".join(parts)
 
 
@@ -2308,12 +2362,23 @@ Section 5 — Features and Benefits (150–200 words)
   <ul>[Min 4 feature/benefit pairs — outcome-first, ICP pain points addressed]</ul>
 </section>
 
-Section 6 — Main Service Body (600–900 words)
+Section 6 — Main Service Body (800–1400 words)
 <section id="services">
-  <h2>[Primary service + city in heading]</h2>
-  [Primary service description — answer-first. Then 3–5 sub-service H3 subsections.]
-  [Each H3: service+city in heading. 2–4 sentences: description, scenario, differentiator/availability, geo reference.]
-  [Naturally weave in competitor entities and phrases from SERP data.]
+  Use the COMPETITOR H2/H3 HEADINGS from the SERP data above as your structural baseline.
+  Cover every topic competitors cover, then add H2/H3 sections for topics competitors DON'T cover
+  that would more fully answer the user's implied query — this is called INFORMATION GAIN and
+  is critical for outranking competitors.
+
+  Structure rules:
+  - You may use MULTIPLE H2s within this section if the content warrants separate major topics
+  - Each H2 should represent a distinct major topic or service category
+  - Use H3s under each H2 for sub-services, use cases, or scenarios
+  - Every heading: include service/city naturally where it fits (not forced)
+  - Open with a primary service description paragraph (answer-first)
+  - Each H3: 2–4 sentences covering description, real-world scenario, differentiator, geo reference
+  - Naturally weave in competitor entities and phrases from SERP data throughout
+  - Do NOT copy competitor headings verbatim — use them to understand topic coverage, then write
+    headings that are more specific, benefit-oriented, or locally relevant
 </section>
 
 Section 7 — Testimonials (include only if reviews provided above; omit if none)
