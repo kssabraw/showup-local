@@ -17,7 +17,6 @@ interface BusinessProfile {
   website: string | null;
   phone?: string | null;
   differentiators?: any[];
-  reviews?: any[];
   existing_pages: any[];
 }
 
@@ -138,7 +137,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     try {
       const { data, error } = await supabase
         .from("business_profiles")
-        .select("id, business_name, address, gbp_category, website, phone, differentiators, reviews, existing_pages")
+        .select("id, business_name, address, gbp_category, website, phone, differentiators, existing_pages")
         .order("created_at", { ascending: false });
       if (error) throw error;
       setBusinesses(data || []);
@@ -222,7 +221,6 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
           address: b.address,
           phone: b.phone,
           differentiators: b.differentiators,
-          reviews: b.reviews,
           serp_analysis: serpData,
         }),
       });
