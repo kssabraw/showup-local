@@ -135,6 +135,14 @@ GOOGLE_NLP_MAX_BYTES     = 100_000
 # DataForSEO: how many organic results to request
 SERP_RESULT_COUNT = 20
 
+# API cost estimates (USD) — used for per-generation cost breakdown display
+# DataForSEO organic SERP live/advanced: ~$0.0025 per task
+COST_DATAFORSEO_PER_ANALYSIS  = 0.0025
+# ScrapeOwl with premium_proxies: ~$0.0075 per page
+COST_SCRAPEOWL_PER_PAGE       = 0.0075
+# Google Natural Language API entity analysis: $0.001 per 1,000 chars
+COST_GOOGLE_NLP_PER_1K_CHARS  = 0.001
+
 # Domains to skip — directories, aggregators, social, video
 # Intentionally whitelisted: reddit.com, linkedin.com, facebook.com, quora.com
 SKIP_DOMAINS = {
@@ -171,6 +179,7 @@ class AnalysisResponse(BaseModel):
     google_entities: List[dict]
     zone_targets: Dict[str, dict] = {}        # max term/entity counts per zone across competitors
     competitor_headings: List[dict] = []      # H2/H3 strings scraped from competitor pages
+    analysis_cost: dict = {}                  # estimated API costs for this analysis run
 
 
 # ── Step 1: DataForSEO — fetch top organic SERP URLs ─────────────────────────
@@ -612,6 +621,19 @@ async def analyze(request: Request, body: AnalysisRequest):
                 "page_pct": round(count / total_pages, 2),
             })
 
+    # Estimate API costs for this analysis run
+    nlp_chars = sum(min(len(doc), GOOGLE_NLP_MAX_BYTES) for doc in zone_buckets["paragraphs"])
+    scrapeowl_cost = round(len(scraped_urls) * COST_SCRAPEOWL_PER_PAGE, 6)
+    google_nlp_cost = round(nlp_chars / 1000 * COST_GOOGLE_NLP_PER_1K_CHARS, 6)
+    analysis_cost = {
+        "dataforseo": round(COST_DATAFORSEO_PER_ANALYSIS, 6),
+        "scrapeowl_pages": len(scraped_urls),
+        "scrapeowl": scrapeowl_cost,
+        "google_nlp_chars": nlp_chars,
+        "google_nlp": google_nlp_cost,
+        "subtotal": round(COST_DATAFORSEO_PER_ANALYSIS + scrapeowl_cost + google_nlp_cost, 6),
+    }
+
     return AnalysisResponse(
         keyword=body.keyword,
         location=body.location,
@@ -621,6 +643,7 @@ async def analyze(request: Request, body: AnalysisRequest):
         google_entities=google_entities,
         zone_targets=zone_targets,
         competitor_headings=competitor_headings,
+        analysis_cost=analysis_cost,
     )
 
 
@@ -2212,6 +2235,7 @@ class GeneratePageResponse(BaseModel):
     schema_json: str
     page_title: str
     token_usage: dict
+    cost_breakdown: dict = {}
 
 
 @app.post('/generate-page', response_model=GeneratePageResponse, dependencies=[Depends(verify_api_key)])
@@ -2460,11 +2484,28 @@ HARD RULES — NEVER:
         content_html = raw
         schema_json = ""
 
+    # Build combined cost breakdown
+    ac = (body.serp_analysis or {}).get("analysis_cost", {})
+    claude_cost = token_rec["cost_usd"]
+    cost_breakdown = {
+        "dataforseo":           ac.get("dataforseo", 0),
+        "scrapeowl_pages":      ac.get("scrapeowl_pages", 0),
+        "scrapeowl":            ac.get("scrapeowl", 0),
+        "google_nlp_chars":     ac.get("google_nlp_chars", 0),
+        "google_nlp":           ac.get("google_nlp", 0),
+        "claude_model":         token_rec["model"],
+        "claude_input_tokens":  token_rec["input_tokens"],
+        "claude_output_tokens": token_rec["output_tokens"],
+        "claude":               round(claude_cost, 6),
+        "total":                round(ac.get("subtotal", 0) + claude_cost, 6),
+    }
+
     return GeneratePageResponse(
         content_html=content_html,
         schema_json=schema_json,
         page_title=page_title,
         token_usage=token_rec,
+        cost_breakdown=cost_breakdown,
     )
 
 
