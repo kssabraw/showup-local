@@ -90,7 +90,6 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
   const [bulkProgress, setBulkProgress] = useState<{ current: number; total: number; currentKw: string } | null>(null);
   const [bulkDone, setBulkDone] = useState(0);
   const [manualUrl, setManualUrl] = useState("");
-  const [showManualUrl, setShowManualUrl] = useState(false);
 
   const locationDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const locationContainerRef = useRef<HTMLDivElement>(null);
@@ -122,7 +121,6 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     setSelectedForCreate(new Set());
     setBulkDone(0);
     setManualUrl("");
-    setShowManualUrl(false);
     setError("");
   }, [keyword, location, selectedBusinessId]);
 
@@ -784,19 +782,14 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
                 <FileSearch className="w-3.5 h-3.5 shrink-0" />
                 <span className="truncate">Found: <a href={checkState.page.url} target="_blank" rel="noopener noreferrer" className="underline font-medium">{checkState.page.title}</a></span>
               </span>
-              <button onClick={() => setShowManualUrl(v => !v)} className="shrink-0 underline hover:text-amber-800 whitespace-nowrap">Wrong page?</button>
             </div>
-            {showManualUrl && (
-              <div className="flex gap-2">
-                <input type="url" placeholder="https://example.com/correct-page" value={manualUrl}
-                  onChange={e => setManualUrl(e.target.value)}
-                  onKeyDown={e => e.key === "Enter" && handleScoreManualUrl()}
-                  className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent"
-                  autoFocus />
-                <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score</Button>
-                <Button size="sm" variant="ghost" onClick={() => { setShowManualUrl(false); setManualUrl(""); }}>✕</Button>
-              </div>
-            )}
+            <div className="flex gap-2">
+              <input type="url" placeholder="Or score a specific URL…" value={manualUrl}
+                onChange={e => setManualUrl(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && handleScoreManualUrl()}
+                className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent" />
+              <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score</Button>
+            </div>
             {checkState.page.isBlogPost && (
               <div className="flex items-center gap-2 px-3 py-2 bg-orange-500/10 border border-orange-500/20 rounded-lg text-xs text-orange-600">
                 <span>⚠️ This appears to be a blog post, not a service page. Consider creating a dedicated service page for this keyword.</span>
@@ -934,27 +927,13 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
               <Sparkles className="w-4 h-4 mr-2" /> Create New Page
             </Button>
 
-            {/* Manual URL input */}
-            {!showManualUrl ? (
-              <button onClick={() => setShowManualUrl(true)}
-                className="w-full text-xs text-muted-foreground hover:text-foreground text-center py-1 transition-colors">
-                Already have a page? Score a specific URL instead →
-              </button>
-            ) : (
-              <div className="flex gap-2">
-                <input
-                  type="url"
-                  placeholder="https://example.com/your-page"
-                  value={manualUrl}
-                  onChange={e => setManualUrl(e.target.value)}
-                  onKeyDown={e => e.key === "Enter" && handleScoreManualUrl()}
-                  className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent"
-                  autoFocus
-                />
-                <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score</Button>
-                <Button size="sm" variant="ghost" onClick={() => { setShowManualUrl(false); setManualUrl(""); }}>✕</Button>
-              </div>
-            )}
+            <div className="flex gap-2">
+              <input type="url" placeholder="Or score a specific URL…" value={manualUrl}
+                onChange={e => setManualUrl(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && handleScoreManualUrl()}
+                className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent" />
+              <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score</Button>
+            </div>
 
             {/* Related pages panel */}
             {(relatedLoading || relatedPages) && (() => {
