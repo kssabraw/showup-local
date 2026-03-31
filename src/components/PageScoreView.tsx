@@ -44,7 +44,8 @@ interface Props {
   address: string;
   phone?: string;
   differentiators?: any[];
-  serp_analysis: any;
+  serp_analysis?: any;
+  initialScoreResult?: ScoreResult;
   onBack: () => void;
   onGenerated: (result: GeneratedResult, mode: "reoptimize") => void;
 }
@@ -79,9 +80,10 @@ function StatusIcon({ score }: { score: number }) {
 
 export default function PageScoreView({
   keyword, location, pageUrl, pageTitle, businessId, businessName,
-  gbpCategory, address, phone, differentiators, serp_analysis, onBack, onGenerated,
+  gbpCategory, address, phone, differentiators, serp_analysis, initialScoreResult,
+  onBack, onGenerated,
 }: Props) {
-  const [scoreResult, setScoreResult] = useState<ScoreResult | null>(null);
+  const [scoreResult, setScoreResult] = useState<ScoreResult | null>(initialScoreResult ?? null);
   const [scoring, setScoring] = useState(false);
   const [reoptimizing, setReoptimizing] = useState(false);
   const [error, setError] = useState("");

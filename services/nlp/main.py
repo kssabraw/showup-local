@@ -3,7 +3,6 @@ import os
 import logging
 import asyncio
 import base64
-import json
 
 # Configure logging to stderr so Railway captures it
 logging.basicConfig(
@@ -30,7 +29,6 @@ try:
     from slowapi.errors import RateLimitExceeded
     import re
     from collections import defaultdict
-    from nltk.stem import PorterStemmer
     logger.info("Basic imports done")
 
     from sklearn.feature_extraction.text import TfidfVectorizer
@@ -107,11 +105,7 @@ async def verify_api_key(api_key: str = Security(_api_key_header)):
 
 GOOGLE_NLP_ENDPOINT  = "https://language.googleapis.com/v1/documents:analyzeEntities"
 DATAFORSEO_ENDPOINT  = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced"
-DATAFORSEO_LOCATIONS_ENDPOINT = "https://api.dataforseo.com/v3/serp/google/locations"
 SCRAPEOWL_ENDPOINT   = "https://app.scrapeowl.com/api/scrape"
-
-# In-process cache: location name → location_code (int)
-_location_code_cache: Dict[str, int] = {}
 
 logger.info("App initialized, ready to serve")
 for name, val in [
@@ -147,151 +141,11 @@ SKIP_DOMAINS = {
 }
 
 
-# ── Service abbreviation / synonym expansion map ──────────────────────────────
-# Keys: lowercase abbreviations/short-forms users type in keywords.
-# Values: expanded terms that should ALSO match pages about that service.
-# Covers the major local SEO niches: HVAC, plumbing, electrical, legal, medical,
-# IT/MSP, roofing, automotive, marketing, real estate.
-SERVICE_ABBREVIATION_MAP: Dict[str, List[str]] = {
-    # HVAC / Climate control
-    "ac":       ["air conditioning", "air conditioner", "cooling", "hvac"],
-    "a/c":      ["air conditioning", "air conditioner", "cooling", "hvac"],
-    "hvac":     ["air conditioning", "heating", "cooling", "furnace", "heat pump"],
-    # Plumbing
-    "hw":       ["hot water", "water heater"],
-    # Electrical
-    "ev":       ["electric vehicle", "ev charging", "electric car charger"],
-    "led":      ["led lighting", "energy efficient lighting"],
-    # IT / MSP
-    "msp":      ["managed service provider", "managed services", "it support", "it services"],
-    "it":       ["information technology", "tech support", "computer support", "it services"],
-    "voip":     ["voip", "business phone", "hosted phone"],
-    "cybersec": ["cybersecurity", "cyber security", "network security"],
-    # Legal
-    "dui":      ["drunk driving", "driving under the influence", "dwi"],
-    "dwi":      ["drunk driving", "driving while intoxicated", "dui"],
-    "pi":       ["personal injury", "accident attorney", "injury lawyer"],
-    "ovi":      ["operating vehicle impaired", "drunk driving", "dui"],
-    # Medical / Health
-    "pt":       ["physical therapy", "physical therapist"],
-    "ot":       ["occupational therapy", "occupational therapist"],
-    "chiro":    ["chiropractor", "chiropractic"],
-    "obgyn":    ["obgyn", "gynecologist", "obstetrics"],
-    # Roofing / Solar
-    "solar":    ["solar panel", "solar energy", "photovoltaic", "solar installation"],
-    # Security
-    "cctv":     ["security camera", "surveillance", "video surveillance"],
-    # Marketing / Digital
-    "seo":      ["search engine optimization", "seo services"],
-    "ppc":      ["pay per click", "paid advertising", "google ads"],
-    "smm":      ["social media marketing", "social media management"],
-    "cro":      ["conversion rate optimization"],
-    # Finance / Accounting
-    "cpa":      ["certified public accountant", "accountant", "tax preparation"],
-    "cfo":      ["chief financial officer", "financial consulting", "fractional cfo"],
-    # Property / Real Estate
-    "hoa":      ["homeowners association", "hoa management"],
-    "re":       ["real estate", "realtor", "realty"],
-    "pm":       ["property management", "property manager"],
-    # Staffing
-    "hr":       ["human resources", "hr services", "human resource"],
-    # Auto
-    "awd":      ["all wheel drive", "awd service"],
-    "4wd":      ["four wheel drive", "4x4"],
-}
-
-NEAR_ME_SIGNALS = ["near me", "nearby", "near by", "closest", "open now", "open 24"]
-
-# Singleton stemmer — created once at module load
-try:
-    _stemmer = PorterStemmer()
-    logger.info("PorterStemmer initialised")
-except Exception as e:
-    logger.error(f"PorterStemmer init failed: {e}")
-    raise
-
-# In-process cache for Haiku abbreviation expansions (survives for the lifetime
-# of the Railway process — cheap and avoids redundant API calls for common terms)
-_haiku_expansion_cache: Dict[str, List[str]] = {}
-
-
-def _is_likely_abbreviation(token: str) -> bool:
-    """
-    Returns True if a token looks like an industry abbreviation that Haiku
-    should try to expand. Heuristics:
-    - ≤ 4 chars (ac, msp, dui, pt, etc.)
-    - Mixed alphanumeric like 4wd, b2b, b2c
-    Already-known stopwords and city words are filtered before this is called.
-    """
-    if len(token) <= 4:
-        return True
-    if re.match(r'^[a-z0-9]+$', token) and any(c.isdigit() for c in token):
-        return True
-    return False
-
-
-async def _haiku_expand_abbreviations(tokens: List[str]) -> Dict[str, List[str]]:
-    """
-    Sends a batch of suspected abbreviations to Claude Haiku and returns a
-    dict mapping each token → up to 3 expanded forms (lowercase).
-    Returns {} if ANTHROPIC_API_KEY is not set or call fails.
-    Only non-empty lists are included for real abbreviations; complete words
-    get an empty list which is then omitted from the returned dict.
-    """
-    if not tokens or not ANTHROPIC_API_KEY:
-        return {}
-
-    import anthropic
-    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-
-    terms_str = ", ".join(f'"{t}"' for t in tokens)
-    prompt = (
-        "You are a local SEO specialist.\n"
-        "The following terms were extracted from a local service keyword.\n"
-        "For each term, if it looks like an industry abbreviation or short form, "
-        "list up to 3 common full-form alternatives that would appear in a "
-        "business's page titles, H1s, or URLs.\n"
-        "If the term is already a complete, common English word (not an abbreviation), "
-        "return an empty list for it.\n\n"
-        f"Terms: {terms_str}\n\n"
-        "Respond with ONLY valid JSON in this exact format:\n"
-        '{"term1": ["expansion1", "expansion2"], "term2": [], ...}\n\n'
-        "Examples:\n"
-        '- "ac" → ["air conditioning", "air conditioner", "cooling"]\n'
-        '- "msp" → ["managed service provider", "managed services", "it services"]\n'
-        '- "dui" → ["drunk driving", "dui defense", "driving under the influence"]\n'
-        '- "hvls" → ["high volume low speed fans", "industrial fans", "warehouse fans"]\n'
-        '- "repair" → []  (already a complete word)\n'
-        '- "plumber" → []  (already a complete word)'
-    )
-
-    try:
-        response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = response.content[0].text.strip()
-        # Strip markdown code fences if Haiku wrapped the JSON
-        raw = re.sub(r'^```(?:json)?\s*', '', raw)
-        raw = re.sub(r'\s*```$', '', raw)
-        data = json.loads(raw)
-        return {
-            k.lower(): [str(x).lower() for x in v[:3]]
-            for k, v in data.items()
-            if isinstance(v, list) and v  # omit empty lists
-        }
-    except Exception as e:
-        logger.warning(f"Haiku abbreviation expansion failed: {e}")
-        return {}
-
-
 # ── Request / Response models ─────────────────────────────────────────────────
 
 class AnalysisRequest(BaseModel):
     keyword: str
-    location: str                        # e.g. "Anaheim,California,United States"
-    location_code: Optional[int] = None  # DataForSEO location_code — preferred over location name
+    location: str                        # e.g. "Anaheim, California, United States"
     urls: Optional[List[str]] = None     # override SERP lookup — pass URLs directly
 
 
@@ -313,121 +167,67 @@ class AnalysisResponse(BaseModel):
 
 # ── Step 1: DataForSEO — fetch top organic SERP URLs ─────────────────────────
 
-def _make_dataforseo_credentials() -> str:
-    return base64.b64encode(
+async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient) -> List[str]:
+    """
+    Calls DataForSEO organic live/advanced to get the top SERP_RESULT_COUNT
+    organic URLs for keyword + location. Filters out skip-listed domains and
+    non-HTML resources. Returns [] on any error.
+    """
+    if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
+        logger.warning("DataForSEO credentials not set — skipping SERP fetch")
+        return []
+
+    credentials = base64.b64encode(
         f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
     ).decode()
 
-def _normalize_location(location: str) -> str:
-    """Ensure spaces after commas: 'Anaheim,California,United States' → 'Anaheim, California, United States'"""
-    return ", ".join(p.strip() for p in location.split(","))
-
-async def _get_location_code(location_name: str, client: httpx.AsyncClient) -> int | None:
-    """
-    Resolves a location name to a DataForSEO location_code.
-    Uses an in-process cache to avoid repeated calls.
-    """
-    if location_name in _location_code_cache:
-        return _location_code_cache[location_name]
-    try:
-        response = await client.get(
-            DATAFORSEO_LOCATIONS_ENDPOINT,
-            headers={"Authorization": f"Basic {_make_dataforseo_credentials()}"},
-            timeout=30.0,
-        )
-        response.raise_for_status()
-        data = response.json()
-        tasks = data.get("tasks") or []
-        if not tasks:
-            logger.warning(f"Location code lookup: no tasks in response. Status: {data.get('status_code')} {data.get('status_message')}")
-            return None
-        result_list = tasks[0].get("result") or []
-        logger.info(f"Location code lookup: got {len(result_list)} locations from DataForSEO")
-        for item in result_list:
-            name = item.get("location_name", "")
-            code = item.get("location_code")
-            if code:
-                _location_code_cache[name] = code
-        result = _location_code_cache.get(location_name)
-        logger.info(f"Location code lookup: '{location_name}' → {result}")
-        return result
-    except Exception as e:
-        logger.warning(f"Location code lookup failed: {e}")
-        return None
-
-async def _call_dataforseo(keyword: str, serp_location: str, client: httpx.AsyncClient, location_code: int | None = None) -> dict:
-    """Raw DataForSEO call — returns the full response dict or raises on HTTP error."""
-    location_field = {"location_code": location_code} if location_code else {"location_name": serp_location}
     payload = [{
         "keyword": keyword,
-        **location_field,
+        "location_name": location,
         "language_name": "English",
         "depth": SERP_RESULT_COUNT,
         "se_domain": "google.com",
     }]
-    response = await client.post(
-        DATAFORSEO_ENDPOINT,
-        headers={
-            "Authorization": f"Basic {_make_dataforseo_credentials()}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=30.0,
-    )
-    response.raise_for_status()
-    return response.json()
-
-async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient, location_code: int | None = None) -> tuple[List[str], str | None]:
-    """
-    Calls DataForSEO and returns (urls, error_detail).
-    error_detail is None on success, a string describing the failure otherwise.
-    Prefers location_code (from Supabase) over location_name string matching.
-    """
-    if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
-        return [], "DataForSEO credentials not configured"
-
-    serp_location = _normalize_location(location)
-    if not location_code:
-        location_code = await _get_location_code(serp_location, client)
-    logger.info(f"Calling DataForSEO: keyword='{keyword}' location='{serp_location}' code={location_code}")
 
     try:
-        data = await _call_dataforseo(keyword, serp_location, client, location_code)
+        response = await client.post(
+            DATAFORSEO_ENDPOINT,
+            headers={
+                "Authorization": f"Basic {credentials}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        urls = []
+        for task in (data.get("tasks") or []):
+            for result in (task.get("result") or []):
+                for item in (result.get("items") or []):
+                    if item.get("type") != "organic":
+                        continue
+                    url = item.get("url", "")
+                    if not url:
+                        continue
+                    # Skip non-HTML extensions
+                    if re.search(r'\.(pdf|docx?|xlsx?|pptx?|zip)$', url, re.I):
+                        continue
+                    # Skip blocklisted domains
+                    domain = re.sub(r'^www\.', '', httpx.URL(url).host)
+                    if any(domain == d or domain.endswith('.' + d) for d in SKIP_DOMAINS):
+                        continue
+                    urls.append(url)
+                    if len(urls) >= SERP_RESULT_COUNT:
+                        break
+
+        logger.info(f"DataForSEO returned {len(urls)} usable URLs for '{keyword}'")
+        return urls
+
     except Exception as e:
-        logger.warning(f"DataForSEO HTTP error: {e}")
-        return [], f"DataForSEO request failed: {e}"
-
-    urls = []
-    for task in (data.get("tasks") or []):
-        task_status = task.get("status_message", "")
-        task_code = task.get("status_code", 0)
-        logger.info(f"DataForSEO task status: {task_code} {task_status}")
-        if task_code != 20000:
-            error = f"DataForSEO error {task_code}: {task_status}"
-            logger.warning(error)
-            return [], error
-        for result in (task.get("result") or []):
-            item_count = len(result.get("items") or [])
-            se_count = result.get("se_results_count", "?")
-            logger.info(f"DataForSEO items={item_count} se_results_count={se_count}")
-            for item in (result.get("items") or []):
-                if item.get("type") != "organic":
-                    continue
-                url = item.get("url", "")
-                if not url:
-                    continue
-                if re.search(r'\.(pdf|docx?|xlsx?|pptx?|zip)$', url, re.I):
-                    continue
-                domain = re.sub(r'^www\.', '', httpx.URL(url).host)
-                if any(domain == d or domain.endswith('.' + d) for d in SKIP_DOMAINS):
-                    logger.info(f"Skipping blocklisted domain: {domain}")
-                    continue
-                urls.append(url)
-                if len(urls) >= SERP_RESULT_COUNT:
-                    break
-
-    logger.info(f"fetch_serp_urls: {len(urls)} usable URLs")
-    return urls, None
+        logger.warning(f"DataForSEO error: {e}")
+        return []
 
 
 # ── Step 2: ScrapeOwl — fetch raw HTML for each URL ──────────────────────────
@@ -711,41 +511,6 @@ async def get_google_entities(
     return results
 
 
-# ── Debug endpoint (temporary) ────────────────────────────────────────────────
-
-@app.get('/debug-dataforseo')
-async def debug_dataforseo(keyword: str, location: str):
-    """Returns raw DataForSEO response for debugging. Remove before production."""
-    if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
-        return {"error": "DataForSEO credentials not set"}
-    serp_location = _normalize_location(location)
-    async with httpx.AsyncClient() as client:
-        location_code = await _get_location_code(serp_location, client)
-        logger.info(f"Debug: resolved '{serp_location}' → code {location_code}")
-        try:
-            data = await _call_dataforseo(keyword, serp_location, client, location_code)
-        except Exception as e:
-            return {"error": str(e), "location_sent": serp_location, "location_code": location_code}
-    tasks = data.get("tasks") or []
-    summary = []
-    for task in tasks:
-        task_info = {
-            "status_code": task.get("status_code"),
-            "status_message": task.get("status_message"),
-            "results": []
-        }
-        for result in (task.get("result") or []):
-            items = result.get("items") or []
-            organic = [i.get("url") for i in items if i.get("type") == "organic"]
-            task_info["results"].append({
-                "se_results_count": result.get("se_results_count"),
-                "items_total": len(items),
-                "organic_urls": organic[:20],
-            })
-        summary.append(task_info)
-    return {"location_sent": serp_location, "tasks": summary}
-
-
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
 @app.post('/analyze', response_model=AnalysisResponse, dependencies=[Depends(verify_api_key)])
@@ -765,11 +530,9 @@ async def analyze(request: Request, body: AnalysisRequest):
         logger.info(f"Using {len(urls)} manually provided URLs")
     else:
         async with httpx.AsyncClient() as client:
-            urls, err = await fetch_serp_urls(body.keyword, body.location, client, body.location_code)
-        if err:
-            raise HTTPException(status_code=502, detail=err)
+            urls = await fetch_serp_urls(body.keyword, body.location, client)
         if not urls:
-            raise HTTPException(status_code=502, detail="DataForSEO returned results but all URLs were filtered (blocklisted domains or non-HTML)")
+            raise HTTPException(status_code=502, detail="DataForSEO returned no usable URLs")
 
     # Step 2: scrape
     pages = await scrape_urls(urls)
@@ -813,278 +576,6 @@ async def health():
     return {'status': 'ok'}
 
 
-# ── Keyword classifier ────────────────────────────────────────────────────────
-
-class ClassifyKeywordRequest(BaseModel):
-    keyword: str
-    location: str   # e.g. "Anaheim, California, United States"
-
-
-class ClassifyKeywordResponse(BaseModel):
-    intent: str                              # "local" | "service_only"
-    city: str                                # lowercase city extracted from location
-    raw_service_terms: List[str]             # tokens after city + stopword removal
-    match_words: List[str]                   # single words — use \b word-boundary matching
-    match_phrases: List[str]                 # multi-word phrases — use substring matching
-    haiku_expansions: Dict[str, List[str]]   # unknown abbrevs → Haiku suggestions (need user confirmation)
-
-
-@app.post('/classify-keyword', response_model=ClassifyKeywordResponse, dependencies=[Depends(verify_api_key)])
-@limiter.limit("60/minute")
-async def classify_keyword_endpoint(request: Request, body: ClassifyKeywordRequest):
-    """
-    Extracts service terms from a keyword and expands abbreviations/synonyms so
-    the frontend can find matching pages regardless of how the page titles phrase
-    the same concept (e.g. "AC" vs "Air Conditioning" vs "HVAC").
-
-    Steps:
-    1. Detect intent: local (city in keyword or proximity signal) vs service-only
-    2. Tokenise keyword; identify and expand abbreviations before stopword removal
-    3. For tokens in SERVICE_ABBREVIATION_MAP → expand immediately (no confirmation needed)
-    4. For tokens that look like unknown abbreviations → ask Haiku (cached), return in
-       haiku_expansions so frontend can confirm/edit before applying
-    5. Porter-stem known terms and collect single-word + multi-word phrase buckets
-    """
-    kw = body.keyword.lower().strip()
-    city = body.location.split(",")[0].strip().lower()
-    city_words = [w for w in city.split() if w]
-
-    # Intent detection
-    city_in_kw = any(
-        re.search(r'\b' + re.escape(w) + r'\b', kw)
-        for w in city_words if len(w) > 2
-    )
-    proximity = any(s in kw for s in NEAR_ME_SIGNALS)
-    intent = "local" if (city_in_kw or proximity) else "service_only"
-
-    city_word_set = set(city_words)
-
-    # Tokenise: keep letters, digits, slashes (for "a/c")
-    tokens = re.findall(r'[a-z][a-z0-9/]*', kw)
-
-    raw_service_terms: List[str] = []
-    abbrev_expanded_words: List[str] = []
-    abbrev_expanded_phrases: List[str] = []
-    unknown_abbrev_candidates: List[str] = []   # go to Haiku
-
-    for tok in tokens:
-        if tok in city_word_set:
-            continue
-        if tok in SERVICE_ABBREVIATION_MAP:
-            raw_service_terms.append(tok)
-            for exp in SERVICE_ABBREVIATION_MAP[tok]:
-                if " " in exp:
-                    abbrev_expanded_phrases.append(exp)
-                else:
-                    abbrev_expanded_words.append(exp)
-        elif tok not in STOP_WORDS:
-            raw_service_terms.append(tok)
-            if _is_likely_abbreviation(tok):
-                unknown_abbrev_candidates.append(tok)
-
-    # Build match_words + match_phrases from known terms (static map + stems)
-    match_words_set: set = set()
-    for term in raw_service_terms + abbrev_expanded_words:
-        match_words_set.add(term)
-        stemmed = _stemmer.stem(term)
-        if len(stemmed) >= 3:
-            match_words_set.add(stemmed)
-
-    match_phrases_set: set = set(abbrev_expanded_phrases)
-
-    # Haiku expansion for unknown abbreviation candidates
-    # Check cache first; only call Haiku for tokens we haven't seen before
-    haiku_expansions: Dict[str, List[str]] = {}
-    uncached = [t for t in unknown_abbrev_candidates if t not in _haiku_expansion_cache]
-    if uncached:
-        new_expansions = await _haiku_expand_abbreviations(uncached)
-        _haiku_expansion_cache.update({t: new_expansions.get(t, []) for t in uncached})
-
-    for tok in unknown_abbrev_candidates:
-        cached = _haiku_expansion_cache.get(tok, [])
-        if cached:
-            haiku_expansions[tok] = cached
-
-    return ClassifyKeywordResponse(
-        intent=intent,
-        city=city,
-        raw_service_terms=raw_service_terms,
-        match_words=sorted(match_words_set),
-        match_phrases=sorted(match_phrases_set),
-        haiku_expansions=haiku_expansions,
-    )
-
-
-# ── Existing page scorer ──────────────────────────────────────────────────────
-
-class ScorePageRequest(BaseModel):
-    url: str
-    keyword: str
-    city: str       # Just the city name, e.g. "Anaheim"
-    business_name: str = ""
-
-
-class ScorePageResponse(BaseModel):
-    url: str
-    title: str
-    h1: str
-    word_count: int
-    score: int      # 0–100
-    keyword_in_title: bool
-    city_in_title: bool
-    keyword_in_h1: bool
-    city_in_h1: bool
-    keyword_mentions: int
-    city_mentions: int
-    has_phone: bool
-    signals: List[dict]
-
-
-def compute_page_score(html: str, keyword: str, city: str) -> dict:
-    """
-    Lightweight signal check for a single page.
-    Returns a 0–100 score based on basic on-page SEO signals.
-    Total possible: 100 pts.
-    """
-    zones = extract_zones(html)
-
-    kw = keyword.lower().strip()
-    cy = city.lower().strip()
-
-    title  = zones["title"].lower()
-    h1     = zones["h1"].lower()
-    h2h3   = zones["h2_h3"].lower()
-    body   = zones["body"].lower()
-
-    word_count   = len(body.split())
-    kw_in_title  = kw in title
-    cy_in_title  = cy in title
-    kw_in_h1     = kw in h1
-    cy_in_h1     = cy in h1
-    kw_in_h2h3   = kw in h2h3
-    cy_in_h2h3   = cy in h2h3
-    kw_mentions  = body.count(kw)
-    cy_mentions  = body.count(cy)
-    has_phone    = bool(re.search(r'\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}', zones["body"]))
-    has_h2h3     = len(h2h3.strip()) > 30
-
-    score   = 0
-    signals = []
-
-    def sig(label: str, status: str, pts: int) -> int:
-        signals.append({"signal": label, "status": status, "points": pts})
-        return pts
-
-    # Title (20 pts)
-    score += sig("Keyword in title", "pass" if kw_in_title else "fail", 10 if kw_in_title else 0)
-    score += sig("City in title",    "pass" if cy_in_title else "fail", 10 if cy_in_title else 0)
-
-    # H1 (20 pts)
-    score += sig("Keyword in H1", "pass" if kw_in_h1 else "fail", 10 if kw_in_h1 else 0)
-    score += sig("City in H1",    "pass" if cy_in_h1 else "fail", 10 if cy_in_h1 else 0)
-
-    # H2/H3 (10 pts)
-    score += sig("Keyword in H2/H3", "pass" if kw_in_h2h3 else "fail", 5 if kw_in_h2h3 else 0)
-    score += sig("City in H2/H3",    "pass" if cy_in_h2h3 else "fail", 5 if cy_in_h2h3 else 0)
-
-    # Word count (15 pts)
-    if word_count >= 1500:
-        wc_pts, wc_status = 15, "pass"
-    elif word_count >= 800:
-        wc_pts, wc_status = 10, "partial"
-    elif word_count >= 400:
-        wc_pts, wc_status = 5, "partial"
-    else:
-        wc_pts, wc_status = 0, "fail"
-    score += sig(f"Word count ({word_count:,} words)", wc_status, wc_pts)
-
-    # City mentions (15 pts)
-    if cy_mentions >= 5:
-        cm_pts, cm_status = 15, "pass"
-    elif cy_mentions >= 3:
-        cm_pts, cm_status = 10, "partial"
-    elif cy_mentions >= 1:
-        cm_pts, cm_status = 5, "partial"
-    else:
-        cm_pts, cm_status = 0, "fail"
-    score += sig(f"City mentions ({cy_mentions}×)", cm_status, cm_pts)
-
-    # Keyword mentions (10 pts)
-    if kw_mentions >= 3:
-        km_pts, km_status = 10, "pass"
-    elif kw_mentions >= 1:
-        km_pts, km_status = 5, "partial"
-    else:
-        km_pts, km_status = 0, "fail"
-    score += sig(f"Keyword mentions ({kw_mentions}×)", km_status, km_pts)
-
-    # H2/H3 headings (5 pts)
-    score += sig("H2/H3 headings present", "pass" if has_h2h3 else "fail", 5 if has_h2h3 else 0)
-
-    # Phone number (5 pts)
-    score += sig("Phone number present", "pass" if has_phone else "fail", 5 if has_phone else 0)
-
-    return {
-        "title":           zones["title"],
-        "h1":              zones["h1"],
-        "word_count":      word_count,
-        "score":           score,
-        "keyword_in_title": kw_in_title,
-        "city_in_title":   cy_in_title,
-        "keyword_in_h1":   kw_in_h1,
-        "city_in_h1":      cy_in_h1,
-        "keyword_mentions": kw_mentions,
-        "city_mentions":   cy_mentions,
-        "has_phone":       has_phone,
-        "signals":         signals,
-    }
-
-
-@app.post('/score-existing-page', response_model=ScorePageResponse, dependencies=[Depends(verify_api_key)])
-@limiter.limit("20/minute")
-async def score_existing_page(request: Request, body: ScorePageRequest):
-    """
-    Scrapes one URL and returns a 0–100 on-page score against keyword + city.
-    Used to evaluate the business's best existing city+service page before
-    generating new content.
-    """
-    if not re.match(r'^https?://', body.url, re.I):
-        raise HTTPException(status_code=422, detail="URL must start with http:// or https://")
-
-    async with httpx.AsyncClient() as client:
-        html = await scrape_url(body.url, client)
-
-    if not html:
-        raise HTTPException(status_code=502, detail="Could not fetch page — ScrapeOwl returned no content")
-
-    result = compute_page_score(html, body.keyword, body.city)
-    return ScorePageResponse(url=body.url, **result)
-
-
-class SiteArchitectureRequest(BaseModel):
-    pages: List[dict]   # List of existing_page records from analyze-business
-
-
-class SiteArchitectureResponse(BaseModel):
-    missing_essential_pages: List[str]
-    page_type_summary: dict
-    total_pages_analyzed: int
-    recommendations: List[dict]
-    internal_linking_rules: dict
-
-
-@app.post('/analyze-site-architecture', response_model=SiteArchitectureResponse, dependencies=[Depends(verify_api_key)])
-@limiter.limit("20/minute")
-async def analyze_site_architecture_endpoint(request: Request, body: SiteArchitectureRequest):
-    """
-    Evaluates a list of existing_pages records against the Site Architecture SOP.
-    Returns URL structure issues, missing essential pages, page type summary,
-    internal linking rules, and actionable recommendations.
-    """
-    result = analyze_site_architecture(body.pages)
-    return SiteArchitectureResponse(**result)
-
-
 # ── Business Analysis: website crawl + ICP/differentiator extraction ──────────
 
 class BusinessAnalysisRequest(BaseModel):
@@ -1099,8 +590,7 @@ class BusinessAnalysisResponse(BaseModel):
     detected_icp: Optional[dict]
     differentiators: List[dict]
     pages_crawled: int
-    analysis_status: str            # "complete" | "partial" | "failed"
-    site_architecture: Optional[dict] = None  # SOP audit result
+    analysis_status: str   # "complete" | "partial" | "failed"
 
 
 class BrandVoiceRequest(BaseModel):
@@ -1152,14 +642,9 @@ SERVICE_WORDS = {
 }
 
 # First URL segment patterns that indicate blog/content/editorial pages
-# Media/press archive slugs — classified as 'media' type, distinct from blog
-MEDIA_SLUGS = {
-    'media', 'newsroom', 'press-room', 'press-releases', 'news-releases',
-}
-
 BLOG_SLUGS = {
     'blog','news','insights','articles','resources','resource','post','posts',
-    'updates','press','events','case-studies','whitepapers','guides',
+    'updates','press','media','events','case-studies','whitepapers','guides',
     'tips','podcast','webinars','newsletter','stories','learn','library',
     'knowledge-base','kb','forum','community','careers','jobs',
 }
@@ -1340,10 +825,6 @@ def classify_page_type(url: str, title: str = '', h1: str = '') -> dict:
     first = segments[0] if segments else ''
     path_words = set(re.split(r'[-_]', ' '.join(segments)))
 
-    # ── Media / press release pages ───────────────────────────────────────────
-    if first in MEDIA_SLUGS or (len(segments) > 1 and segments[0] in MEDIA_SLUGS):
-        return {'type': 'media', 'primary_service': None, 'primary_city': None}
-
     # ── Blog / content pages ──────────────────────────────────────────────────
     if first in BLOG_SLUGS or (len(segments) > 1 and segments[0] in BLOG_SLUGS):
         return {'type': 'blog', 'primary_service': None, 'primary_city': None}
@@ -1424,246 +905,15 @@ def classify_page_type(url: str, title: str = '', h1: str = '') -> dict:
     return {'type': page_type, 'primary_service': None, 'primary_city': None}
 
 
-# ── Site Architecture SOP — internal ruleset ──────────────────────────────────
-# Source: Site Architecture, URL Structure, and Internal Linking SOP (Nov 2024)
-# This encodes the agency SOP so every page analysis and site audit is SOP-aware.
-
-# Essential pages every site must have per SOP
-ESSENTIAL_PAGE_SLUGS: Dict[str, set] = {
-    'about':   {'about', 'about-us', 'our-story', 'who-we-are', 'our-company', 'our-team'},
-    'contact': {'contact', 'contact-us', 'get-in-touch', 'reach-us', 'get-a-quote'},
-    'privacy': {'privacy', 'privacy-policy', 'terms', 'terms-of-service', 'legal'},
-}
-
-# Internal linking rules per page type.
-# nav_footer = links required in site-wide navigation or footer.
-# body       = links that must appear in the page body content.
-INTERNAL_LINKING_RULES: Dict[str, Dict[str, List[str]]] = {
-    'home': {
-        'nav_footer': ['about', 'contact', 'privacy', 'top_level_service_pages',
-                       'top_level_location_pages', 'areas_we_serve', 'blog'],
-        'body':       ['each_service_page', 'each_location_page', 'contact'],
-    },
-    'about': {
-        'nav_footer': ['home', 'contact', 'privacy', 'top_level_service_pages',
-                       'areas_we_serve', 'blog'],
-        'body':       ['bio_pages', 'areas_we_serve', 'top_level_service_page'],
-    },
-    'contact': {
-        'nav_footer': ['home', 'about', 'privacy', 'top_level_service_pages',
-                       'areas_we_serve', 'blog'],
-        'body':       [],
-    },
-    'service': {
-        'nav_footer': ['home', 'about', 'contact', 'privacy', 'areas_we_serve', 'blog'],
-        'body':       ['subservices', 'contact', 'related_local_landing_pages', 'services_page'],
-    },
-    'location': {
-        'nav_footer': ['home', 'about', 'contact', 'privacy', 'top_level_service_pages',
-                       'areas_we_serve', 'blog'],
-        'body':       ['neighborhood_pages', 'poi_pages', 'related_local_landing_pages',
-                       'contact', 'areas_we_serve'],
-    },
-    'city_service': {
-        'nav_footer': ['home', 'about', 'contact', 'privacy', 'top_level_service_pages',
-                       'areas_we_serve', 'blog'],
-        'body':       ['parent_location_page', 'relevant_service_page',
-                       'relevant_subservice_page', 'contact'],
-    },
-    'subservice': {
-        'nav_footer': ['home', 'about', 'contact', 'privacy', 'top_level_service_pages',
-                       'areas_we_serve', 'blog'],
-        'body':       ['parent_service_page', 'contact',
-                       'related_hyper_specific_local_landing_pages'],
-    },
-    'neighborhood': {
-        'nav_footer': ['home', 'about', 'contact', 'privacy', 'top_level_service_pages',
-                       'areas_we_serve', 'blog'],
-        'body':       ['parent_location_page', 'related_neighborhoods', 'related_poi',
-                       'related_service'],
-    },
-    'blog': {
-        'nav_footer': ['home', 'about', 'contact', 'privacy', 'top_level_service_pages',
-                       'areas_we_serve', 'blog'],
-        'body':       ['related_blog_posts_in_silo', 'related_service_or_subservice'],
-    },
-    'areas_we_serve': {
-        'nav_footer': ['home', 'about', 'contact', 'privacy', 'top_level_service_pages',
-                       'blog'],
-        'body':       ['each_individual_location_page'],
-    },
-}
-
-
-def check_url_sop_compliance(url: str, page_type: str) -> dict:
-    """
-    Validates a URL against the Site Architecture SOP rules for its detected page type.
-
-    SOP URL structure expectations:
-      service      → /service/               (root-level, NOT geo-targeted)
-      location     → /location/              (root-level)
-      city_service → /location/service/      (2 segments, location FIRST)
-      blog         → /blog/post-name/        (nested under blog parent)
-
-    Returns { compliant, issues, expected_url_pattern }
-    """
-    import urllib.parse
-    path     = urllib.parse.urlparse(url).path.lower().rstrip('/')
-    segments = [s for s in path.split('/') if s]
-    depth    = len(segments)
-    issues: List[str] = []
-    expected_pattern: Optional[str] = None
-
-    if page_type == 'city_service':
-        expected_pattern = '/location/service/'
-        if depth == 1:
-            issues.append(
-                "Local landing page at root level — SOP requires /location/service/ structure"
-            )
-        elif depth == 2:
-            # Detect reversed order: /service/location/ instead of /location/service/
-            seg0_words = set(re.split(r'[-_]', segments[0]))
-            seg1_words = set(re.split(r'[-_]', segments[1]))
-            seg0_is_service = bool(seg0_words & SERVICE_WORDS)
-            seg1_has_geo    = bool(_STATE_ABBREV_PATTERN.search(segments[1]))
-            if seg0_is_service and seg1_has_geo:
-                issues.append(
-                    "URL appears reversed — SOP requires /location/service/, not /service/location/"
-                )
-        # depth >= 3 → could be /location/service/subservice/ — acceptable per SOP
-
-    elif page_type == 'service':
-        expected_pattern = '/service/'
-        # Service pages must NOT be geo-targeted in the URL
-        if _STATE_ABBREV_PATTERN.search(path):
-            issues.append(
-                "Top-level service page URL contains a geo signal (state abbreviation) — "
-                "SOP: service pages should not be geo-targeted; use /location/service/ for local pages"
-            )
-        if re.search(r'\b\d{5}\b', path):
-            issues.append(
-                "Top-level service page URL contains a zip code — service pages must not be geo-targeted"
-            )
-        if depth > 2:
-            issues.append(
-                f"Service page nested {depth} levels deep — SOP expects /service/ or /services/service/"
-            )
-
-    elif page_type == 'location':
-        expected_pattern = '/location/'
-        if depth > 2:
-            issues.append(
-                f"Location page nested {depth} levels deep — SOP expects /location/ at root level"
-            )
-
-    elif page_type == 'blog':
-        expected_pattern = '/blog/post-name/'
-        if depth == 1 and segments and segments[0] not in BLOG_SLUGS:
-            issues.append(
-                "Blog post at root level — SOP recommends nesting under /blog/post-name/"
-            )
-
-    return {
-        'compliant':            len(issues) == 0,
-        'issues':               issues,
-        'expected_url_pattern': expected_pattern,
-    }
-
-
-def analyze_site_architecture(pages: List[dict]) -> dict:
-    """
-    Evaluates a list of existing_pages records against the Site Architecture SOP.
-
-    Note: URL structure is intentionally NOT checked — client sites vary widely
-    and the SOP URL patterns are the ideal, not a compliance requirement.
-
-    Checks:
-    - Missing essential pages (about, contact, privacy)
-    - Presence of key page types (service, location, city_service)
-    - Actionable recommendations based on page type gaps
-
-    Returns a structured audit result included in business analysis responses.
-    """
-    import urllib.parse
-
-    found_essential: set = set()
-    page_type_counts: Dict[str, int] = {
-        'service': 0, 'location': 0, 'city_service': 0,
-        'blog': 0, 'media': 0, 'other': 0,
-    }
-
-    for page in pages:
-        url       = page.get('url', '')
-        page_type = page.get('page_type', 'other')
-
-        page_type_counts[page_type] = page_type_counts.get(page_type, 0) + 1
-
-        # Essential page detection via first URL path segment
-        path     = urllib.parse.urlparse(url).path.lower().rstrip('/')
-        segments = [s for s in path.split('/') if s]
-        first    = segments[0] if segments else ''
-        for essential, slugs in ESSENTIAL_PAGE_SLUGS.items():
-            if first in slugs:
-                found_essential.add(essential)
-
-    missing_essential = [e for e in ESSENTIAL_PAGE_SLUGS if e not in found_essential]
-
-    recommendations: List[dict] = []
-    if missing_essential:
-        recommendations.append({
-            'priority': 'high',
-            'type':     'missing_pages',
-            'message':  (
-                f"Missing essential pages: {', '.join(missing_essential)}. "
-                "Every site should have About, Contact, and Privacy pages."
-            ),
-        })
-    if page_type_counts['city_service'] == 0 and page_type_counts['location'] > 0:
-        recommendations.append({
-            'priority': 'medium',
-            'type':     'missing_local_landing_pages',
-            'message':  (
-                "Location pages found but no city+service local landing pages detected. "
-                "Create dedicated pages targeting each service+city combination."
-            ),
-        })
-    if page_type_counts['service'] == 0 and page_type_counts['city_service'] > 0:
-        recommendations.append({
-            'priority': 'medium',
-            'type':     'missing_service_pages',
-            'message':  (
-                "Local landing pages found but no top-level service pages detected. "
-                "Add non-geo-targeted service pages to build topical authority."
-            ),
-        })
-    if page_type_counts['location'] == 0 and page_type_counts['city_service'] > 0:
-        recommendations.append({
-            'priority': 'medium',
-            'type':     'missing_location_pages',
-            'message':  (
-                "Local landing pages found but no top-level location pages detected. "
-                "Add a dedicated page for each city served."
-            ),
-        })
-
-    return {
-        'missing_essential_pages': missing_essential,
-        'page_type_summary':       page_type_counts,
-        'total_pages_analyzed':    len(pages),
-        'recommendations':         recommendations,
-        'internal_linking_rules':  INTERNAL_LINKING_RULES,
-    }
-
-
 def _make_page_record(url: str, title: str = '', h1: str = '') -> dict:
     c = classify_page_type(url, title, h1)
     return {
-        'url':             url,
-        'title':           title[:200],
-        'h1':              h1[:200],
-        'page_type':       c['type'],
+        'url': url,
+        'title': title[:200],
+        'h1': h1[:200],
+        'page_type': c['type'],
         'primary_service': c['primary_service'],
-        'primary_city':    c['primary_city'],
+        'primary_city': c['primary_city'],
     }
 
 
@@ -2059,14 +1309,9 @@ async def analyze_business(request: Request, body: BusinessAnalysisRequest):
             body.gbp_categories,
         )
     except Exception as e:
-        logger.error(f"Business Anthropic error for {url}: {e}")
-        raise HTTPException(
-            status_code=502,
-            detail="Our AI analysis service encountered an error. Please try again — if the problem continues, contact ShowUP support."
-        )
+        raise HTTPException(status_code=502, detail=f"Anthropic analysis failed: {e}")
 
     status = 'complete' if pages else 'partial'
-    architecture = analyze_site_architecture(pages) if pages else None
 
     return BusinessAnalysisResponse(
         existing_pages=pages,
@@ -2074,7 +1319,6 @@ async def analyze_business(request: Request, body: BusinessAnalysisRequest):
         differentiators=llm_result.get('differentiators', []),
         pages_crawled=len(pages),
         analysis_status=status,
-        site_architecture=architecture,
     )
 
 
@@ -2330,10 +1574,9 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
                     detail=f"Your website returned a {probe.status_code} error. Check that the URL is correct and the site is live."
                 )
         except httpx.RequestError as e:
-            logger.warning(f"Brand voice probe error for {url}: {type(e).__name__}: {e}")
             raise HTTPException(
                 status_code=422,
-                detail="Your website couldn't be reached. Check that the URL is correct and your site is live."
+                detail=f"Your website couldn't be reached ({type(e).__name__}). Check that the URL is correct and your site is live."
             )
 
         selected = await _crawl_pages_for_brand_voice(url, client, max_pages=25)
@@ -2368,6 +1611,7 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
         )
 
     return BrandVoiceResponse(brand_voice=brand_voice, pages_sampled=pages_sampled)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Content Generation — Score, Generate, Reoptimize
@@ -2463,6 +1707,106 @@ def _serp_context(serp_analysis: Optional[dict]) -> str:
         parts.append("Related keywords to weave in: " +
                      ", ".join(k["term"] for k in body_kw))
     return "\n".join(parts)
+
+
+# ── /find-page-for-keyword ────────────────────────────────────────────────────
+
+class FindPageRequest(BaseModel):
+    website_url: str
+    keyword: str
+
+class FindPageResponse(BaseModel):
+    found: bool
+    page: Optional[dict] = None  # { url, title, h1 }
+
+@app.post('/find-page-for-keyword', response_model=FindPageResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("20/minute")
+async def find_page_for_keyword(request: Request, body: FindPageRequest):
+    """
+    Lightweight site scan: check if the business has a page targeting the keyword.
+    1. Discover URLs via sitemap (no per-page HTTP) or homepage nav fallback.
+    2. Sort by URL slug keyword score (higher = more keyword words in path).
+    3. Fetch top 20 pages concurrently and check title + H1 for keyword match.
+    Returns { found, page? }.
+    """
+    import urllib.parse
+
+    url = body.website_url.strip()
+    if not url.startswith(('http://', 'https://')):
+        url = f"https://{url}"
+
+    kw = body.keyword.lower().strip()
+    # Build keyword word list — filter stopwords and single-char tokens
+    kw_words = [w for w in re.split(r'[\W_]+', kw) if w and len(w) > 1 and w not in STOP_WORDS]
+    if not kw_words:
+        kw_words = [w for w in re.split(r'\s+', kw) if w]
+
+    parsed_base = urllib.parse.urlparse(url)
+    base_netloc = parsed_base.netloc
+
+    def _same_domain(u: str) -> bool:
+        try:
+            return urllib.parse.urlparse(u).netloc == base_netloc
+        except Exception:
+            return False
+
+    def _slug_score(u: str) -> int:
+        """Count how many keyword words appear in the URL path slug."""
+        path = urllib.parse.urlparse(u).path.lower()
+        slug_words = set(re.split(r'[\W/_-]+', path))
+        return sum(1 for w in kw_words if w in slug_words)
+
+    async def _check_page(u: str, client: httpx.AsyncClient) -> Optional[dict]:
+        try:
+            resp = await client.get(u, timeout=8.0)
+            if resp.status_code != 200:
+                return None
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            title_tag = soup.find('title')
+            h1_tag = soup.find('h1')
+            title_text = title_tag.get_text(strip=True) if title_tag else ''
+            h1_text = h1_tag.get_text(strip=True) if h1_tag else ''
+            combined_words = set(re.split(r'[\W]+', f"{title_text} {h1_text}".lower()))
+            if all(w in combined_words for w in kw_words):
+                return {'url': str(resp.url), 'title': title_text or u, 'h1': h1_text}
+        except Exception:
+            pass
+        return None
+
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=15.0,
+            headers=CRAWL_HEADERS,
+        ) as client:
+            # Discover site URLs
+            discovered = await _discover_via_sitemap(url, client)
+            if not discovered:
+                logger.info(f"find-page-for-keyword: no sitemap for {url} — trying nav")
+                discovered = await _discover_via_nav(url, client)
+
+            origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
+            all_urls = list(dict.fromkeys(
+                [origin] + [u for u in discovered if _same_domain(u)]
+            ))
+            logger.info(f"find-page-for-keyword: {len(all_urls)} URLs discovered for {url}")
+
+            # Sort: pages with more keyword words in URL slug come first
+            scored_urls = sorted(all_urls, key=_slug_score, reverse=True)
+            to_check = scored_urls[:20]
+
+            # Fetch pages concurrently and check title + H1
+            results = await asyncio.gather(*[_check_page(u, client) for u in to_check])
+            for res in results:
+                if res:
+                    logger.info(f"find-page-for-keyword: found match → {res['url']}")
+                    return FindPageResponse(found=True, page=res)
+
+    except Exception as e:
+        logger.warning(f"find-page-for-keyword error ({url}): {e}")
+
+    logger.info(f"find-page-for-keyword: no match found for keyword='{body.keyword}' on {url}")
+    return FindPageResponse(found=False)
 
 
 # ── /score-page ───────────────────────────────────────────────────────────────
