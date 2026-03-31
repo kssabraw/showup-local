@@ -146,6 +146,7 @@ SKIP_DOMAINS = {
 class AnalysisRequest(BaseModel):
     keyword: str
     location: str                        # e.g. "Anaheim, California, United States"
+    location_code: Optional[int] = None  # DataForSEO numeric location code (preferred)
     urls: Optional[List[str]] = None     # override SERP lookup — pass URLs directly
 
 
@@ -167,7 +168,7 @@ class AnalysisResponse(BaseModel):
 
 # ── Step 1: DataForSEO — fetch top organic SERP URLs ─────────────────────────
 
-async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient) -> List[str]:
+async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient, location_code: Optional[int] = None) -> List[str]:
     """
     Calls DataForSEO organic live/advanced to get the top SERP_RESULT_COUNT
     organic URLs for keyword + location. Filters out skip-listed domains and
@@ -181,9 +182,10 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
         f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
     ).decode()
 
+    loc_field = {"location_code": location_code} if location_code else {"location_name": location}
     payload = [{
         "keyword": keyword,
-        "location_name": location,
+        **loc_field,
         "language_name": "English",
         "depth": SERP_RESULT_COUNT,
         "se_domain": "google.com",
@@ -530,7 +532,7 @@ async def analyze(request: Request, body: AnalysisRequest):
         logger.info(f"Using {len(urls)} manually provided URLs")
     else:
         async with httpx.AsyncClient() as client:
-            urls = await fetch_serp_urls(body.keyword, body.location, client)
+            urls = await fetch_serp_urls(body.keyword, body.location, client, body.location_code)
         if not urls:
             raise HTTPException(status_code=502, detail="DataForSEO returned no usable URLs")
 
