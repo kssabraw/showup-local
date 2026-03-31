@@ -3,6 +3,7 @@ import os
 import logging
 import asyncio
 import base64
+import json
 
 # Configure logging to stderr so Railway captures it
 logging.basicConfig(
@@ -243,19 +244,22 @@ async def scrape_url(url: str, client: httpx.AsyncClient) -> Optional[str]:
     Returns None on failure so the pipeline continues with remaining pages.
     """
     try:
-        payload = {
+        payload = json.dumps({
             "api_key": SCRAPEOWL_API_KEY,
             "url": url,
-            "premium_proxies": True,
-            "country": "us",
             "json_response": True,
-        }
-        response = await client.post(SCRAPEOWL_ENDPOINT, json=payload, timeout=30.0)
+        })
+        response = await client.post(
+            SCRAPEOWL_ENDPOINT,
+            content=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30.0,
+        )
         if response.status_code != 200:
             logger.warning(f"ScrapeOwl HTTP {response.status_code} for {url}: {response.text[:200]}")
             return None
         data = response.json()
-        html = data.get("body") or data.get("html") or ""
+        html = data.get("html") or ""
         if len(html.strip()) < 200:
             logger.warning(f"Thin content ({len(html)} chars) for {url}")
             return None
