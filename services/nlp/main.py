@@ -1935,8 +1935,9 @@ async def _find_page_for_keyword_reuse(
     )
     _blog_slug = re.compile(
         r'/\d{4}/\d{2}/|/\d{4}-\d{2}-\d{2}[-_]|'
-        r'-(why|how|what|when|where|top-\d+|best-\d+|\d+-tips|\d+-ways|'
-        r'everything-you-need|ultimate-guide|beginners?-guide|complete-guide)-',
+        r'[/-](why|how|what|when|where|top-\d+|best-\d+|\d+-tips|\d+-ways|'
+        r'everything-you-need|ultimate-guide|expert-tips|must-know|'
+        r'beginners?-guide|complete-guide)-',
         re.IGNORECASE,
     )
 
@@ -2122,9 +2123,9 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
     _BLOG_SLUG_PATTERNS = re.compile(
         r'/\d{4}/\d{2}/|'                      # /2024/03/ date path
         r'/\d{4}-\d{2}-\d{2}[-_]|'             # /2024-03-15-title
-        r'-(why|how|what|when|where|top-\d+|'
+        r'[/-](why|how|what|when|where|top-\d+|'
         r'best-\d+|\d+-tips|\d+-ways|'
-        r'everything-you-need|ultimate-guide|'
+        r'everything-you-need|ultimate-guide|expert-tips|must-know|'
         r'beginners?-guide|complete-guide)-',
         re.IGNORECASE,
     )
