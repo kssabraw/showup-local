@@ -2019,6 +2019,7 @@ class GeneratePageRequest(BaseModel):
 class GeneratePageResponse(BaseModel):
     content_html: str
     schema_json: str
+    page_title: str
     token_usage: dict
 
 
@@ -2124,22 +2125,34 @@ ICP: {icp}
 
 OUTPUT FORMAT
 Return valid HTML only. No markdown. No explanations outside the HTML. Structure:
+<title>[SEE TITLE FORMULA BELOW]</title>
 <article>
   [13 sections as specified below]
 </article>
 Then on a NEW LINE after </article>, output the JSON-LD schema block starting with <script type="application/ld+json"> (3 schema blocks in one script tag).
 
+TITLE TAG FORMULA (follow exactly — do not deviate):
+<title>[Power Word]! [Exact Match Keyword] | [Brand Name] | [Justification using entities] | [Additional persuasion + entities]</title>
+- Power Word: a single urgent/emotional word (e.g. Trusted, Fast, Expert, Certified, Local, Licensed)
+- Exact Match Keyword: the primary keyword verbatim
+- Brand Name: the business name
+- Justification: a short phrase using 1–2 Google entities that validates the claim (e.g. "Serving Anaheim Hills & Orange County")
+- Additional persuasion: a benefit or proof point that includes 1–2 more entities (e.g. "Same-Day Response, No Overtime Fees")
+- Total title length: 60–70 characters ideal, 80 max
+
 MANDATORY 13-SECTION STRUCTURE
 
 Section 1 — Intro / Direct Answer Block (100–150 words)
 <section id="intro">
-  <h1>[Primary keyword variation] in {city} | [Differentiator]</h1>
+  <h1>[Exact Match Keyword] + [1–2 entities that reinforce location or service scope]</h1>
+  H1 FORMULA: Write the primary keyword verbatim, then append relevant entities naturally (e.g. "Emergency Plumber Anaheim — Serving Anaheim Hills, Yorba Linda & Orange County")
   <p>[Brand] provides [service] to [city] — [primary differentiator stated in first sentence]. [2–3 sentences: service confirmation, availability, phone CTA.] [Close with direct service claim + city.]</p>
 </section>
 
 Section 2 — USP / Value Proposition (150–200 words)
 <section id="usp">
-  <h2>[Outcome-focused H2 — not "Our Services"]</h2>
+  <h2>[Single sentence combining: exact match keyword + persuasion/outcome + 1–2 entities]</h2>
+  FIRST H2 FORMULA: Must be a complete sentence (not a fragment) that includes the primary keyword, a persuasive outcome or differentiator, and 1–2 entities. (e.g. "When Anaheim Homeowners Need an Emergency Plumber Fast, [Brand] Delivers Same-Day Repairs Across Orange County")
   [Min 3 differentiators with mechanisms. One contrast statement. One proof signal.]
 </section>
 
@@ -2229,6 +2242,13 @@ HARD RULES — NEVER:
         raw = re.sub(r'\n?```$', '', raw)
         raw = raw.strip()
 
+    # Extract <title> tag
+    title_match = re.search(r'<title>(.*?)</title>', raw, re.IGNORECASE | re.DOTALL)
+    page_title = title_match.group(1).strip() if title_match else ""
+    if title_match:
+        raw = raw[:title_match.start()] + raw[title_match.end():]
+        raw = raw.strip()
+
     # Split content_html from schema_json
     schema_split = raw.find('<script type="application/ld+json">')
     if schema_split != -1:
@@ -2241,6 +2261,7 @@ HARD RULES — NEVER:
     return GeneratePageResponse(
         content_html=content_html,
         schema_json=schema_json,
+        page_title=page_title,
         token_usage=token_rec,
     )
 

@@ -43,7 +43,7 @@ type CheckState =
 type ViewState =
   | { kind: "form" }
   | { kind: "score"; pageMatch: { url: string; title: string; h1?: string }; serpAnalysis: AnalysisResult; initialScoreResult: any }
-  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; tokenUsage: any }
+  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; tokenUsage: any }
   | { kind: "analysis"; result: AnalysisResult };
 
 const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; defaultLocation?: string }) => {
@@ -294,7 +294,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
       }
       const genData = await genRes.json();
       await saveTokenUsage(genData.token_usage);
-      setView({ kind: "generated", mode: "generate", contentHtml: genData.content_html, schemaJson: genData.schema_json, tokenUsage: genData.token_usage });
+      setView({ kind: "generated", mode: "generate", contentHtml: genData.content_html, schemaJson: genData.schema_json, pageTitle: genData.page_title ?? "", tokenUsage: genData.token_usage });
     } catch (e: any) {
       setError(e.message || "Something went wrong");
       setCheckState({ status: "not_found" });
@@ -325,7 +325,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         initialScoreResult={view.initialScoreResult}
         onBack={() => setView({ kind: "form" })}
         onGenerated={(result, mode) =>
-          setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, tokenUsage: result.token_usage })
+          setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "", tokenUsage: result.token_usage })
         }
       />
     );
@@ -339,6 +339,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         mode={view.mode}
         contentHtml={view.contentHtml}
         schemaJson={view.schemaJson}
+        pageTitle={view.pageTitle}
         tokenUsage={view.tokenUsage}
         businessId={selectedBusinessId}
         businessName={selectedBusiness?.business_name || ""}

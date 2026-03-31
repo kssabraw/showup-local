@@ -9,6 +9,7 @@ interface Props {
   mode: "generate" | "reoptimize";
   contentHtml: string;
   schemaJson: string;
+  pageTitle: string;
   tokenUsage: Record<string, any>;
   businessId: string;
   businessName: string;
@@ -17,7 +18,7 @@ interface Props {
 }
 
 export default function GeneratedPageView({
-  keyword, location, mode, contentHtml, schemaJson,
+  keyword, location, mode, contentHtml, schemaJson, pageTitle,
   tokenUsage, businessId, businessName, onBack, onNewPage,
 }: Props) {
   const [copiedHtml, setCopiedHtml] = useState(false);
@@ -106,12 +107,20 @@ export default function GeneratedPageView({
 
       {/* Preview tab */}
       {activeTab === "preview" && (
-        <div
-          className="bg-card rounded-xl border border-border p-8 prose prose-sm max-w-none
-                     prose-headings:text-foreground prose-p:text-foreground prose-li:text-foreground
-                     prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-p:mb-6"
-          dangerouslySetInnerHTML={{ __html: contentHtml }}
-        />
+        <div className="space-y-3">
+          {pageTitle && (
+            <div className="flex items-start gap-3 px-4 py-3 bg-muted/40 rounded-lg border border-border">
+              <span className="text-xs font-mono text-muted-foreground shrink-0 mt-0.5">&lt;title&gt;</span>
+              <span className="text-sm text-foreground">{pageTitle}</span>
+            </div>
+          )}
+          <div
+            className="bg-card rounded-xl border border-border p-8 prose prose-sm max-w-none
+                       prose-headings:text-foreground prose-p:text-foreground prose-li:text-foreground
+                       prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-p:mb-6"
+            dangerouslySetInnerHTML={{ __html: contentHtml }}
+          />
+        </div>
       )}
 
       {/* HTML tab */}
