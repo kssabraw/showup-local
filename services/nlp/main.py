@@ -2187,7 +2187,11 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             title_text = title_tag.get_text(strip=True) if title_tag else ''
             h1_text = h1_tag.get_text(strip=True) if h1_tag else ''
             combined_words = set(re.split(r'[\W]+', f"{title_text} {h1_text}".lower()))
-            if all(_kw_match(w, combined_words) for w in kw_words):
+            matched = sum(1 for w in kw_words if _kw_match(w, combined_words))
+            # Require 75% of keyword words to match (so "company"/"contractor" etc.
+            # not appearing in a service page title doesn't block a valid match)
+            threshold = max(1, round(len(kw_words) * 0.75))
+            if matched >= threshold:
                 return {'url': str(resp.url), 'title': title_text or u, 'h1': h1_text,
                         'is_blog_post': _is_likely_blog_post(u)}
         except Exception:
@@ -2254,12 +2258,12 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                         max_tokens=64,
                         messages=[{"role": "user", "content": (
                             f"Keyword: \"{body.keyword}\"\n"
-                            f"Service: {service_words}\n"
                             f"Location: {location_context}\n\n"
-                            f"Pick the single best URL below that is a DEDICATED SERVICE PAGE targeting this service for this location.\n"
+                            f"Pick the single best URL below that is a DEDICATED SERVICE PAGE targeting this keyword for this location.\n"
                             f"Guidelines:\n"
                             f"{location_rule}"
-                            f"  - Prefer URLs with more keyword/service words in the slug\n"
+                            f"  - Business-type words in the keyword (company, contractor, professional, etc.) will NOT appear in URL slugs — ignore them when scoring slug relevance\n"
+                            f"  - Prefer URLs whose slug contains the core service concept (e.g. 'tree-service', 'tree-trimming') and optionally the location\n"
                             f"  - Reject blog posts, news, guides, how-to articles, about pages, homepages\n"
                             f"  - A near-match service page is better than no result — prefer the closest match over 0\n\n"
                             f"Reply with ONLY the number of the best URL, or 0 only if every URL is clearly a blog post or unrelated.\n\n"
