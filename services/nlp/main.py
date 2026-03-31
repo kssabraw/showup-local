@@ -1701,7 +1701,7 @@ def _parse_claude_json(text: str) -> dict:
     if text.startswith("```"):
         text = re.sub(r'^```(?:json)?\s*', '', text)
         text = re.sub(r'\s*```$', '', text.strip())
-    return json_lib.loads(text)
+    return json.loads(text)
 
 def compute_zone_targets(
     zone_buckets: Dict[str, List[str]],
