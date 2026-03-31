@@ -2186,7 +2186,17 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
 
             # Sort: pages with more keyword words in URL slug come first
             scored_urls = sorted(all_urls, key=_slug_score, reverse=True)
-            candidate_pool = scored_urls[:40]
+
+            # Pre-filter: only pass URLs that have at least one keyword word in the slug
+            # This removes noise (homepage, about, contact, etc.) so Haiku focuses on relevant candidates
+            scored_candidates = [(u, _slug_score(u)) for u in scored_urls]
+            relevant = [u for u, s in scored_candidates if s > 0]
+            # If nothing matches at all, fall back to top 20 by score
+            candidate_pool = relevant[:30] if relevant else scored_urls[:20]
+
+            logger.info(f"find-page-for-keyword: {len(candidate_pool)} relevant candidates for Haiku (from {len(all_urls)} total)")
+            for i, u in enumerate(candidate_pool[:10]):
+                logger.info(f"  candidate #{i+1}: {u}")
 
             # Use Haiku to pick the best matching URL from the candidate list
             haiku_pick: Optional[str] = None
@@ -2194,20 +2204,31 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                 try:
                     _ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
                     url_list_text = "\n".join(f"{i+1}. {u}" for i, u in enumerate(candidate_pool))
+                    kw_parts = body.keyword.strip()
                     _msg = await _ac.messages.create(
                         model="claude-haiku-4-5-20251001",
-                        max_tokens=128,
+                        max_tokens=64,
                         messages=[{"role": "user", "content": (
-                            f"Given the keyword \"{body.keyword}\", which URL below is the most likely dedicated service page for that keyword? "
-                            f"Prefer URLs whose slug contains the keyword words. Ignore blog posts, news, guides, or generic pages. "
-                            f"Reply with ONLY the number of the best URL, or 0 if none are a good match.\n\n{url_list_text}"
+                            f"Keyword: \"{kw_parts}\"\n\n"
+                            f"Pick the single best URL below that is a DEDICATED SERVICE PAGE for this exact keyword.\n"
+                            f"RULES — the ideal URL:\n"
+                            f"  1. Contains BOTH the service words AND the location words from the keyword in its slug\n"
+                            f"  2. Is a landing/service page, NOT a blog post, guide, about, home, or generic page\n"
+                            f"  3. More keyword words in the slug = better match\n\n"
+                            f"REJECT any URL that is a blog post (has: why-, how-, tips-, guide, news, blog, year/month in path).\n"
+                            f"REJECT any URL that is only partially relevant (has service words but NOT location words, or vice versa).\n\n"
+                            f"Reply with ONLY the number of the best URL, or 0 if none meet the criteria.\n\n"
+                            f"{url_list_text}"
                         )}],
                     )
                     raw_pick = _msg.content[0].text.strip()
+                    logger.info(f"find-page-for-keyword: Haiku raw response: {repr(raw_pick)}")
                     pick_num = int(re.search(r'\d+', raw_pick).group()) if re.search(r'\d+', raw_pick) else 0
                     if 1 <= pick_num <= len(candidate_pool):
                         haiku_pick = candidate_pool[pick_num - 1]
                         logger.info(f"find-page-for-keyword: Haiku picked #{pick_num} → {haiku_pick}")
+                    else:
+                        logger.info(f"find-page-for-keyword: Haiku returned 0 or out-of-range ({pick_num}), using regex fallback")
                 except Exception as _he:
                     logger.warning(f"find-page-for-keyword: Haiku selection failed ({_he}), falling back to regex")
 
