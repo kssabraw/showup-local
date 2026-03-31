@@ -4,6 +4,7 @@ import logging
 import asyncio
 import base64
 import json
+import re
 
 # Configure logging to stderr so Railway captures it
 logging.basicConfig(
@@ -2057,7 +2058,7 @@ Section 9 — Getting Started (150–200 words)
 Section 10 — Geographic / Local SEO Section (200–300 words)
 <section id="local">
   <h2>[City + service in heading]</h2>
-  [City + min 3 neighborhoods in sentence context (not just a list) + min 1 landmark + min 2 streets + zip codes (min 3). Generate real neighborhoods/landmarks/streets/zips for {city} from your knowledge if not provided. Coverage + response time.]
+  [City + min 3 neighborhoods in sentence context (not just a list) + min 1 landmark + min 2 streets + zip codes (min 3). Use only real, verifiable geographic details. If neighborhood/landmark/street/zip data is not provided in the business data above, include only what you are certain is accurate for {city}. Do not invent or guess street names, zip codes, or landmarks. Coverage + response time.]
 </section>
 
 Section 11 — CTA Block Tertiary (50–75 words — urgency-forward)
@@ -2083,7 +2084,8 @@ HARD RULES — NEVER:
 - Use "near me" literally in body content
 - Include placeholder text like [Insert here]
 - Fabricate reviews
-- Use vague differentiators ("trusted", "professional", "high quality") without a mechanism"""
+- Use vague differentiators ("trusted", "professional", "high quality") without a mechanism
+- Invent or guess phone numbers, addresses, hours, zip codes, street names, or landmarks not explicitly provided in the business data above"""
 
     try:
         msg = await client.messages.create(
@@ -2096,6 +2098,10 @@ HARD RULES — NEVER:
 
     token_rec = _token_record("generate-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
     raw = msg.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
+        raw = re.sub(r'\n?```$', '', raw)
+        raw = raw.strip()
 
     # Split content_html from schema_json
     schema_split = raw.find('<script type="application/ld+json">')
@@ -2202,6 +2208,10 @@ Return the complete rewritten page HTML only — no markdown, no explanations.""
 
     token_rec = _token_record("reoptimize-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
     raw = msg.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
+        raw = re.sub(r'\n?```$', '', raw)
+        raw = raw.strip()
 
     schema_split = raw.find('<script type="application/ld+json">')
     if schema_split != -1:
