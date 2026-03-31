@@ -2187,16 +2187,24 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             # Sort: pages with more keyword words in URL slug come first
             scored_urls = sorted(all_urls, key=_slug_score, reverse=True)
 
-            # Pre-filter: only pass URLs that have at least one keyword word in the slug
-            # This removes noise (homepage, about, contact, etc.) so Haiku focuses on relevant candidates
-            scored_candidates = [(u, _slug_score(u)) for u in scored_urls]
-            relevant = [u for u, s in scored_candidates if s > 0]
-            # If nothing matches at all, fall back to top 20 by score
-            candidate_pool = relevant[:30] if relevant else scored_urls[:20]
+            # Build candidate pool:
+            # Primary: URLs with ≥1 keyword word in slug (fuzzy near-matches included)
+            # Pad with top slug-scored URLs so Haiku always has something to work with
+            scored_pairs = [(u, _slug_score(u)) for u in scored_urls]
+            relevant = [u for u, s in scored_pairs if s > 0]
+            # Always include top 10 by slug score as a fallback in case relevant is small
+            top_fallback = [u for u, _ in scored_pairs[:10] if u not in relevant]
+            candidate_pool = (relevant + top_fallback)[:30]
 
-            logger.info(f"find-page-for-keyword: {len(candidate_pool)} relevant candidates for Haiku (from {len(all_urls)} total)")
-            for i, u in enumerate(candidate_pool[:10]):
-                logger.info(f"  candidate #{i+1}: {u}")
+            logger.info(f"find-page-for-keyword: {len(candidate_pool)} candidates for Haiku ({len(relevant)} relevant, {len(top_fallback)} fallback, from {len(all_urls)} total)")
+            for i, u in enumerate(candidate_pool[:15]):
+                logger.info(f"  candidate #{i+1} (score={scored_pairs[scored_urls.index(u)][1]}): {u}")
+
+            # Detect whether keyword contains a location component
+            # Common geo indicators: state names, directional words, or multi-word keywords
+            # Simple heuristic: if any kw_word is >= 5 chars and NOT in common service words,
+            # it may be a location. We let Haiku figure it out from context.
+            has_location_hint = len(kw_words) >= 3  # keywords with 3+ words often have a location
 
             # Use Haiku to pick the best matching URL from the candidate list
             haiku_pick: Optional[str] = None
@@ -2204,20 +2212,25 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                 try:
                     _ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
                     url_list_text = "\n".join(f"{i+1}. {u}" for i, u in enumerate(candidate_pool))
-                    kw_parts = body.keyword.strip()
+                    location_rule = (
+                        "  - If the keyword includes a location (city/area), strongly prefer URLs that contain both the service AND location words in the slug.\n"
+                        "  - If the keyword has no location, just find the best service page for the service type.\n"
+                    ) if has_location_hint else (
+                        "  - Find the best dedicated service page for this service type.\n"
+                    )
                     _msg = await _ac.messages.create(
                         model="claude-haiku-4-5-20251001",
                         max_tokens=64,
                         messages=[{"role": "user", "content": (
-                            f"Keyword: \"{kw_parts}\"\n\n"
-                            f"Pick the single best URL below that is a DEDICATED SERVICE PAGE for this exact keyword.\n"
-                            f"RULES — the ideal URL:\n"
-                            f"  1. Contains BOTH the service words AND the location words from the keyword in its slug\n"
-                            f"  2. Is a landing/service page, NOT a blog post, guide, about, home, or generic page\n"
-                            f"  3. More keyword words in the slug = better match\n\n"
-                            f"REJECT any URL that is a blog post (has: why-, how-, tips-, guide, news, blog, year/month in path).\n"
-                            f"REJECT any URL that is only partially relevant (has service words but NOT location words, or vice versa).\n\n"
-                            f"Reply with ONLY the number of the best URL, or 0 if none meet the criteria.\n\n"
+                            f"Keyword: \"{body.keyword}\"\n"
+                            f"Service words: {kw_words}\n\n"
+                            f"Pick the single best URL below that is a DEDICATED SERVICE PAGE for this keyword.\n"
+                            f"Guidelines:\n"
+                            f"{location_rule}"
+                            f"  - Prefer URLs with more keyword words in the slug\n"
+                            f"  - Reject blog posts, news, guides, how-to articles, about pages, homepages\n"
+                            f"  - A near-match service page is better than no result — prefer the closest match over 0\n\n"
+                            f"Reply with ONLY the number of the best URL, or 0 only if every URL is clearly a blog post or unrelated.\n\n"
                             f"{url_list_text}"
                         )}],
                     )
