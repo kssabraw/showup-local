@@ -290,7 +290,8 @@ async def _haiku_expand_abbreviations(tokens: List[str]) -> Dict[str, List[str]]
 
 class AnalysisRequest(BaseModel):
     keyword: str
-    location: str                        # e.g. "Anaheim, California, United States"
+    location: str                        # e.g. "Anaheim,California,United States"
+    location_code: Optional[int] = None  # DataForSEO location_code — preferred over location name
     urls: Optional[List[str]] = None     # override SERP lookup — pass URLs directly
 
 
@@ -376,16 +377,18 @@ async def _call_dataforseo(keyword: str, serp_location: str, client: httpx.Async
     response.raise_for_status()
     return response.json()
 
-async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient) -> tuple[List[str], str | None]:
+async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient, location_code: int | None = None) -> tuple[List[str], str | None]:
     """
     Calls DataForSEO and returns (urls, error_detail).
     error_detail is None on success, a string describing the failure otherwise.
+    Prefers location_code (from Supabase) over location_name string matching.
     """
     if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
         return [], "DataForSEO credentials not configured"
 
     serp_location = _normalize_location(location)
-    location_code = await _get_location_code(serp_location, client)
+    if not location_code:
+        location_code = await _get_location_code(serp_location, client)
     logger.info(f"Calling DataForSEO: keyword='{keyword}' location='{serp_location}' code={location_code}")
 
     try:
@@ -762,7 +765,7 @@ async def analyze(request: Request, body: AnalysisRequest):
         logger.info(f"Using {len(urls)} manually provided URLs")
     else:
         async with httpx.AsyncClient() as client:
-            urls, err = await fetch_serp_urls(body.keyword, body.location, client)
+            urls, err = await fetch_serp_urls(body.keyword, body.location, client, body.location_code)
         if err:
             raise HTTPException(status_code=502, detail=err)
         if not urls:

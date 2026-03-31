@@ -35,8 +35,9 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
   const [selectedBusinessId, setSelectedBusinessId] = useState("");
   const [keyword, setKeyword] = useState("");
   const [location, setLocation] = useState(defaultLocation);
+  const [locationCode, setLocationCode] = useState<number | null>(null);
   const [locationInput, setLocationInput] = useState(defaultLocation);
-  const [locationSuggestions, setLocationSuggestions] = useState<string[]>([]);
+  const [locationSuggestions, setLocationSuggestions] = useState<{ name: string; code: number }[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [locationLoading, setLocationLoading] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -78,7 +79,8 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
 
   const handleLocationInput = (value: string) => {
     setLocationInput(value);
-    setLocation(""); // unconfirmed until selected from list
+    setLocation("");
+    setLocationCode(null);
     setShowSuggestions(true);
     if (locationDebounce.current) clearTimeout(locationDebounce.current);
     if (value.length < 2) {
@@ -89,20 +91,21 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
       setLocationLoading(true);
       try {
         const { data } = await supabase
-          .from("Locations")
-          .select("location")
-          .ilike("location", `%${value}%`)
+          .from("location")
+          .select("location_name, location_code")
+          .ilike("location_name", `%${value}%`)
           .limit(8);
-        setLocationSuggestions((data || []).map((r: any) => r.location));
+        setLocationSuggestions((data || []).map((r: any) => ({ name: r.location_name, code: r.location_code })));
       } finally {
         setLocationLoading(false);
       }
     }, 200);
   };
 
-  const selectLocation = (loc: string) => {
-    setLocation(loc);
-    setLocationInput(loc);
+  const selectLocation = (loc: { name: string; code: number }) => {
+    setLocation(loc.name);
+    setLocationCode(loc.code);
+    setLocationInput(loc.name);
     setLocationSuggestions([]);
     setShowSuggestions(false);
   };
@@ -134,7 +137,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
       const response = await fetch(`${NLP_SERVICE_URL}/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-        body: JSON.stringify({ keyword: keyword.trim(), location: location.trim() }),
+        body: JSON.stringify({ keyword: keyword.trim(), location: location.trim(), location_code: locationCode }),
       });
 
       if (!response.ok) {
@@ -258,7 +261,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
             {location && (
               <button
                 type="button"
-                onMouseDown={() => { setLocation(""); setLocationInput(""); setLocationSuggestions([]); }}
+                onMouseDown={() => { setLocation(""); setLocationCode(null); setLocationInput(""); setLocationSuggestions([]); }}
                 className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
               >
                 ×
@@ -271,11 +274,11 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
               <ul className="absolute z-50 w-full mt-1 bg-popover border border-border rounded-lg shadow-lg max-h-56 overflow-y-auto">
                 {locationSuggestions.map((loc) => (
                   <li
-                    key={loc}
+                    key={loc.code}
                     onMouseDown={() => selectLocation(loc)}
                     className="px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground cursor-pointer"
                   >
-                    {loc}
+                    {loc.name}
                   </li>
                 ))}
               </ul>
