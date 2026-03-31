@@ -237,38 +237,33 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
 
 # ── Step 2: ScrapeOwl — fetch raw HTML for each URL ──────────────────────────
 
+SCRAPE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
+
 async def scrape_url(url: str, client: httpx.AsyncClient) -> Optional[str]:
     """
-    Fetches raw HTML for a single URL via ScrapeOwl.
+    Fetches raw HTML directly via httpx.
     Returns None on failure so the pipeline continues with remaining pages.
     """
-    if not SCRAPEOWL_API_KEY:
-        return None
-
     try:
-        response = await client.post(
-            SCRAPEOWL_ENDPOINT,
-            json={
-                "api_key": SCRAPEOWL_API_KEY,
-                "url": url,
-                "render_js": False,   # static HTML is enough for NLP; faster + cheaper
-            },
-            timeout=30.0,
-        )
+        response = await client.get(url, timeout=20.0, headers=SCRAPE_HEADERS)
         if response.status_code != 200:
-            logger.warning(f"ScrapeOwl HTTP {response.status_code} for {url}: {response.text[:300]}")
+            logger.warning(f"Scrape HTTP {response.status_code} for {url}")
             return None
-        data = response.json()
-        html = data.get("html") or data.get("body") or ""
-        if not html:
-            logger.warning(f"ScrapeOwl empty response for {url}. Keys: {list(data.keys())}")
-            return None
+        html = response.text
         if len(html.strip()) < 200:
-            logger.warning(f"ScrapeOwl returned thin content ({len(html)} chars) for {url}")
+            logger.warning(f"Thin content ({len(html)} chars) for {url}")
             return None
         return html
     except Exception as e:
-        logger.warning(f"ScrapeOwl error for {url}: {type(e).__name__}: {e}")
+        logger.warning(f"Scrape error for {url}: {type(e).__name__}: {e}")
         return None
 
 
