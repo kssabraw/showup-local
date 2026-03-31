@@ -2127,7 +2127,18 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
         kw_words = [w for w in re.split(r'[\W_]+', kw) if w and len(w) > 1 and w not in STOP_WORDS]
     if not kw_words:
         kw_words = [w for w in re.split(r'\s+', kw) if w]
-    logger.info(f"find-page-for-keyword: kw_words={kw_words} for keyword='{body.keyword}'")
+    # Extract location words from the business location field for boosted slug scoring.
+    # e.g. "Newport Beach, California" → ["newport", "beach", "california"]
+    # These are used to rank location-specific service pages higher (slug scoring only,
+    # not used in the keyword-match gate which is keyword-only).
+    loc_words: list[str] = []
+    if body.location:
+        loc_raw = body.location.lower()
+        loc_words = [w for w in re.split(r'[\W_]+', loc_raw) if w and len(w) > 2 and w not in STOP_WORDS]
+    # Combined score words: service words + location words
+    slug_score_words = kw_words + [w for w in loc_words if w not in kw_words]
+
+    logger.info(f"find-page-for-keyword: kw_words={kw_words} loc_words={loc_words} for keyword='{body.keyword}'")
 
     parsed_base = urllib.parse.urlparse(url)
     base_netloc = parsed_base.netloc
@@ -2139,10 +2150,16 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             return False
 
     def _slug_score(u: str) -> int:
-        """Count how many keyword words appear in the URL path slug (prefix-aware)."""
+        """Score URL slug: count service + location words present (prefix-aware).
+        Location words use half-weight so a non-geo URL isn't buried, but a
+        location-specific page always ranks above a generic service page."""
         path = urllib.parse.urlparse(u).path.lower()
         slug_words = set(re.split(r'[\W/_-]+', path))
-        return sum(1 for w in kw_words if any(sw == w or sw.startswith(w) or w.startswith(sw) for sw in slug_words if len(sw) >= 3))
+        def _matches(w: str) -> bool:
+            return any(sw == w or sw.startswith(w) or w.startswith(sw) for sw in slug_words if len(sw) >= 3)
+        service_hits = sum(2 for w in kw_words if _matches(w))
+        loc_hits = sum(1 for w in loc_words if _matches(w))
+        return service_hits + loc_hits
 
     def _kw_match(kw_word: str, page_words: set) -> bool:
         """Match a keyword word against page words, allowing plural/suffix variants."""
