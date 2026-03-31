@@ -332,12 +332,17 @@ async def _get_location_code(location_name: str, client: httpx.AsyncClient) -> i
         response = await client.get(
             DATAFORSEO_LOCATIONS_ENDPOINT,
             headers={"Authorization": f"Basic {_make_dataforseo_credentials()}"},
-            params={"country": "United States"},
-            timeout=15.0,
+            timeout=30.0,
         )
         response.raise_for_status()
         data = response.json()
-        for item in (data.get("tasks") or [{}])[0].get("result") or []:
+        tasks = data.get("tasks") or []
+        if not tasks:
+            logger.warning(f"Location code lookup: no tasks in response. Status: {data.get('status_code')} {data.get('status_message')}")
+            return None
+        result_list = tasks[0].get("result") or []
+        logger.info(f"Location code lookup: got {len(result_list)} locations from DataForSEO")
+        for item in result_list:
             name = item.get("location_name", "")
             code = item.get("location_code")
             if code:
@@ -713,6 +718,7 @@ async def debug_dataforseo(keyword: str, location: str):
     serp_location = _normalize_location(location)
     async with httpx.AsyncClient() as client:
         location_code = await _get_location_code(serp_location, client)
+        logger.info(f"Debug: resolved '{serp_location}' → code {location_code}")
         try:
             data = await _call_dataforseo(keyword, serp_location, client, location_code)
         except Exception as e:
