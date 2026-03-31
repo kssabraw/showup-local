@@ -2186,9 +2186,34 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
 
             # Sort: pages with more keyword words in URL slug come first
             scored_urls = sorted(all_urls, key=_slug_score, reverse=True)
-            to_check = scored_urls[:20]
+            candidate_pool = scored_urls[:40]
 
-            # Fetch pages concurrently and check title + H1
+            # Use Haiku to pick the best matching URL from the candidate list
+            haiku_pick: Optional[str] = None
+            if ANTHROPIC_API_KEY and candidate_pool:
+                try:
+                    _ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+                    url_list_text = "\n".join(f"{i+1}. {u}" for i, u in enumerate(candidate_pool))
+                    _msg = await _ac.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=128,
+                        messages=[{"role": "user", "content": (
+                            f"Given the keyword \"{body.keyword}\", which URL below is the most likely dedicated service page for that keyword? "
+                            f"Prefer URLs whose slug contains the keyword words. Ignore blog posts, news, guides, or generic pages. "
+                            f"Reply with ONLY the number of the best URL, or 0 if none are a good match.\n\n{url_list_text}"
+                        )}],
+                    )
+                    raw_pick = _msg.content[0].text.strip()
+                    pick_num = int(re.search(r'\d+', raw_pick).group()) if re.search(r'\d+', raw_pick) else 0
+                    if 1 <= pick_num <= len(candidate_pool):
+                        haiku_pick = candidate_pool[pick_num - 1]
+                        logger.info(f"find-page-for-keyword: Haiku picked #{pick_num} → {haiku_pick}")
+                except Exception as _he:
+                    logger.warning(f"find-page-for-keyword: Haiku selection failed ({_he}), falling back to regex")
+
+            # Fetch Haiku's pick first; fall back to top regex candidates if needed
+            to_check = ([haiku_pick] if haiku_pick else []) + [u for u in scored_urls[:20] if u != haiku_pick]
+
             results = await asyncio.gather(*[_check_page(u, client) for u in to_check])
             matches = [r for r in results if r]
             # Prefer service pages over blog posts
