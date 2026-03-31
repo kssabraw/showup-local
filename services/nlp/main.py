@@ -1777,7 +1777,8 @@ def _serp_context(serp_analysis: Optional[dict]) -> str:
         parts.append(f"\nGOOGLE ENTITIES (named entities from competitor pages):")
         if entity_target:
             parts.append(f"  Target: reference ~{entity_target} of these in body content (best competitor used {entity_target})")
-        ent_items = [f"{e['name']} (×{e['recommended_mentions']})" for e in entities[:20]]
+        top_entities = sorted(entities, key=lambda e: e["page_spread"], reverse=True)[:15]
+        ent_items = [f"{e['name']} (×{e['recommended_mentions']})" for e in top_entities]
         parts.append(f"  Entities: {', '.join(ent_items)}")
 
     if quadgrams:
