@@ -85,6 +85,10 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
 
   const [relatedPages, setRelatedPages] = useState<any[] | null>(null);
   const [relatedLoading, setRelatedLoading] = useState(false);
+  const [selectedForCreate, setSelectedForCreate] = useState<Set<string>>(new Set());
+  const [bulkCreating, setBulkCreating] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState<{ current: number; total: number; currentKw: string } | null>(null);
+  const [bulkDone, setBulkDone] = useState(0);
 
   const locationDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const locationContainerRef = useRef<HTMLDivElement>(null);
@@ -113,6 +117,8 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
   useEffect(() => {
     setCheckState({ status: "idle" });
     setRelatedPages(null);
+    setSelectedForCreate(new Set());
+    setBulkDone(0);
     setError("");
   }, [keyword, location, selectedBusinessId]);
 
@@ -393,6 +399,67 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
       setLoadingLabel("");
       if (elapsedRef.current) clearInterval(elapsedRef.current);
     }
+  };
+
+  // Creates + auto-saves a page for the given keyword without navigating away
+  const createAndSavePage = async (kw: string): Promise<boolean> => {
+    const b = businesses.find(b => b.id === selectedBusinessId);
+    if (!b) return false;
+    try {
+      const serpData = await runAnalysisFor(kw, location, locationCode);
+      const genRes = await fetch(`${NLP_SERVICE_URL}/generate-page`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
+        body: JSON.stringify({
+          keyword: kw.trim(),
+          location: location.trim(),
+          business_name: b.business_name,
+          gbp_category: b.gbp_category,
+          address: b.address,
+          phone: b.phone,
+          differentiators: b.differentiators,
+          brand_voice: b.brand_voice,
+          detected_icp: b.detected_icp,
+          serp_analysis: serpData,
+        }),
+      });
+      if (!genRes.ok) return false;
+      const genData = await genRes.json();
+      await supabase.from("generated_pages").upsert(
+        {
+          business_id: selectedBusinessId,
+          keyword: kw.trim(),
+          location: location.trim(),
+          mode: "generate",
+          page_title: genData.page_title ?? kw,
+          content_html: genData.content_html,
+          schema_json: genData.schema_json ?? null,
+        },
+        { onConflict: "business_id,keyword,location" }
+      );
+      await supabase.from("token_usage").insert({ ...genData.token_usage, business_id: selectedBusinessId, keyword: kw });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleBulkCreate = async () => {
+    const queue = Array.from(selectedForCreate);
+    if (!queue.length) return;
+    setBulkCreating(true);
+    setBulkDone(0);
+    let done = 0;
+    for (let i = 0; i < queue.length; i++) {
+      setBulkProgress({ current: i + 1, total: queue.length, currentKw: queue[i] });
+      const ok = await createAndSavePage(queue[i]);
+      if (ok) done++;
+    }
+    setBulkCreating(false);
+    setBulkProgress(null);
+    setBulkDone(done);
+    setSelectedForCreate(new Set());
+    fetchSavedPages();
   };
 
   const handleRelatedAction = async ({
@@ -691,60 +758,93 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
                 </div>
               </div>
             </div>
-            {/* Related pages panel for high_score state */}
-            {(relatedLoading || relatedPages) && (
-              <div className="bg-card border border-border rounded-xl overflow-hidden">
-                <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-                  <p className="text-sm font-semibold text-foreground">Related Pages</p>
-                  {relatedLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
-                </div>
-                {relatedLoading && !relatedPages && (
-                  <div className="px-4 py-3 text-xs text-muted-foreground">Discovering related keywords…</div>
-                )}
-                {relatedPages && relatedPages.length > 0 && (
-                  <div className="divide-y divide-border">
-                    {(["parents", "siblings", "children"] as const).map(group => {
-                      const items = relatedPages.filter(p => p.group === group);
-                      if (!items.length) return null;
-                      const groupLabel = group === "parents" ? "Parent Pages" : group === "siblings" ? "Sibling Pages" : "Child Pages";
-                      return (
-                        <div key={group}>
-                          <div className="px-4 py-2 bg-muted/30">
-                            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{groupLabel}</p>
-                          </div>
-                          {items.map((item: any) => (
-                            <div key={item.keyword} className="px-4 py-3 flex items-center gap-3">
-                              <div className="flex-1 min-w-0">
-                                <p className="text-sm font-medium text-foreground truncate">{item.keyword}</p>
-                                {item.status === "found" && item.url && (
-                                  <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground underline truncate block">{item.url}</a>
+            {/* Related pages panel for high_score state — same panel, shared state */}
+            {(relatedLoading || relatedPages) && (() => {
+              const missingItems = (relatedPages ?? []).filter(p => p.status === "missing");
+              const allMissingSelected = missingItems.length > 0 && missingItems.every(p => selectedForCreate.has(p.keyword));
+              return (
+                <div className="bg-card border border-border rounded-xl overflow-hidden">
+                  <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+                    <p className="text-sm font-semibold text-foreground">Related Pages</p>
+                    <div className="flex items-center gap-3">
+                      {relatedLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
+                      {!relatedLoading && missingItems.length > 0 && (
+                        <button className="text-xs text-accent underline"
+                          onClick={() => setSelectedForCreate(allMissingSelected ? new Set() : new Set(missingItems.map(p => p.keyword)))}>
+                          {allMissingSelected ? "Deselect all" : "Select all missing"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {relatedLoading && !relatedPages && (
+                    <div className="px-4 py-3 text-xs text-muted-foreground">Discovering related keywords…</div>
+                  )}
+                  {relatedPages && relatedPages.length > 0 && (
+                    <div className="divide-y divide-border">
+                      {(["parents", "siblings", "children"] as const).map(group => {
+                        const items = relatedPages.filter(p => p.group === group);
+                        if (!items.length) return null;
+                        const groupLabel = group === "parents" ? "Parent Pages" : group === "siblings" ? "Sibling Pages" : "Child Pages";
+                        return (
+                          <div key={group}>
+                            <div className="px-4 py-2 bg-muted/30">
+                              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{groupLabel}</p>
+                            </div>
+                            {items.map((item: any) => (
+                              <div key={item.keyword} className="px-4 py-3 flex items-center gap-3">
+                                {item.status === "missing" && (
+                                  <input type="checkbox" className="shrink-0 accent-accent w-4 h-4 cursor-pointer"
+                                    checked={selectedForCreate.has(item.keyword)}
+                                    onChange={e => setSelectedForCreate(prev => {
+                                      const next = new Set(prev);
+                                      e.target.checked ? next.add(item.keyword) : next.delete(item.keyword);
+                                      return next;
+                                    })} />
+                                )}
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-sm font-medium text-foreground truncate">{item.keyword}</p>
+                                  {item.status === "found" && item.url && (
+                                    <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground underline truncate block">{item.url}</a>
+                                  )}
+                                </div>
+                                {item.status === "found" ? (
+                                  <div className="flex items-center gap-2 shrink-0">
+                                    <span className={`text-xs font-semibold ${item.composite_score >= 80 ? "text-green-500" : item.composite_score >= 60 ? "text-amber-500" : "text-red-500"}`}>
+                                      {item.composite_score ?? "–"}
+                                    </span>
+                                    <Button size="sm" variant="outline" className="text-xs h-7 px-2"
+                                      onClick={() => handleRelatedAction({ mode: "reoptimize", keyword: item.keyword, existingUrl: item.url })}>
+                                      Reoptimize
+                                    </Button>
+                                  </div>
+                                ) : (
+                                  <span className="text-xs text-muted-foreground shrink-0">Missing</span>
                                 )}
                               </div>
-                              {item.status === "found" ? (
-                                <div className="flex items-center gap-2 shrink-0">
-                                  <span className={`text-xs font-semibold ${item.composite_score >= 80 ? "text-green-500" : item.composite_score >= 60 ? "text-amber-500" : "text-red-500"}`}>
-                                    {item.composite_score ?? "–"}
-                                  </span>
-                                  <Button size="sm" variant="outline" className="text-xs h-7 px-2"
-                                    onClick={() => handleRelatedAction({ mode: "reoptimize", keyword: item.keyword, existingUrl: item.url })}>
-                                    Reoptimize
-                                  </Button>
-                                </div>
-                              ) : (
-                                <Button size="sm" variant="outline" className="text-xs h-7 px-2 shrink-0"
-                                  onClick={() => handleRelatedAction({ mode: "new", keyword: item.keyword })}>
-                                  <PlusCircle className="w-3 h-3 mr-1" /> Create
-                                </Button>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
+                            ))}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {selectedForCreate.size > 0 && (
+                    <div className="px-4 py-3 border-t border-border bg-muted/20">
+                      <Button className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold"
+                        onClick={handleBulkCreate} disabled={bulkCreating}>
+                        {bulkCreating && bulkProgress
+                          ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Creating {bulkProgress.currentKw} ({bulkProgress.current}/{bulkProgress.total})…</>
+                          : <><Sparkles className="w-4 h-4 mr-2" />Create {selectedForCreate.size} Selected Page{selectedForCreate.size > 1 ? "s" : ""}</>}
+                      </Button>
+                    </div>
+                  )}
+                  {bulkDone > 0 && !bulkCreating && (
+                    <div className="px-4 py-3 border-t border-border">
+                      <p className="text-xs text-green-600 font-medium">{bulkDone} page{bulkDone > 1 ? "s" : ""} created and saved — view them in Saved Pages below.</p>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             <button
               onClick={() => setCheckState({ status: "idle" })}
@@ -770,70 +870,96 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
             </Button>
 
             {/* Related pages panel */}
-            {(relatedLoading || relatedPages) && (
-              <div className="bg-card border border-border rounded-xl overflow-hidden">
-                <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-                  <p className="text-sm font-semibold text-foreground">Related Pages</p>
-                  {relatedLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
-                </div>
-                {relatedLoading && !relatedPages && (
-                  <div className="px-4 py-3 text-xs text-muted-foreground">Discovering related keywords…</div>
-                )}
-                {relatedPages && relatedPages.length === 0 && (
-                  <div className="px-4 py-3 text-xs text-muted-foreground">No related pages found.</div>
-                )}
-                {relatedPages && relatedPages.length > 0 && (
-                  <div className="divide-y divide-border">
-                    {(["parents", "siblings", "children"] as const).map(group => {
-                      const items = relatedPages.filter(p => p.group === group);
-                      if (!items.length) return null;
-                      const groupLabel = group === "parents" ? "Parent Pages" : group === "siblings" ? "Sibling Pages" : "Child Pages";
-                      return (
-                        <div key={group}>
-                          <div className="px-4 py-2 bg-muted/30">
-                            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{groupLabel}</p>
-                          </div>
-                          {items.map((item: any) => (
-                            <div key={item.keyword} className="px-4 py-3 flex items-center gap-3">
-                              <div className="flex-1 min-w-0">
-                                <p className="text-sm font-medium text-foreground truncate">{item.keyword}</p>
-                                {item.status === "found" && item.url && (
-                                  <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground underline truncate block">{item.url}</a>
+            {(relatedLoading || relatedPages) && (() => {
+              const missingItems = (relatedPages ?? []).filter(p => p.status === "missing");
+              const allMissingSelected = missingItems.length > 0 && missingItems.every(p => selectedForCreate.has(p.keyword));
+              return (
+                <div className="bg-card border border-border rounded-xl overflow-hidden">
+                  <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+                    <p className="text-sm font-semibold text-foreground">Related Pages</p>
+                    <div className="flex items-center gap-3">
+                      {relatedLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
+                      {!relatedLoading && missingItems.length > 0 && (
+                        <button className="text-xs text-accent underline"
+                          onClick={() => setSelectedForCreate(allMissingSelected ? new Set() : new Set(missingItems.map(p => p.keyword)))}>
+                          {allMissingSelected ? "Deselect all" : "Select all missing"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {relatedLoading && !relatedPages && (
+                    <div className="px-4 py-3 text-xs text-muted-foreground">Discovering related keywords…</div>
+                  )}
+                  {relatedPages && relatedPages.length === 0 && (
+                    <div className="px-4 py-3 text-xs text-muted-foreground">No related pages found.</div>
+                  )}
+                  {relatedPages && relatedPages.length > 0 && (
+                    <div className="divide-y divide-border">
+                      {(["parents", "siblings", "children"] as const).map(group => {
+                        const items = relatedPages.filter(p => p.group === group);
+                        if (!items.length) return null;
+                        const groupLabel = group === "parents" ? "Parent Pages" : group === "siblings" ? "Sibling Pages" : "Child Pages";
+                        return (
+                          <div key={group}>
+                            <div className="px-4 py-2 bg-muted/30">
+                              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{groupLabel}</p>
+                            </div>
+                            {items.map((item: any) => (
+                              <div key={item.keyword} className="px-4 py-3 flex items-center gap-3">
+                                {item.status === "missing" && (
+                                  <input type="checkbox" className="shrink-0 accent-accent w-4 h-4 cursor-pointer"
+                                    checked={selectedForCreate.has(item.keyword)}
+                                    onChange={e => setSelectedForCreate(prev => {
+                                      const next = new Set(prev);
+                                      e.target.checked ? next.add(item.keyword) : next.delete(item.keyword);
+                                      return next;
+                                    })} />
+                                )}
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-sm font-medium text-foreground truncate">{item.keyword}</p>
+                                  {item.status === "found" && item.url && (
+                                    <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground underline truncate block">{item.url}</a>
+                                  )}
+                                </div>
+                                {item.status === "found" ? (
+                                  <div className="flex items-center gap-2 shrink-0">
+                                    <span className={`text-xs font-semibold ${item.composite_score >= 80 ? "text-green-500" : item.composite_score >= 60 ? "text-amber-500" : "text-red-500"}`}>
+                                      {item.composite_score ?? "–"}
+                                    </span>
+                                    <Button size="sm" variant="outline" className="text-xs h-7 px-2"
+                                      onClick={() => handleRelatedAction({ mode: "reoptimize", keyword: item.keyword, existingUrl: item.url })}>
+                                      Reoptimize
+                                    </Button>
+                                  </div>
+                                ) : (
+                                  <span className="text-xs text-muted-foreground shrink-0">Missing</span>
                                 )}
                               </div>
-                              {item.status === "found" ? (
-                                <div className="flex items-center gap-2 shrink-0">
-                                  <span className={`text-xs font-semibold ${item.composite_score >= 80 ? "text-green-500" : item.composite_score >= 60 ? "text-amber-500" : "text-red-500"}`}>
-                                    {item.composite_score ?? "–"}
-                                  </span>
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    className="text-xs h-7 px-2"
-                                    onClick={() => handleRelatedAction({ mode: "reoptimize", keyword: item.keyword, existingUrl: item.url })}
-                                  >
-                                    Reoptimize
-                                  </Button>
-                                </div>
-                              ) : (
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  className="text-xs h-7 px-2 shrink-0"
-                                  onClick={() => handleRelatedAction({ mode: "new", keyword: item.keyword })}
-                                >
-                                  <PlusCircle className="w-3 h-3 mr-1" /> Create
-                                </Button>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
+                            ))}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {/* Bulk create footer */}
+                  {selectedForCreate.size > 0 && (
+                    <div className="px-4 py-3 border-t border-border bg-muted/20">
+                      <Button className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold"
+                        onClick={handleBulkCreate} disabled={bulkCreating}>
+                        {bulkCreating && bulkProgress
+                          ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Creating {bulkProgress.currentKw} ({bulkProgress.current}/{bulkProgress.total})…</>
+                          : <><Sparkles className="w-4 h-4 mr-2" />Create {selectedForCreate.size} Selected Page{selectedForCreate.size > 1 ? "s" : ""}</>}
+                      </Button>
+                    </div>
+                  )}
+                  {bulkDone > 0 && !bulkCreating && (
+                    <div className="px-4 py-3 border-t border-border">
+                      <p className="text-xs text-green-600 font-medium">{bulkDone} page{bulkDone > 1 ? "s" : ""} created and saved — view them in Saved Pages below.</p>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             <button
               onClick={() => setCheckState({ status: "idle" })}
