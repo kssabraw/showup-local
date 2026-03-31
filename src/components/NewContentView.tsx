@@ -453,6 +453,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         onGenerated={(result, mode) =>
           setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "", tokenUsage: result.token_usage, costBreakdown: result.cost_breakdown ?? {} })
         }
+        onCreateNew={handleCreateNewPage}
       />
     );
   }

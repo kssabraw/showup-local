@@ -48,6 +48,7 @@ interface Props {
   initialScoreResult?: ScoreResult;
   onBack: () => void;
   onGenerated: (result: GeneratedResult, mode: "reoptimize") => void;
+  onCreateNew: () => void;
 }
 
 const ENGINE_LABELS: Record<string, string> = {
@@ -81,7 +82,7 @@ function StatusIcon({ score }: { score: number }) {
 export default function PageScoreView({
   keyword, location, pageUrl, pageTitle, businessId, businessName,
   gbpCategory, address, phone, differentiators, serp_analysis, initialScoreResult,
-  onBack, onGenerated,
+  onBack, onGenerated, onCreateNew,
 }: Props) {
   const [scoreResult, setScoreResult] = useState<ScoreResult | null>(initialScoreResult ?? null);
   const [scoring, setScoring] = useState(false);
@@ -300,11 +301,28 @@ export default function PageScoreView({
                 >
                   {reoptimizing ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Reoptimizing…</> : "Reoptimize This Page"}
                 </Button>
+                <Button
+                  variant="outline"
+                  className="w-full font-semibold py-6"
+                  onClick={onCreateNew}
+                  disabled={reoptimizing}
+                >
+                  Create New Page Instead
+                </Button>
               </>
             ) : (
-              <p className="text-sm text-green-500 font-medium text-center">
-                This page is well optimized — no reoptimization needed.
-              </p>
+              <>
+                <p className="text-sm text-green-500 font-medium text-center">
+                  This page is well optimized — no reoptimization needed.
+                </p>
+                <Button
+                  variant="outline"
+                  className="w-full font-semibold py-6"
+                  onClick={onCreateNew}
+                >
+                  Create New Page Anyway
+                </Button>
+              </>
             )}
           </div>
         </div>
