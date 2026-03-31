@@ -1918,8 +1918,17 @@ async def _find_page_for_keyword_reuse(
 ) -> Optional[dict]:
     """Checks pre-discovered URLs for a page matching kw. Returns {url, title, h1} or None."""
     import urllib.parse as _up
+    _BD = {
+        "company","companies","contractor","contractors","professional","professionals",
+        "provider","providers","specialist","specialists","expert","experts",
+        "technician","technicians","team","crew","agency","firm","business",
+        "near","me","best","top","trusted","reliable","affordable","licensed",
+        "certified","local","cheap","fast",
+    }
     kw_lower = kw.lower().strip()
-    kw_words = [w for w in re.split(r'[\W_]+', kw_lower) if w and len(w) > 1 and w not in STOP_WORDS]
+    kw_words = [w for w in re.split(r'[\W_]+', kw_lower) if w and len(w) > 1 and w not in STOP_WORDS and w not in _BD]
+    if not kw_words:
+        kw_words = [w for w in re.split(r'[\W_]+', kw_lower) if w and len(w) > 1 and w not in STOP_WORDS]
     if not kw_words:
         kw_words = kw_lower.split()
 
@@ -2101,10 +2110,23 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
         url = f"https://{url}"
 
     kw = body.keyword.lower().strip()
-    # Build keyword word list — filter stopwords and single-char tokens
-    kw_words = [w for w in re.split(r'[\W_]+', kw) if w and len(w) > 1 and w not in STOP_WORDS]
+    # Words that describe a business type but never appear in service page URL slugs.
+    # Strip these before slug/Haiku matching so "tree service company" → ["tree", "service"].
+    _BUSINESS_DESCRIPTORS = {
+        "company", "companies", "contractor", "contractors", "professional", "professionals",
+        "provider", "providers", "specialist", "specialists", "expert", "experts",
+        "technician", "technicians", "team", "crew", "agency", "firm", "business",
+        "near", "me", "best", "top", "trusted", "reliable", "affordable", "licensed",
+        "certified", "local", "cheap", "fast",
+    }
+    # Build keyword word list — filter stopwords, single-char tokens, and business descriptors
+    kw_words = [w for w in re.split(r'[\W_]+', kw) if w and len(w) > 1 and w not in STOP_WORDS and w not in _BUSINESS_DESCRIPTORS]
+    if not kw_words:
+        # Fallback: keep everything except pure stopwords
+        kw_words = [w for w in re.split(r'[\W_]+', kw) if w and len(w) > 1 and w not in STOP_WORDS]
     if not kw_words:
         kw_words = [w for w in re.split(r'\s+', kw) if w]
+    logger.info(f"find-page-for-keyword: kw_words={kw_words} for keyword='{body.keyword}'")
 
     parsed_base = urllib.parse.urlparse(url)
     base_netloc = parsed_base.netloc
