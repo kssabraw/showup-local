@@ -1942,6 +1942,8 @@ class GeneratePageRequest(BaseModel):
     hours: Optional[str] = None
     differentiators: Optional[List[dict]] = None
     icp_type: Optional[str] = None
+    brand_voice: Optional[dict] = None
+    detected_icp: Optional[dict] = None
     reviews: Optional[List[dict]] = None
     serp_analysis: Optional[dict] = None
 
@@ -1978,6 +1980,59 @@ async def generate_page(request: Request, body: GeneratePageRequest):
 
     icp = body.icp_type or "General Homeowner"
 
+    # Build brand voice block
+    brand_voice_text = ""
+    if body.brand_voice:
+        bv = body.brand_voice
+        # Use recommended_accepted voice if user accepted one, otherwise fall back to recommended, then current
+        accepted = bv.get("recommended_accepted")
+        if accepted == "recommended":
+            voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
+        elif accepted == "current":
+            voice = bv.get("current_voice") or {}
+        else:
+            voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
+        guide = bv.get("writer_execution_guide", "")
+        if voice or guide:
+            lines = ["BRAND VOICE (match this exactly):"]
+            if voice.get("tone"):
+                lines.append(f"  Tone: {voice['tone']}")
+            if voice.get("personality"):
+                lines.append(f"  Personality: {', '.join(voice['personality'])}")
+            ws = voice.get("writing_style", {})
+            if ws:
+                lines.append(f"  Writing style: {ws.get('sentence_length','')} sentences, {ws.get('person','')} person, {ws.get('formality','')} formality")
+            vocab = voice.get("vocabulary", {})
+            if vocab.get("use"):
+                lines.append(f"  Words/phrases to use: {', '.join(vocab['use'])}")
+            if vocab.get("avoid"):
+                lines.append(f"  Words/phrases to avoid: {', '.join(vocab['avoid'])}")
+            if guide:
+                lines.append(f"  Writer instructions: {guide}")
+            brand_voice_text = "\n".join(lines)
+
+    # Build ICP block
+    icp_text = ""
+    if body.detected_icp:
+        segments = body.detected_icp.get("segments", [])
+        if segments:
+            lines = ["TARGET CUSTOMER PROFILES (write to these):"]
+            for seg in segments[:3]:  # cap at 3 segments
+                name = seg.get("name", "")
+                desc = seg.get("description", "")
+                msg = seg.get("messaging", {})
+                tone = msg.get("tone", "")
+                hooks = msg.get("hooks", [])
+                pain = msg.get("trust_signals", [])
+                lines.append(f"  [{name}] {desc}")
+                if tone:
+                    lines.append(f"    Messaging tone: {tone}")
+                if hooks:
+                    lines.append(f"    Headline hooks: {'; '.join(hooks[:2])}")
+                if pain:
+                    lines.append(f"    Trust signals: {'; '.join(pain[:2])}")
+            icp_text = "\n".join(lines)
+
     prompt = f"""You are an expert local SEO content writer. Generate a complete, publish-ready local service page following the exact structure below.
 
 BUSINESS DATA
@@ -1992,6 +2047,8 @@ Target city: {city}
 Full location: {body.location}
 ICP: {icp}
 
+{brand_voice_text}
+{icp_text}
 {diff_text}
 {reviews_text}
 {serp_ctx}

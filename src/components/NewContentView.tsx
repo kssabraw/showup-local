@@ -18,6 +18,8 @@ interface BusinessProfile {
   phone?: string | null;
   differentiators?: any[];
   existing_pages: any[];
+  brand_voice?: any;
+  detected_icp?: any;
 }
 
 interface AnalysisResult {
@@ -128,7 +130,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     try {
       const { data, error } = await supabase
         .from("business_profiles")
-        .select("id, business_name, address, gbp_category, website, phone, differentiators, existing_pages")
+        .select("id, business_name, address, gbp_category, website, phone, differentiators, existing_pages, brand_voice, detected_icp")
         .order("created_at", { ascending: false });
       if (error) throw error;
       setBusinesses(data || []);
@@ -274,6 +276,8 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
           address: b.address,
           phone: b.phone,
           differentiators: b.differentiators,
+          brand_voice: b.brand_voice,
+          detected_icp: b.detected_icp,
           serp_analysis: serpData,
         }),
       });
