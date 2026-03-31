@@ -31,7 +31,6 @@ interface AnalysisResult {
   google_entities: any[];
   zone_targets: Record<string, { target: number }>;
   competitor_headings: any[];
-  analysis_cost: any;
 }
 
 type CheckState =
@@ -46,7 +45,7 @@ type CheckState =
 type ViewState =
   | { kind: "form" }
   | { kind: "score"; pageMatch: { url: string; title: string; h1?: string }; serpAnalysis: AnalysisResult; initialScoreResult: any }
-  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; tokenUsage: any; costBreakdown: any }
+  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string }
   | { kind: "analysis"; result: AnalysisResult };
 
 interface SavedPage {
@@ -214,8 +213,6 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
       contentHtml: page.content_html,
       schemaJson: page.schema_json ?? "",
       pageTitle: page.page_title ?? "",
-      tokenUsage: {},
-      costBreakdown: {},
     });
   };
 
@@ -401,7 +398,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
       }
       const genData = await genRes.json();
       await saveTokenUsage(genData.token_usage);
-      setView({ kind: "generated", mode: "generate", contentHtml: genData.content_html, schemaJson: genData.schema_json, pageTitle: genData.page_title ?? "", tokenUsage: genData.token_usage, costBreakdown: genData.cost_breakdown ?? {} });
+      setView({ kind: "generated", mode: "generate", contentHtml: genData.content_html, schemaJson: genData.schema_json, pageTitle: genData.page_title ?? "" });
     } catch (e: any) {
       setError(e.message || "Something went wrong");
       setCheckState({ status: "not_found" });
@@ -564,7 +561,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         initialScoreResult={view.initialScoreResult}
         onBack={() => setView({ kind: "form" })}
         onGenerated={(result, mode) =>
-          setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "", tokenUsage: result.token_usage, costBreakdown: result.cost_breakdown ?? {} })
+          setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "" })
         }
         onCreateNew={handleCreateNewPage}
       />
@@ -580,8 +577,6 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         contentHtml={view.contentHtml}
         schemaJson={view.schemaJson}
         pageTitle={view.pageTitle}
-        tokenUsage={view.tokenUsage}
-        costBreakdown={view.costBreakdown}
         businessId={selectedBusinessId}
         businessName={selectedBusiness?.business_name || ""}
         website={selectedBusiness?.website ?? undefined}

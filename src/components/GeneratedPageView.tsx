@@ -13,8 +13,6 @@ interface Props {
   contentHtml: string;
   schemaJson: string;
   pageTitle: string;
-  tokenUsage: Record<string, any>;
-  costBreakdown?: Record<string, any>;
   businessId: string;
   businessName: string;
   website?: string;
@@ -58,7 +56,7 @@ function scoreBadge(score?: number, status?: string) {
 
 export default function GeneratedPageView({
   keyword, location, mode, contentHtml, schemaJson, pageTitle,
-  tokenUsage, costBreakdown, businessId, businessName, website, gbpCategory, address,
+  businessId, businessName, website, gbpCategory, address,
   onBack, onNewPage, onRelatedAction,
 }: Props) {
   const [copiedHtml, setCopiedHtml] = useState(false);
@@ -67,8 +65,6 @@ export default function GeneratedPageView({
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [activeTab, setActiveTab] = useState<"preview" | "html" | "schema" | "related">("preview");
-  const [showCostBreakdown, setShowCostBreakdown] = useState(false);
-
   // Related pages state
   const [relatedLoading, setRelatedLoading] = useState(false);
   const [relatedItems, setRelatedItems] = useState<RelatedPageItem[] | null>(null);
@@ -196,51 +192,9 @@ export default function GeneratedPageView({
               <span className="font-medium">{keyword}</span> · {location.split(",")[0]} · ~{wordCount} words
             </p>
           </div>
-          <div className="text-right">
-            {costBreakdown?.total != null ? (
-              <div className="text-sm font-semibold text-foreground">
-                ${costBreakdown.total.toFixed(4)}
-                <span className="text-xs font-normal text-muted-foreground ml-1">total est.</span>
-              </div>
-            ) : (
-              <div className="text-sm font-semibold text-foreground">
-                ${tokenUsage.cost_usd?.toFixed(5)}
-              </div>
-            )}
-            <button
-              onClick={() => setShowCostBreakdown(v => !v)}
-              className="text-xs text-muted-foreground hover:text-foreground transition-colors underline"
-            >
-              {showCostBreakdown ? "hide breakdown" : "see breakdown"}
-            </button>
-          </div>
         </div>
       </div>
 
-      {/* Cost breakdown panel */}
-      {showCostBreakdown && (
-        <div className="bg-muted/40 border border-border rounded-xl px-5 py-4 text-xs space-y-1.5">
-          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Cost Breakdown (estimates)</p>
-          {[
-            { label: "DataForSEO SERP fetch", value: costBreakdown?.dataforseo },
-            { label: `ScrapeOwl (${costBreakdown?.scrapeowl_pages ?? 0} pages)`, value: costBreakdown?.scrapeowl },
-            { label: `Google NLP (${((costBreakdown?.google_nlp_chars ?? 0) / 1000).toFixed(0)}k chars)`, value: costBreakdown?.google_nlp },
-            { label: `Claude ${costBreakdown?.claude_model?.includes("haiku") ? "Haiku" : "Sonnet"} (${costBreakdown?.claude_input_tokens ?? 0}+${costBreakdown?.claude_output_tokens ?? 0} tokens)`, value: costBreakdown?.claude },
-          ].map(({ label, value }) =>
-            value != null ? (
-              <div key={label} className="flex justify-between text-muted-foreground">
-                <span>{label}</span>
-                <span className="font-mono">${(value as number).toFixed(4)}</span>
-              </div>
-            ) : null
-          )}
-          <div className="flex justify-between font-semibold text-foreground border-t border-border pt-1.5 mt-1.5">
-            <span>Total</span>
-            <span className="font-mono">${(costBreakdown?.total ?? tokenUsage.cost_usd ?? 0).toFixed(4)}</span>
-          </div>
-          <p className="text-muted-foreground/60 pt-1">* API costs are estimates based on published pricing. Actual billing may vary.</p>
-        </div>
-      )}
 
       {/* Tabs */}
       <div className="flex gap-2 border-b border-border flex-wrap">

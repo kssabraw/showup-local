@@ -222,9 +222,6 @@ export default function PageScoreView({
                   ? "All engines passing — page is well optimized."
                   : `${scoreResult.deficiencies.length} engine${scoreResult.deficiencies.length > 1 ? "s" : ""} below standard.`}
               </div>
-              <div className="text-xs text-muted-foreground mt-1">
-                Cost: ${scoreResult.token_usage.cost_usd?.toFixed(5)} ({scoreResult.token_usage.input_tokens}+{scoreResult.token_usage.output_tokens} tokens)
-              </div>
             </div>
           </div>
 
