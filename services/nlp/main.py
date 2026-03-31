@@ -112,8 +112,11 @@ for name, val in [
     ("GOOGLE_NLP_API_KEY", GOOGLE_NLP_API_KEY),
     ("DATAFORSEO_LOGIN",   DATAFORSEO_LOGIN),
     ("SCRAPEOWL_API_KEY",  SCRAPEOWL_API_KEY),
+    ("ANTHROPIC_API_KEY",  ANTHROPIC_API_KEY),
 ]:
-    if not val:
+    if val:
+        logger.info(f"{name} is set (length={len(val)})")
+    else:
         logger.warning(f"{name} not set — related feature will be skipped")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -252,15 +255,20 @@ async def scrape_url(url: str, client: httpx.AsyncClient) -> Optional[str]:
             },
             timeout=30.0,
         )
-        response.raise_for_status()
+        if response.status_code != 200:
+            logger.warning(f"ScrapeOwl HTTP {response.status_code} for {url}: {response.text[:300]}")
+            return None
         data = response.json()
         html = data.get("html") or data.get("body") or ""
+        if not html:
+            logger.warning(f"ScrapeOwl empty response for {url}. Keys: {list(data.keys())}")
+            return None
         if len(html.strip()) < 200:
-            logger.warning(f"ScrapeOwl returned thin content for {url}")
+            logger.warning(f"ScrapeOwl returned thin content ({len(html)} chars) for {url}")
             return None
         return html
     except Exception as e:
-        logger.warning(f"ScrapeOwl error for {url}: {e}")
+        logger.warning(f"ScrapeOwl error for {url}: {type(e).__name__}: {e}")
         return None
 
 
