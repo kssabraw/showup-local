@@ -29,6 +29,7 @@ interface AnalysisResult {
   related_keywords: { title: any[]; h1: any[]; h2_h3: any[]; body: any[] };
   top_quadgrams: any[];
   google_entities: any[];
+  zone_targets: Record<string, { target: number }>;
 }
 
 type CheckState =
@@ -172,6 +173,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         related_keywords: data.related_keywords,
         top_quadgrams: data.top_quadgrams,
         google_entities: data.google_entities,
+        zone_targets: data.zone_targets,
       },
       { onConflict: "business_id,keyword,location" }
     );
