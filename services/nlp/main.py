@@ -1017,7 +1017,7 @@ async def _fetch_sitemap_urls(sitemap_url: str, client: httpx.AsyncClient, depth
         if sitemap_tags:
             child_urls = [t.find('loc').get_text(strip=True) for t in sitemap_tags if t.find('loc')]
             results = await asyncio.gather(
-                *[_fetch_sitemap_urls(u, client, depth + 1) for u in child_urls[:10]]
+                *[_fetch_sitemap_urls(u, client, depth + 1) for u in child_urls[:50]]
             )
             return [url for sublist in results for url in sublist]
         # Regular sitemap — return all <loc>
@@ -1050,11 +1050,19 @@ async def _discover_via_sitemap(base_url: str, client: httpx.AsyncClient) -> Lis
     except Exception:
         pass
 
-    # Fall back to conventional sitemap.xml location
-    if not sitemap_url:
-        sitemap_url = f"{origin}/sitemap.xml"
+    # Try common sitemap locations if robots.txt didn't specify one
+    candidate_sitemaps = [sitemap_url] if sitemap_url else [
+        f"{origin}/sitemap.xml",
+        f"{origin}/sitemap_index.xml",
+        f"{origin}/wp-sitemap.xml",
+        f"{origin}/page-sitemap.xml",
+    ]
 
-    urls = await _fetch_sitemap_urls(sitemap_url, client)
+    urls: List[str] = []
+    for sm_url in candidate_sitemaps:
+        urls = await _fetch_sitemap_urls(sm_url, client)
+        if urls:
+            break
     # Filter to same domain, HTML-like URLs
     internal = []
     for u in urls:
@@ -2245,7 +2253,37 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             candidate_pool.sort(key=_slug_match_score, reverse=True)
             candidate_pool = candidate_pool[:25]
 
-            # Fallback: if nothing matched at all, take the top 10 discovered URLs
+            # ── Direct URL guessing (runs if sitemap found nothing useful) ─────────
+            # Generate slug permutations from service + location words and probe them.
+            # Catches cases where sitemap discovery fails entirely.
+            if not svc_matches and not loc_matches:
+                svc_slug = "-".join(kw_words)
+                loc_slug = "-".join(loc_words[:2]) if loc_words else ""  # e.g. "newport-beach"
+                guesses = []
+                if svc_slug and loc_slug:
+                    guesses += [
+                        f"{origin}/{loc_slug}-{svc_slug}/",
+                        f"{origin}/{loc_slug}-{svc_slug}s/",
+                        f"{origin}/{svc_slug}-{loc_slug}/",
+                        f"{origin}/{svc_slug}s-{loc_slug}/",
+                    ]
+                if svc_slug:
+                    guesses += [f"{origin}/{svc_slug}/", f"{origin}/{svc_slug}s/"]
+
+                async def _probe(u: str) -> Optional[str]:
+                    try:
+                        r = await client.head(u, timeout=5.0)
+                        return u if r.status_code in (200, 301, 302) else None
+                    except Exception:
+                        return None
+
+                probe_results = await asyncio.gather(*[_probe(g) for g in guesses])
+                guessed = [u for u in probe_results if u]
+                if guessed:
+                    logger.info(f"find-page-for-keyword: direct-guess found {guessed}")
+                    candidate_pool = guessed + candidate_pool
+
+            # Generic fallback: if still nothing, take top 10 discovered URLs
             if not candidate_pool:
                 candidate_pool = all_urls[:10]
 
