@@ -62,10 +62,11 @@ export default function GeneratedPageView({
 }: Props) {
   const [copiedHtml, setCopiedHtml] = useState(false);
   const [copiedSchema, setCopiedSchema] = useState(false);
+  const [copiedRichText, setCopiedRichText] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState("");
-  const [activeTab, setActiveTab] = useState<"preview" | "html" | "schema" | "related">("preview");
+  const [activeTab, setActiveTab] = useState<"preview" | "raw-text" | "html" | "schema" | "related">("preview");
   // Related pages state
   const [relatedLoading, setRelatedLoading] = useState(false);
   const [relatedItems, setRelatedItems] = useState<RelatedPageItem[] | null>(null);
@@ -76,6 +77,28 @@ export default function GeneratedPageView({
     await navigator.clipboard.writeText(contentHtml);
     setCopiedHtml(true);
     setTimeout(() => setCopiedHtml(false), 2000);
+  };
+
+  const copyRichText = async () => {
+    try {
+      // Copy as rich text (text/html) so it pastes with formatting into WordPress, Google Docs, etc.
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([contentHtml], { type: "text/html" }),
+          "text/plain": new Blob(
+            [new DOMParser().parseFromString(contentHtml, "text/html").body.innerText],
+            { type: "text/plain" }
+          ),
+        }),
+      ]);
+    } catch {
+      // Fallback: plain text
+      await navigator.clipboard.writeText(
+        new DOMParser().parseFromString(contentHtml, "text/html").body.innerText
+      );
+    }
+    setCopiedRichText(true);
+    setTimeout(() => setCopiedRichText(false), 2000);
   };
 
   const copySchema = async () => {
@@ -199,7 +222,7 @@ export default function GeneratedPageView({
 
       {/* Tabs */}
       <div className="flex gap-2 border-b border-border flex-wrap">
-        {(["preview", "html", "schema", "related"] as const).map(tab => (
+        {(["preview", "raw-text", "html", "schema", "related"] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -211,6 +234,7 @@ export default function GeneratedPageView({
           >
             {tab === "schema" ? "JSON-LD Schema"
               : tab === "related" ? "Related Pages"
+              : tab === "raw-text" ? "Raw Text"
               : tab.charAt(0).toUpperCase() + tab.slice(1)}
           </button>
         ))}
@@ -250,6 +274,28 @@ export default function GeneratedPageView({
               </ul>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Raw Text tab */}
+      {activeTab === "raw-text" && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-muted-foreground">
+              Select all and copy, then paste directly into WordPress, Google Docs, or any editor — formatting is preserved.
+            </p>
+            <Button variant="outline" size="sm" onClick={copyRichText}>
+              {copiedRichText ? <><Check className="w-4 h-4 mr-1" /> Copied!</> : <><Copy className="w-4 h-4 mr-1" /> Copy All</>}
+            </Button>
+          </div>
+          <div
+            className="bg-white rounded-xl border border-border p-8 prose prose-sm max-w-none
+                       prose-headings:text-gray-900 prose-p:text-gray-800 prose-li:text-gray-800
+                       prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg
+                       prose-headings:font-bold prose-strong:font-bold
+                       select-all cursor-text"
+            dangerouslySetInnerHTML={{ __html: contentHtml }}
+          />
         </div>
       )}
 
