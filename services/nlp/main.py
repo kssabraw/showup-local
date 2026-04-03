@@ -2294,6 +2294,9 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             # ── site: search fallback ─────────────────────────────────────────────
             # If all sitemap + guessing attempts found nothing, query Google via
             # DataForSEO with  site:{domain} {keyword} {city}  and use the results.
+            # Also stores titles from DataForSEO so we don't need to fetch the page
+            # (critical for sites that block bots with 403).
+            serp_titles: dict = {}  # url → title from DataForSEO results
             if not candidate_pool and DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD:
                 try:
                     city = (body.location or "").split(",")[0].strip()
@@ -2315,8 +2318,10 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                                 for _item in (_result.get("items") or []):
                                     if _item.get("type") == "organic":
                                         _u = _item.get("url", "")
-                                        if _u and base_netloc in _u and _u not in candidate_pool:
-                                            candidate_pool.append(_u)
+                                        if _u and base_netloc in _u:
+                                            serp_titles[_u] = _item.get("title", "") or _u
+                                            if _u not in candidate_pool:
+                                                candidate_pool.append(_u)
                         logger.info(f"find-page-for-keyword: site-search returned {len(candidate_pool)} results")
                 except Exception as _se:
                     logger.warning(f"find-page-for-keyword: site-search failed ({_se})")
@@ -2376,24 +2381,41 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                 except Exception as _he:
                     logger.warning(f"find-page-for-keyword: Haiku selection failed ({_he}), falling back to regex")
 
-            # If Haiku picked a URL, trust it — fetch just enough to get title/H1
+            # If Haiku picked a URL, fetch it for title/H1.
+            # If the site blocks bots (403/etc.), fall back to the DataForSEO title
+            # we already have — the URL existence is confirmed by Google's index.
             if haiku_pick:
+                title_text = serp_titles.get(haiku_pick, "")
+                h1_text = ""
                 try:
                     resp = await client.get(haiku_pick, timeout=8.0)
                     if resp.status_code == 200:
                         soup = BeautifulSoup(resp.text, 'html.parser')
                         title_tag = soup.find('title')
                         h1_tag = soup.find('h1')
-                        title_text = title_tag.get_text(strip=True) if title_tag else haiku_pick
+                        title_text = (title_tag.get_text(strip=True) if title_tag else "") or title_text or haiku_pick
                         h1_text = h1_tag.get_text(strip=True) if h1_tag else ''
-                        is_blog = _is_likely_blog_post(haiku_pick)
-                        return FindPageResponse(
-                            found=True,
-                            page={'url': str(resp.url), 'title': title_text, 'h1': h1_text, 'is_blog_post': is_blog},
-                            is_blog_post=is_blog,
-                        )
                 except Exception as _fe:
-                    logger.warning(f"find-page-for-keyword: failed to fetch Haiku pick ({_fe}), falling back")
+                    logger.warning(f"find-page-for-keyword: could not fetch Haiku pick ({_fe}), using cached title")
+                # Return even if fetch failed — URL confirmed by sitemap or Google
+                is_blog = _is_likely_blog_post(haiku_pick)
+                return FindPageResponse(
+                    found=True,
+                    page={'url': haiku_pick, 'title': title_text or haiku_pick, 'h1': h1_text, 'is_blog_post': is_blog},
+                    is_blog_post=is_blog,
+                )
+
+            # If we have site: search results but Haiku didn't fire, use the top
+            # result directly (site is confirmed by Google, no fetch needed).
+            if serp_titles and candidate_pool:
+                top = candidate_pool[0]
+                is_blog = _is_likely_blog_post(top)
+                logger.info(f"find-page-for-keyword: returning top site-search result → {top}")
+                return FindPageResponse(
+                    found=True,
+                    page={'url': top, 'title': serp_titles.get(top, top), 'h1': '', 'is_blog_post': is_blog},
+                    is_blog_post=is_blog,
+                )
 
             # Fallback: check top candidates with keyword-in-title gate
             to_check = [u for u in candidate_pool if u != haiku_pick]
