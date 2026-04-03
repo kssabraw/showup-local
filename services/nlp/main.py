@@ -2137,17 +2137,16 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
         except Exception:
             return False
 
-    def _slug_score(u: str) -> int:
-        """Score URL slug: count service + location words present (prefix-aware).
-        Location words use half-weight so a non-geo URL isn't buried, but a
-        location-specific page always ranks above a generic service page."""
+    def _word_in_slug(word: str, path: str) -> bool:
+        """True if word appears as a substring in the URL path (handles plurals naturally)."""
+        return word in path.lower()
+
+    def _slug_match_score(u: str) -> tuple:
+        """Return (has_both_service_and_location, service_hits, loc_hits) for sorting."""
         path = urllib.parse.urlparse(u).path.lower()
-        slug_words = set(re.split(r'[\W/_-]+', path))
-        def _matches(w: str) -> bool:
-            return any(sw == w or sw.startswith(w) or w.startswith(sw) for sw in slug_words if len(sw) >= 3)
-        service_hits = sum(2 for w in kw_words if _matches(w))
-        loc_hits = sum(1 for w in loc_words if _matches(w))
-        return service_hits + loc_hits
+        svc = sum(1 for w in kw_words if _word_in_slug(w, path))
+        loc = sum(1 for w in loc_words if _word_in_slug(w, path))
+        return (svc > 0 and loc > 0, svc, loc)
 
     def _kw_match(kw_word: str, page_words: set) -> bool:
         """Match a keyword word against page words, allowing plural/suffix variants."""
@@ -2216,38 +2215,36 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             ))
             logger.info(f"find-page-for-keyword: {len(all_urls)} URLs discovered for {url}")
 
-            # Sort: pages with more keyword words in URL slug come first
-            scored_urls = sorted(all_urls, key=_slug_score, reverse=True)
-
-            # Build candidate pool:
-            # Primary: URLs with ≥1 keyword word in slug (fuzzy near-matches included)
-            # Pad with top slug-scored URLs so Haiku always has something to work with
-            scored_pairs = [(u, _slug_score(u)) for u in scored_urls]
-            relevant = [u for u, s in scored_pairs if s > 0]
-            # Always include top 10 by slug score as a fallback in case relevant is small
-            top_fallback = [u for u, _ in scored_pairs[:10] if u not in relevant]
-            candidate_pool = (relevant + top_fallback)[:30]
-
-            logger.info(f"find-page-for-keyword: {len(candidate_pool)} candidates for Haiku ({len(relevant)} relevant, {len(top_fallback)} fallback, from {len(all_urls)} total)")
-            for i, u in enumerate(candidate_pool[:15]):
-                logger.info(f"  candidate #{i+1} (score={scored_pairs[scored_urls.index(u)][1]}): {u}")
-
-            # Build service and location context for Haiku
             biz_location = (body.location or "").strip()
-            service_words = kw_words
 
-            # ── Fast path: skip Haiku when the top candidate is unambiguously better ──
-            # If the #1 URL has a slug score at least 2 points ahead of #2, it's a
-            # clear winner — use it directly without an LLM call.
+            # ── Step 1: Python substring filter ──────────────────────────────────────
+            # Find every URL whose slug contains at least one service word OR one
+            # location word.  No scoring heuristics — just plain string contains.
+            svc_matches  = [u for u in all_urls if any(_word_in_slug(w, urllib.parse.urlparse(u).path) for w in kw_words)]
+            loc_matches  = [u for u in all_urls if any(_word_in_slug(w, urllib.parse.urlparse(u).path) for w in loc_words)]
+            # Union, deduplicated
+            seen: set = set()
+            candidate_pool: list = []
+            for u in svc_matches + loc_matches:
+                if u not in seen:
+                    seen.add(u)
+                    candidate_pool.append(u)
+            # Sort: pages with both service + location in slug first, then by hit count
+            candidate_pool.sort(key=_slug_match_score, reverse=True)
+            candidate_pool = candidate_pool[:25]
+
+            # Fallback: if nothing matched at all, take the top 10 discovered URLs
+            if not candidate_pool:
+                candidate_pool = all_urls[:10]
+
+            logger.info(f"find-page-for-keyword: {len(candidate_pool)} candidates ({len(svc_matches)} svc, {len(loc_matches)} loc matches from {len(all_urls)} total)")
+            for i, u in enumerate(candidate_pool[:15]):
+                score = _slug_match_score(u)
+                logger.info(f"  candidate #{i+1} (both={score[0]}, svc={score[1]}, loc={score[2]}): {u}")
+
+            # ── Step 2: Haiku picks the best candidate ────────────────────────────────
             haiku_pick: Optional[str] = None
-            if candidate_pool:
-                top_score = _slug_score(candidate_pool[0])
-                second_score = _slug_score(candidate_pool[1]) if len(candidate_pool) > 1 else 0
-                if top_score >= 3 and (top_score - second_score) >= 2:
-                    haiku_pick = candidate_pool[0]
-                    logger.info(f"find-page-for-keyword: fast-path pick (score={top_score} vs {second_score}) → {haiku_pick}")
-
-            if not haiku_pick and ANTHROPIC_API_KEY and candidate_pool:
+            if ANTHROPIC_API_KEY and candidate_pool:
                 try:
                     _ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
                     url_list_text = "\n".join(f"{i+1}. {u}" for i, u in enumerate(candidate_pool))
@@ -2310,8 +2307,8 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                 except Exception as _fe:
                     logger.warning(f"find-page-for-keyword: failed to fetch Haiku pick ({_fe}), falling back")
 
-            # Fallback: check top regex candidates with keyword-in-title gate
-            to_check = [u for u in scored_urls[:20] if u != haiku_pick]
+            # Fallback: check top candidates with keyword-in-title gate
+            to_check = [u for u in candidate_pool if u != haiku_pick]
             results = await asyncio.gather(*[_check_page(u, client) for u in to_check])
             matches = [r for r in results if r]
             matches.sort(key=lambda r: r.get('is_blog_post', False))
