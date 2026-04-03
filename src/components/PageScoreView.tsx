@@ -227,6 +227,9 @@ export default function PageScoreView({
                       return `${totalIssues} SEO issue${totalIssues !== 1 ? "s" : ""} to address.`;
                     })()}
               </div>
+              <div className="text-xs text-muted-foreground mt-1">
+                Cost: ${scoreResult.token_usage.cost_usd?.toFixed(5)} ({scoreResult.token_usage.input_tokens}+{scoreResult.token_usage.output_tokens} tokens)
+              </div>
             </div>
           </div>
 
