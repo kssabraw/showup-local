@@ -13,6 +13,7 @@ interface Props {
   contentHtml: string;
   schemaJson: string;
   pageTitle: string;
+  htmlCssNotes?: string[];
   businessId: string;
   businessName: string;
   website?: string;
@@ -55,7 +56,7 @@ function scoreBadge(score?: number, status?: string) {
 }
 
 export default function GeneratedPageView({
-  keyword, location, mode, contentHtml, schemaJson, pageTitle,
+  keyword, location, mode, contentHtml, schemaJson, pageTitle, htmlCssNotes,
   businessId, businessName, website, gbpCategory, address,
   onBack, onNewPage, onRelatedAction,
 }: Props) {
@@ -230,6 +231,25 @@ export default function GeneratedPageView({
                        prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg"
             dangerouslySetInnerHTML={{ __html: contentHtml.replace(/<\/p>\s*<p/g, '</p><br><br><p') }}
           />
+          {/* HTML/CSS improvement notes — reoptimize only */}
+          {mode === "reoptimize" && htmlCssNotes && htmlCssNotes.length > 0 && (
+            <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-5 space-y-3">
+              <div>
+                <p className="text-sm font-semibold text-foreground">Structural Improvements Recommended</p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  These changes require editing your page's HTML/CSS and could not be applied automatically.
+                </p>
+              </div>
+              <ul className="space-y-2">
+                {htmlCssNotes.map((note, i) => (
+                  <li key={i} className="flex items-start gap-2 text-sm text-foreground">
+                    <span className="text-amber-500 shrink-0 mt-0.5">→</span>
+                    <span>{note}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
 

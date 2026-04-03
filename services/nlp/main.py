@@ -2703,6 +2703,7 @@ class ReoptimizePageResponse(BaseModel):
     content_html: str
     schema_json: Optional[str] = None
     token_usage: dict
+    html_css_notes: List[str] = []
 
 
 @app.post('/reoptimize-page', response_model=ReoptimizePageResponse, dependencies=[Depends(verify_api_key)])
@@ -2738,7 +2739,7 @@ async def reoptimize_page(request: Request, body: ReoptimizePageRequest):
         for d in body.deficiencies
     )
 
-    prompt = f"""You are an expert local SEO content writer. Rewrite the existing page below to fix all identified deficiencies.
+    prompt = f"""You are an expert local SEO content writer. Fix the SEO deficiencies in the page below by updating its text content only.
 
 BUSINESS: {body.business_name} | CATEGORY: {body.gbp_category}
 KEYWORD: {body.keyword} | CITY: {city}
@@ -2749,19 +2750,22 @@ ADDRESS: {body.address or "Not provided"}
 DEFICIENCIES TO FIX:
 {deficiency_text}
 
-EXISTING PAGE (rewrite this to fix all deficiencies above):
-{existing_html[:10000]}
+EXISTING PAGE:
+{existing_html[:12000]}
 
-INSTRUCTIONS:
-1. Fix every issue listed in the deficiencies — be specific and thorough.
-2. Naturally incorporate the competitor entities and phrases from SERP data where missing.
-3. Preserve the overall structure and any sections that are already strong.
-4. Do not fabricate reviews or placeholder text.
-5. Do not use "near me" literally in body content.
-6. Return the full rewritten page as clean HTML.
-7. After the HTML, output an updated <script type="application/ld+json"> schema block if the schema needs updating.
+STRICT RULES — follow exactly:
+1. TEXT ONLY: Only change text content (words between HTML tags). You may also update SEO-relevant attributes: alt, title, meta[content], og:title, og:description, aria-label, and JSON-LD schema text values.
+2. PRESERVE EVERYTHING ELSE: Do not change any element types, CSS classes, IDs, data-* attributes, href, src, or any non-content attributes. Do not add, remove, or reorder any HTML elements.
+3. Fix every deficiency listed above through word choices, phrasing, and copy — not by adding new HTML sections.
+4. Naturally incorporate competitor entities and phrases from SERP data where missing.
+5. Do not fabricate reviews or placeholder text. Do not use "near me" literally in body copy.
 
-Return the complete rewritten page HTML only — no markdown, no explanations."""
+Return your response in EXACTLY this format (do not deviate):
+
+<<<NOTES>>>
+List each HTML/CSS structural change that would further improve SEO but that you could NOT make because it requires adding/moving/removing elements or changing classes. Be specific (e.g. "Add an FAQ section with schema markup", "H1 tag is missing — the page title is wrapped in a <div> instead"). If none, write "None."
+<<<HTML>>>
+[Complete page HTML with ONLY text content and SEO attributes changed]"""
 
     try:
         msg = await client.messages.create(
@@ -2779,18 +2783,38 @@ Return the complete rewritten page HTML only — no markdown, no explanations.""
         raw = re.sub(r'\n?```$', '', raw)
         raw = raw.strip()
 
-    schema_split = raw.find('<script type="application/ld+json">')
-    if schema_split != -1:
-        content_html = raw[:schema_split].strip()
-        schema_json = raw[schema_split:].strip()
+    # Split on delimiter to extract notes and HTML separately
+    html_css_notes: List[str] = []
+    if "<<<HTML>>>" in raw:
+        parts = raw.split("<<<HTML>>>", 1)
+        notes_block = parts[0]
+        html_block = parts[1].strip()
+        # Extract bullet lines from the notes block (between <<<NOTES>>> and <<<HTML>>>)
+        if "<<<NOTES>>>" in notes_block:
+            notes_text = notes_block.split("<<<NOTES>>>", 1)[1].strip()
+        else:
+            notes_text = notes_block.strip()
+        if notes_text and notes_text.lower() != "none.":
+            for line in notes_text.splitlines():
+                line = line.strip().lstrip("-•*123456789. ").strip()
+                if line and line.lower() != "none.":
+                    html_css_notes.append(line)
     else:
-        content_html = raw
+        html_block = raw
+
+    schema_split = html_block.find('<script type="application/ld+json">')
+    if schema_split != -1:
+        content_html = html_block[:schema_split].strip()
+        schema_json = html_block[schema_split:].strip()
+    else:
+        content_html = html_block
         schema_json = None
 
     return ReoptimizePageResponse(
         content_html=content_html,
         schema_json=schema_json,
         token_usage=token_rec,
+        html_css_notes=html_css_notes,
     )
 
 

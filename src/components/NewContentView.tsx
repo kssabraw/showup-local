@@ -45,7 +45,7 @@ type CheckState =
 type ViewState =
   | { kind: "form" }
   | { kind: "score"; pageMatch: { url: string; title: string; h1?: string }; serpAnalysis: AnalysisResult; initialScoreResult: any }
-  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string }
+  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[] }
   | { kind: "analysis"; result: AnalysisResult };
 
 interface SavedPage {
@@ -652,7 +652,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         initialScoreResult={view.initialScoreResult}
         onBack={() => setView({ kind: "form" })}
         onGenerated={(result, mode) =>
-          setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "" })
+          setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "", htmlCssNotes: result.html_css_notes })
         }
         onCreateNew={handleCreateNewPage}
         relatedPagePanel={relatedPagePanel}
@@ -669,6 +669,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         contentHtml={view.contentHtml}
         schemaJson={view.schemaJson}
         pageTitle={view.pageTitle}
+        htmlCssNotes={view.htmlCssNotes}
         businessId={selectedBusinessId}
         businessName={selectedBusiness?.business_name || ""}
         website={selectedBusiness?.website ?? undefined}

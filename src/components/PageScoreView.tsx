@@ -31,6 +31,7 @@ interface GeneratedResult {
   content_html: string;
   schema_json: string;
   token_usage: Record<string, any>;
+  html_css_notes?: string[];
 }
 
 interface Props {
