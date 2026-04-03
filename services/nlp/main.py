@@ -1053,15 +1053,23 @@ async def _discover_via_sitemap(base_url: str, client: httpx.AsyncClient) -> Lis
     # Try common sitemap locations if robots.txt didn't specify one
     candidate_sitemaps = [sitemap_url] if sitemap_url else [
         f"{origin}/sitemap.xml",
+        f"{origin}/sitemap.xml.gz",
         f"{origin}/sitemap_index.xml",
+        f"{origin}/index-sitemap.xml",
         f"{origin}/wp-sitemap.xml",
         f"{origin}/page-sitemap.xml",
+        f"{origin}/page-sitemap1.xml",
+        f"{origin}/post-sitemap.xml",
+        f"{origin}/post-sitemap1.xml",
+        f"{origin}/category-sitemap.xml",
+        f"{origin}/sitemap1.xml",
     ]
 
     urls: List[str] = []
     for sm_url in candidate_sitemaps:
         urls = await _fetch_sitemap_urls(sm_url, client)
         if urls:
+            logger.info(f"Sitemap discovery: found working sitemap at {sm_url}")
             break
     # Filter to same domain, HTML-like URLs
     internal = []
@@ -2282,6 +2290,36 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                 if guessed:
                     logger.info(f"find-page-for-keyword: direct-guess found {guessed}")
                     candidate_pool = guessed + candidate_pool
+
+            # ── site: search fallback ─────────────────────────────────────────────
+            # If all sitemap + guessing attempts found nothing, query Google via
+            # DataForSEO with  site:{domain} {keyword} {city}  and use the results.
+            if not candidate_pool and DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD:
+                try:
+                    city = (body.location or "").split(",")[0].strip()
+                    site_query = f"site:{base_netloc} {body.keyword} {city}".strip()
+                    logger.info(f"find-page-for-keyword: falling back to site-search: {site_query!r}")
+                    credentials = base64.b64encode(
+                        f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
+                    ).decode()
+                    _sr = await client.post(
+                        DATAFORSEO_ENDPOINT,
+                        headers={"Authorization": f"Basic {credentials}", "Content-Type": "application/json"},
+                        json=[{"keyword": site_query, "language_name": "English", "depth": 10, "se_domain": "google.com"}],
+                        timeout=30.0,
+                    )
+                    if _sr.status_code == 200:
+                        _sd = _sr.json()
+                        for _task in (_sd.get("tasks") or []):
+                            for _result in (_task.get("result") or []):
+                                for _item in (_result.get("items") or []):
+                                    if _item.get("type") == "organic":
+                                        _u = _item.get("url", "")
+                                        if _u and base_netloc in _u and _u not in candidate_pool:
+                                            candidate_pool.append(_u)
+                        logger.info(f"find-page-for-keyword: site-search returned {len(candidate_pool)} results")
+                except Exception as _se:
+                    logger.warning(f"find-page-for-keyword: site-search failed ({_se})")
 
             # Generic fallback: if still nothing, take top 10 discovered URLs
             if not candidate_pool:
