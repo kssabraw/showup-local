@@ -219,8 +219,11 @@ export default function PageScoreView({
               </div>
               <div className="text-sm text-muted-foreground mt-1">
                 {scoreResult.deficiencies.length === 0
-                  ? "All engines passing — page is well optimized."
-                  : `${scoreResult.deficiencies.length} engine${scoreResult.deficiencies.length > 1 ? "s" : ""} below standard.`}
+                  ? "No improvements needed."
+                  : (() => {
+                      const totalIssues = scoreResult.deficiencies.reduce((n, d) => n + (d.issues?.length ?? 1), 0);
+                      return `${totalIssues} SEO issue${totalIssues !== 1 ? "s" : ""} to address.`;
+                    })()}
               </div>
             </div>
           </div>
@@ -289,7 +292,7 @@ export default function PageScoreView({
             {scoreResult.deficiencies.length > 0 ? (
               <>
                 <p className="text-sm text-muted-foreground">
-                  Reoptimize this page to fix all {scoreResult.deficiencies.length} deficient engine{scoreResult.deficiencies.length > 1 ? "s" : ""} and incorporate missing SERP signals.
+                  Reoptimize this page to fix the SEO issues above and incorporate missing SERP signals.
                 </p>
                 <Button
                   className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
