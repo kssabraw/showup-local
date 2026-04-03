@@ -2138,8 +2138,20 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             return False
 
     def _word_in_slug(word: str, path: str) -> bool:
-        """True if word appears as a substring in the URL path (handles plurals naturally)."""
-        return word in path.lower()
+        """True if word matches the URL path, handling plurals in both directions.
+        - singular keyword finds plural slug:  'service' in 'services' ✓
+        - plural keyword finds singular slug:  'trees' finds 'tree-service' ✓ (via stem)
+        """
+        path = path.lower()
+        word = word.lower()
+        if word in path:
+            return True
+        # Strip trailing 's' or 'es' to get a stem, then check the stem
+        if word.endswith('es') and len(word) > 4:
+            return word[:-2] in path
+        if word.endswith('s') and len(word) > 3:
+            return word[:-1] in path
+        return False
 
     def _slug_match_score(u: str) -> tuple:
         """Return (has_both_service_and_location, service_hits, loc_hits) for sorting."""
