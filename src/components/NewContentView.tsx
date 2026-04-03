@@ -543,6 +543,97 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
   const selectedBusiness = businesses.find(b => b.id === selectedBusinessId);
   const canCheck = !!keyword.trim() && !!location && !!selectedBusinessId && businesses.length > 0;
 
+  // ── Shared related pages panel ─────────────────────────────────────────────
+  const relatedPagePanel = (relatedLoading || relatedPages) ? (() => {
+    const missingItems = (relatedPages ?? []).filter(p => p.status === "missing");
+    const allMissingSelected = missingItems.length > 0 && missingItems.every(p => selectedForCreate.has(p.keyword));
+    return (
+      <div className="bg-card border border-border rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+          <p className="text-sm font-semibold text-foreground">Related Pages</p>
+          <div className="flex items-center gap-3">
+            {relatedLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
+            {!relatedLoading && missingItems.length > 0 && (
+              <button className="text-xs text-accent underline"
+                onClick={() => setSelectedForCreate(allMissingSelected ? new Set() : new Set(missingItems.map(p => p.keyword)))}>
+                {allMissingSelected ? "Deselect all" : "Select all missing"}
+              </button>
+            )}
+          </div>
+        </div>
+        {relatedLoading && !relatedPages && (
+          <div className="px-4 py-3 text-xs text-muted-foreground">Discovering related keywords…</div>
+        )}
+        {relatedPages && relatedPages.length === 0 && (
+          <div className="px-4 py-3 text-xs text-muted-foreground">No related pages found.</div>
+        )}
+        {relatedPages && relatedPages.length > 0 && (
+          <div className="divide-y divide-border">
+            {(["parents", "siblings", "children"] as const).map(group => {
+              const items = relatedPages.filter(p => p.group === group);
+              if (!items.length) return null;
+              const groupLabel = group === "parents" ? "Parent Pages" : group === "siblings" ? "Sibling Pages" : "Child Pages";
+              return (
+                <div key={group}>
+                  <div className="px-4 py-2 bg-muted/30">
+                    <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{groupLabel}</p>
+                  </div>
+                  {items.map((item: any) => (
+                    <div key={item.keyword} className="px-4 py-3 flex items-center gap-3">
+                      {item.status === "missing" && (
+                        <input type="checkbox" className="shrink-0 accent-accent w-4 h-4 cursor-pointer"
+                          checked={selectedForCreate.has(item.keyword)}
+                          onChange={e => setSelectedForCreate(prev => {
+                            const next = new Set(prev);
+                            e.target.checked ? next.add(item.keyword) : next.delete(item.keyword);
+                            return next;
+                          })} />
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-foreground truncate">{item.keyword}</p>
+                        {item.status === "found" && item.url && (
+                          <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground underline truncate block">{item.url}</a>
+                        )}
+                      </div>
+                      {item.status === "found" ? (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className={`text-xs font-semibold ${item.composite_score >= 80 ? "text-green-500" : item.composite_score >= 60 ? "text-amber-500" : "text-red-500"}`}>
+                            {item.composite_score ?? "–"}
+                          </span>
+                          <Button size="sm" variant="outline" className="text-xs h-7 px-2"
+                            onClick={() => handleRelatedAction({ mode: "reoptimize", keyword: item.keyword, existingUrl: item.url })}>
+                            Reoptimize
+                          </Button>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-muted-foreground shrink-0">Missing</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {selectedForCreate.size > 0 && (
+          <div className="px-4 py-3 border-t border-border bg-muted/20">
+            <Button className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold"
+              onClick={handleBulkCreate} disabled={bulkCreating}>
+              {bulkCreating && bulkProgress
+                ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Creating {bulkProgress.currentKw} ({bulkProgress.current}/{bulkProgress.total})…</>
+                : <><Sparkles className="w-4 h-4 mr-2" />Create {selectedForCreate.size} Selected Page{selectedForCreate.size > 1 ? "s" : ""}</>}
+            </Button>
+          </div>
+        )}
+        {bulkDone > 0 && !bulkCreating && (
+          <div className="px-4 py-3 border-t border-border">
+            <p className="text-xs text-green-600 font-medium">{bulkDone} page{bulkDone > 1 ? "s" : ""} created and saved — view them in Saved Pages below.</p>
+          </div>
+        )}
+      </div>
+    );
+  })() : null;
+
   // ── Sub-view routing ───────────────────────────────────────────────────────
   if (view.kind === "score") {
     return (
@@ -564,6 +655,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
           setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "" })
         }
         onCreateNew={handleCreateNewPage}
+        relatedPagePanel={relatedPagePanel}
       />
     );
   }
@@ -815,93 +907,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
                 </div>
               </div>
             </div>
-            {/* Related pages panel for high_score state — same panel, shared state */}
-            {(relatedLoading || relatedPages) && (() => {
-              const missingItems = (relatedPages ?? []).filter(p => p.status === "missing");
-              const allMissingSelected = missingItems.length > 0 && missingItems.every(p => selectedForCreate.has(p.keyword));
-              return (
-                <div className="bg-card border border-border rounded-xl overflow-hidden">
-                  <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-                    <p className="text-sm font-semibold text-foreground">Related Pages</p>
-                    <div className="flex items-center gap-3">
-                      {relatedLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
-                      {!relatedLoading && missingItems.length > 0 && (
-                        <button className="text-xs text-accent underline"
-                          onClick={() => setSelectedForCreate(allMissingSelected ? new Set() : new Set(missingItems.map(p => p.keyword)))}>
-                          {allMissingSelected ? "Deselect all" : "Select all missing"}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                  {relatedLoading && !relatedPages && (
-                    <div className="px-4 py-3 text-xs text-muted-foreground">Discovering related keywords…</div>
-                  )}
-                  {relatedPages && relatedPages.length > 0 && (
-                    <div className="divide-y divide-border">
-                      {(["parents", "siblings", "children"] as const).map(group => {
-                        const items = relatedPages.filter(p => p.group === group);
-                        if (!items.length) return null;
-                        const groupLabel = group === "parents" ? "Parent Pages" : group === "siblings" ? "Sibling Pages" : "Child Pages";
-                        return (
-                          <div key={group}>
-                            <div className="px-4 py-2 bg-muted/30">
-                              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{groupLabel}</p>
-                            </div>
-                            {items.map((item: any) => (
-                              <div key={item.keyword} className="px-4 py-3 flex items-center gap-3">
-                                {item.status === "missing" && (
-                                  <input type="checkbox" className="shrink-0 accent-accent w-4 h-4 cursor-pointer"
-                                    checked={selectedForCreate.has(item.keyword)}
-                                    onChange={e => setSelectedForCreate(prev => {
-                                      const next = new Set(prev);
-                                      e.target.checked ? next.add(item.keyword) : next.delete(item.keyword);
-                                      return next;
-                                    })} />
-                                )}
-                                <div className="flex-1 min-w-0">
-                                  <p className="text-sm font-medium text-foreground truncate">{item.keyword}</p>
-                                  {item.status === "found" && item.url && (
-                                    <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground underline truncate block">{item.url}</a>
-                                  )}
-                                </div>
-                                {item.status === "found" ? (
-                                  <div className="flex items-center gap-2 shrink-0">
-                                    <span className={`text-xs font-semibold ${item.composite_score >= 80 ? "text-green-500" : item.composite_score >= 60 ? "text-amber-500" : "text-red-500"}`}>
-                                      {item.composite_score ?? "–"}
-                                    </span>
-                                    <Button size="sm" variant="outline" className="text-xs h-7 px-2"
-                                      onClick={() => handleRelatedAction({ mode: "reoptimize", keyword: item.keyword, existingUrl: item.url })}>
-                                      Reoptimize
-                                    </Button>
-                                  </div>
-                                ) : (
-                                  <span className="text-xs text-muted-foreground shrink-0">Missing</span>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                  {selectedForCreate.size > 0 && (
-                    <div className="px-4 py-3 border-t border-border bg-muted/20">
-                      <Button className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold"
-                        onClick={handleBulkCreate} disabled={bulkCreating}>
-                        {bulkCreating && bulkProgress
-                          ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Creating {bulkProgress.currentKw} ({bulkProgress.current}/{bulkProgress.total})…</>
-                          : <><Sparkles className="w-4 h-4 mr-2" />Create {selectedForCreate.size} Selected Page{selectedForCreate.size > 1 ? "s" : ""}</>}
-                      </Button>
-                    </div>
-                  )}
-                  {bulkDone > 0 && !bulkCreating && (
-                    <div className="px-4 py-3 border-t border-border">
-                      <p className="text-xs text-green-600 font-medium">{bulkDone} page{bulkDone > 1 ? "s" : ""} created and saved — view them in Saved Pages below.</p>
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
+            {relatedPagePanel}
 
             <button
               onClick={() => setCheckState({ status: "idle" })}
@@ -934,97 +940,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
               <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score</Button>
             </div>
 
-            {/* Related pages panel */}
-            {(relatedLoading || relatedPages) && (() => {
-              const missingItems = (relatedPages ?? []).filter(p => p.status === "missing");
-              const allMissingSelected = missingItems.length > 0 && missingItems.every(p => selectedForCreate.has(p.keyword));
-              return (
-                <div className="bg-card border border-border rounded-xl overflow-hidden">
-                  <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-                    <p className="text-sm font-semibold text-foreground">Related Pages</p>
-                    <div className="flex items-center gap-3">
-                      {relatedLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
-                      {!relatedLoading && missingItems.length > 0 && (
-                        <button className="text-xs text-accent underline"
-                          onClick={() => setSelectedForCreate(allMissingSelected ? new Set() : new Set(missingItems.map(p => p.keyword)))}>
-                          {allMissingSelected ? "Deselect all" : "Select all missing"}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                  {relatedLoading && !relatedPages && (
-                    <div className="px-4 py-3 text-xs text-muted-foreground">Discovering related keywords…</div>
-                  )}
-                  {relatedPages && relatedPages.length === 0 && (
-                    <div className="px-4 py-3 text-xs text-muted-foreground">No related pages found.</div>
-                  )}
-                  {relatedPages && relatedPages.length > 0 && (
-                    <div className="divide-y divide-border">
-                      {(["parents", "siblings", "children"] as const).map(group => {
-                        const items = relatedPages.filter(p => p.group === group);
-                        if (!items.length) return null;
-                        const groupLabel = group === "parents" ? "Parent Pages" : group === "siblings" ? "Sibling Pages" : "Child Pages";
-                        return (
-                          <div key={group}>
-                            <div className="px-4 py-2 bg-muted/30">
-                              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{groupLabel}</p>
-                            </div>
-                            {items.map((item: any) => (
-                              <div key={item.keyword} className="px-4 py-3 flex items-center gap-3">
-                                {item.status === "missing" && (
-                                  <input type="checkbox" className="shrink-0 accent-accent w-4 h-4 cursor-pointer"
-                                    checked={selectedForCreate.has(item.keyword)}
-                                    onChange={e => setSelectedForCreate(prev => {
-                                      const next = new Set(prev);
-                                      e.target.checked ? next.add(item.keyword) : next.delete(item.keyword);
-                                      return next;
-                                    })} />
-                                )}
-                                <div className="flex-1 min-w-0">
-                                  <p className="text-sm font-medium text-foreground truncate">{item.keyword}</p>
-                                  {item.status === "found" && item.url && (
-                                    <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground underline truncate block">{item.url}</a>
-                                  )}
-                                </div>
-                                {item.status === "found" ? (
-                                  <div className="flex items-center gap-2 shrink-0">
-                                    <span className={`text-xs font-semibold ${item.composite_score >= 80 ? "text-green-500" : item.composite_score >= 60 ? "text-amber-500" : "text-red-500"}`}>
-                                      {item.composite_score ?? "–"}
-                                    </span>
-                                    <Button size="sm" variant="outline" className="text-xs h-7 px-2"
-                                      onClick={() => handleRelatedAction({ mode: "reoptimize", keyword: item.keyword, existingUrl: item.url })}>
-                                      Reoptimize
-                                    </Button>
-                                  </div>
-                                ) : (
-                                  <span className="text-xs text-muted-foreground shrink-0">Missing</span>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                  {/* Bulk create footer */}
-                  {selectedForCreate.size > 0 && (
-                    <div className="px-4 py-3 border-t border-border bg-muted/20">
-                      <Button className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold"
-                        onClick={handleBulkCreate} disabled={bulkCreating}>
-                        {bulkCreating && bulkProgress
-                          ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Creating {bulkProgress.currentKw} ({bulkProgress.current}/{bulkProgress.total})…</>
-                          : <><Sparkles className="w-4 h-4 mr-2" />Create {selectedForCreate.size} Selected Page{selectedForCreate.size > 1 ? "s" : ""}</>}
-                      </Button>
-                    </div>
-                  )}
-                  {bulkDone > 0 && !bulkCreating && (
-                    <div className="px-4 py-3 border-t border-border">
-                      <p className="text-xs text-green-600 font-medium">{bulkDone} page{bulkDone > 1 ? "s" : ""} created and saved — view them in Saved Pages below.</p>
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
+            {relatedPagePanel}
 
             <button
               onClick={() => setCheckState({ status: "idle" })}

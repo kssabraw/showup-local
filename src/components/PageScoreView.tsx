@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader2, CheckCircle, AlertTriangle, XCircle, ChevronDown, ChevronUp } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
@@ -49,6 +49,7 @@ interface Props {
   onBack: () => void;
   onGenerated: (result: GeneratedResult, mode: "reoptimize") => void;
   onCreateNew: () => void;
+  relatedPagePanel?: ReactNode;
 }
 
 const ENGINE_LABELS: Record<string, string> = {
@@ -82,7 +83,7 @@ function StatusIcon({ score }: { score: number }) {
 export default function PageScoreView({
   keyword, location, pageUrl, pageTitle, businessId, businessName,
   gbpCategory, address, phone, differentiators, serp_analysis, initialScoreResult,
-  onBack, onGenerated, onCreateNew,
+  onBack, onGenerated, onCreateNew, relatedPagePanel,
 }: Props) {
   const [scoreResult, setScoreResult] = useState<ScoreResult | null>(initialScoreResult ?? null);
   const [scoring, setScoring] = useState(false);
@@ -327,6 +328,8 @@ export default function PageScoreView({
           </div>
         </div>
       )}
+
+      {relatedPagePanel}
     </div>
   );
 }
