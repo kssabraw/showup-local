@@ -2236,9 +2236,18 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             biz_location = (body.location or "").strip()
             service_words = kw_words
 
-            # Use Haiku to pick the best matching URL from the candidate list
+            # ── Fast path: skip Haiku when the top candidate is unambiguously better ──
+            # If the #1 URL has a slug score at least 2 points ahead of #2, it's a
+            # clear winner — use it directly without an LLM call.
             haiku_pick: Optional[str] = None
-            if ANTHROPIC_API_KEY and candidate_pool:
+            if candidate_pool:
+                top_score = _slug_score(candidate_pool[0])
+                second_score = _slug_score(candidate_pool[1]) if len(candidate_pool) > 1 else 0
+                if top_score >= 3 and (top_score - second_score) >= 2:
+                    haiku_pick = candidate_pool[0]
+                    logger.info(f"find-page-for-keyword: fast-path pick (score={top_score} vs {second_score}) → {haiku_pick}")
+
+            if not haiku_pick and ANTHROPIC_API_KEY and candidate_pool:
                 try:
                     _ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
                     url_list_text = "\n".join(f"{i+1}. {u}" for i, u in enumerate(candidate_pool))
@@ -2256,6 +2265,7 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                     _msg = await _ac.messages.create(
                         model="claude-haiku-4-5-20251001",
                         max_tokens=64,
+                        temperature=0,
                         messages=[{"role": "user", "content": (
                             f"Keyword: \"{body.keyword}\"\n"
                             f"Location: {location_context}\n\n"
