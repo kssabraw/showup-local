@@ -60,10 +60,10 @@ interface SavedPage {
   created_at: string;
 }
 
-const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; defaultLocation?: string }) => {
+const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: { onBack: () => void; defaultLocation?: string; defaultKeyword?: string }) => {
   const [businesses, setBusinesses] = useState<BusinessProfile[]>([]);
   const [selectedBusinessId, setSelectedBusinessId] = useState("");
-  const [keyword, setKeyword] = useState("");
+  const [keyword, setKeyword] = useState(defaultKeyword);
   const [location, setLocation] = useState(defaultLocation);
   const [locationCode, setLocationCode] = useState<number | null>(null);
   const [locationInput, setLocationInput] = useState(defaultLocation);
@@ -92,6 +92,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
   const [bulkProgress, setBulkProgress] = useState<{ current: number; total: number; currentKw: string } | null>(null);
   const [bulkDone, setBulkDone] = useState(0);
   const [manualUrl, setManualUrl] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const locationDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const locationContainerRef = useRef<HTMLDivElement>(null);
@@ -197,6 +198,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
   };
 
   const deleteSavedPage = async (id: string) => {
+    setConfirmDeleteId(null);
     setDeletingId(id);
     await supabase.from("generated_pages").delete().eq("id", id);
     setSavedPages(prev => prev.filter(p => p.id !== id));
@@ -804,7 +806,6 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         {/* Area / Location input */}
         <div className="space-y-2" ref={locationContainerRef}>
           <label className="text-sm font-medium text-foreground">Area</label>
-          <p className="text-xs text-muted-foreground -mt-1">Type to search — select from the list</p>
           <div className="relative">
             <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground z-10" />
             <input
@@ -812,6 +813,11 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
               value={locationInput}
               onChange={(e) => handleLocationInput(e.target.value)}
               onFocus={() => { if (locationSuggestions.length > 0) setShowSuggestions(true); }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && locationSuggestions.length > 0) {
+                  selectLocation(locationSuggestions[0]);
+                }
+              }}
               disabled={isChecking}
               placeholder="Search locations…"
               className={`w-full bg-background border rounded-lg pl-9 pr-8 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60 ${location ? "border-green-500" : "border-input"}`}
@@ -952,15 +958,19 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
               <p className="text-sm text-foreground">
                 If this page isn't ranking, on-page reoptimization is unlikely to be the issue. There may be off-page factors, domain authority gaps, or GBP signals holding it back.
               </p>
-              <div className="bg-card border border-border rounded-lg px-4 py-3 flex items-start gap-3">
-                <PhoneCall className="w-4 h-4 text-accent mt-0.5 shrink-0" />
-                <div>
+              <a
+                href="mailto:hello@showuplocal.com?subject=Off-page%20%2B%20GBP%20Analysis%20Request"
+                className="bg-card border border-border rounded-lg px-4 py-3 flex items-center gap-3 hover:border-accent/40 transition-colors group"
+              >
+                <PhoneCall className="w-4 h-4 text-accent shrink-0" />
+                <div className="flex-1 min-w-0">
                   <p className="text-sm font-semibold text-foreground">Contact ShowUp Experts</p>
                   <p className="text-xs text-muted-foreground mt-0.5">
-                    Get a full off-page + GBP analysis from our team — <span className="font-medium text-foreground">$20/page</span>.
+                    Get a full off-page + GBP analysis — <span className="font-medium text-foreground">$20/page</span>
                   </p>
                 </div>
-              </div>
+                <span className="text-xs text-accent font-medium shrink-0 group-hover:underline">Get in touch →</span>
+              </a>
             </div>
             {relatedPagePanel}
 
@@ -1075,13 +1085,26 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
 
         {/* Idle — show Check My Site button */}
         {checkState.status === "idle" && (
-          <Button
-            className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
-            onClick={handleCheckSite}
-            disabled={!canCheck}
-          >
-            <FileSearch className="w-4 h-4 mr-2" /> Check My Site
-          </Button>
+          <div className="space-y-2">
+            <Button
+              className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
+              onClick={handleCheckSite}
+              disabled={!canCheck}
+            >
+              <FileSearch className="w-4 h-4 mr-2" /> Check My Site
+            </Button>
+            {!canCheck && (
+              <p className="text-xs text-muted-foreground text-center">
+                {businesses.length === 0
+                  ? "Add a business in Locations first"
+                  : !keyword.trim()
+                  ? "Enter a service to continue"
+                  : !location
+                  ? "Select a location from the list to continue"
+                  : "Select a business to continue"}
+              </p>
+            )}
+          </div>
         )}
       </div>
 
@@ -1134,15 +1157,23 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
                     >
                       View
                     </Button>
-                    <button
-                      onClick={() => deleteSavedPage(page.id)}
-                      disabled={deletingId === page.id}
-                      className="text-muted-foreground hover:text-destructive transition-colors p-1 rounded"
-                    >
-                      {deletingId === page.id
-                        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        : <Trash2 className="w-3.5 h-3.5" />}
-                    </button>
+                    {confirmDeleteId === page.id ? (
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="text-muted-foreground">Delete?</span>
+                        <button onClick={() => deleteSavedPage(page.id)} className="text-destructive font-medium hover:underline">Yes</button>
+                        <button onClick={() => setConfirmDeleteId(null)} className="text-muted-foreground hover:text-foreground">No</button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmDeleteId(page.id)}
+                        disabled={deletingId === page.id}
+                        className="text-muted-foreground hover:text-destructive transition-colors p-1 rounded"
+                      >
+                        {deletingId === page.id
+                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          : <Trash2 className="w-3.5 h-3.5" />}
+                      </button>
+                    )}
                   </div>
                 </div>
               );

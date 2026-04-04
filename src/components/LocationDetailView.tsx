@@ -212,6 +212,11 @@ const LocationDetailView = ({
         .update({ analysis_status: "failed" })
         .eq("id", b.id);
       await fetchBusiness();
+      toast({
+        title: "Analysis failed",
+        description: err instanceof Error ? err.message : "Could not complete the website analysis. Please try again.",
+        variant: "destructive",
+      });
     } finally {
       setRescanning(false);
     }
@@ -434,19 +439,27 @@ const LocationDetailView = ({
 
       {/* Tabs */}
       <div className="flex gap-1 bg-muted rounded-lg p-1">
-        {TABS.map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`flex-1 text-xs font-medium py-1.5 rounded-md transition-colors ${
-              activeTab === tab
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {tab}
-          </button>
-        ))}
+        {TABS.map((tab) => {
+          const hasDot =
+            (tab === "ICP & Differentiators" && (icp?.segments?.length > 0 || differentiators.length > 0)) ||
+            (tab === "Brand Voice" && !!business.brand_voice);
+          return (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`flex-1 text-xs font-medium py-1.5 rounded-md transition-colors relative ${
+                activeTab === tab
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {tab}
+              {hasDot && (
+                <span className="absolute top-1 right-2 w-1.5 h-1.5 rounded-full bg-green-500" />
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {/* Overview tab */}
@@ -1137,6 +1150,38 @@ const LocationDetailView = ({
           </div>
         );
       })()}
+
+      {/* Sticky save/cancel bar — shown whenever any section is in edit mode */}
+      {(editingIcp || editingDifferentiators || editingBrandVoice) && (
+        <div className="fixed bottom-0 left-0 right-0 z-50 border-t border-border bg-card/95 backdrop-blur-sm px-6 py-3 flex items-center justify-between">
+          <p className="text-xs text-muted-foreground">
+            {editingIcp ? "Editing ICP segments" : editingDifferentiators ? "Editing differentiators" : "Editing brand voice"}
+          </p>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => {
+                setEditingIcp(false);
+                setEditingDifferentiators(false);
+                setEditingBrandVoice(false);
+              }}
+              className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => {
+                if (editingIcp) saveIcp();
+                else if (editingDifferentiators) saveDifferentiators();
+                else if (editingBrandVoice) saveBrandVoice();
+              }}
+              disabled={savingIcp || savingBrandVoice}
+              className="text-sm font-medium bg-accent text-accent-foreground px-4 py-1.5 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              {(savingIcp || savingBrandVoice) ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

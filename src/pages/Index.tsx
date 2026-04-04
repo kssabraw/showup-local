@@ -5,6 +5,7 @@ import NewContentView from "@/components/NewContentView";
 import BusinessSearchView, { type BusinessDetails } from "@/components/BusinessSearchView";
 import LocationsView from "@/components/LocationsView";
 import LocationDetailView from "@/components/LocationDetailView";
+import PlanningView from "@/components/PlanningView";
 import LoginView from "@/components/LoginView";
 import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
@@ -20,6 +21,8 @@ const Index = () => {
   const [activeItem, setActiveItem] = useState("dashboard");
   const [collapsed, setCollapsed] = useState(false);
   const [selectedLocationId, setSelectedLocationId] = useState<string | null>(null);
+  const [planningKeyword, setPlanningKeyword] = useState("");
+  const [planningLocation, setPlanningLocation] = useState("");
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -69,6 +72,15 @@ const Index = () => {
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
 
+      // Navigate directly to the newly added business detail view
+      const { data: saved } = await supabase
+        .from("business_profiles")
+        .select("id")
+        .eq("gbp_place_id", business.place_id)
+        .single();
+      if (saved?.id) {
+        setSelectedLocationId(saved.id);
+      }
       setActiveItem("locations");
 
       // Trigger background analysis if the business has a website
@@ -173,7 +185,11 @@ const Index = () => {
             />
           )}
           {activeItem === "content" && (
-            <NewContentView onBack={() => setActiveItem("dashboard")} />
+            <NewContentView
+              onBack={() => setActiveItem("dashboard")}
+              defaultKeyword={planningKeyword}
+              defaultLocation={planningLocation}
+            />
           )}
           {activeItem === "locations" && !selectedLocationId && (
             <LocationsView
@@ -186,10 +202,39 @@ const Index = () => {
               onBack={() => setSelectedLocationId(null)}
             />
           )}
+          {activeItem === "planning" && (
+            <PlanningView
+              initialKeyword={planningKeyword}
+              initialLocation={planningLocation}
+              onCreatePage={(kw, loc) => {
+                setPlanningKeyword(kw);
+                setPlanningLocation(loc);
+                setActiveItem("content");
+              }}
+            />
+          )}
           {activeItem === "settings" && (
-            <div>
-              <h1 className="text-2xl font-display font-bold text-foreground">Settings</h1>
-              <p className="text-muted-foreground text-sm mt-1">Configure your ShowUP workspace.</p>
+            <div className="max-w-2xl space-y-6">
+              <div>
+                <h1 className="text-2xl font-display font-bold text-foreground">Settings</h1>
+                <p className="text-muted-foreground text-sm mt-1">Manage your ShowUP workspace.</p>
+              </div>
+              <div className="space-y-3">
+                {[
+                  { label: "API & Integrations", desc: "Connect DataForSEO, ScrapeOwl, and Google NLP credentials." },
+                  { label: "Default Location", desc: "Set a default city/region to pre-fill in content forms." },
+                  { label: "Team & Access", desc: "Invite team members and manage permissions." },
+                  { label: "Billing", desc: "View usage, token costs, and subscription details." },
+                ].map(({ label, desc }) => (
+                  <div key={label} className="bg-card border border-border rounded-xl px-5 py-4 flex items-center justify-between opacity-50 cursor-not-allowed select-none">
+                    <div>
+                      <p className="text-sm font-medium text-foreground">{label}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">{desc}</p>
+                    </div>
+                    <span className="text-xs text-muted-foreground border border-border rounded-full px-2 py-0.5 shrink-0 ml-4">Coming soon</span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>
