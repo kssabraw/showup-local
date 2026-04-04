@@ -1923,6 +1923,64 @@ def _coverage_context(coverage: dict) -> str:
     return "\n".join(parts) if parts else ""
 
 
+def _zone_targets_text(serp_analysis: dict) -> str:
+    """
+    Format competitor benchmark signals into zone-specific targets for the
+    generation prompt. Unlike _coverage_context (which diffs against an existing
+    page), this simply tells Claude what signals belong in each zone of a NEW page.
+    """
+    if not serp_analysis:
+        return ""
+    entities = serp_analysis.get("google_entities", [])
+    quadgrams = serp_analysis.get("top_quadgrams", [])
+    related_kw = serp_analysis.get("related_keywords", {})
+    if not isinstance(related_kw, dict):
+        related_kw = {}
+
+    parts = ["ZONE-SPECIFIC SIGNAL TARGETS — place signals in the correct zones:\n"]
+
+    top_entities = sorted(entities, key=lambda e: e.get("mean_salience", 0), reverse=True)
+
+    # Title
+    title_terms = [t["term"] for t in related_kw.get("title", [])[:6]]
+    title_ents = [e["name"] for e in top_entities[:3]]
+    if title_terms or title_ents:
+        parts.append("PAGE TITLE:")
+        if title_ents:
+            parts.append(f"  Include 1–2 of these high-salience entities: {', '.join(title_ents)}")
+        if title_terms:
+            parts.append(f"  Incorporate these terms: {', '.join(title_terms)}")
+
+    # H1
+    h1_terms = [t["term"] for t in related_kw.get("h1", [])[:6]]
+    h1_ents = [e["name"] for e in top_entities[:2]]
+    if h1_terms or h1_ents:
+        parts.append("\nH1 HEADING:")
+        if h1_ents:
+            parts.append(f"  Include 1–2 of these entities: {', '.join(h1_ents)}")
+        if h1_terms:
+            parts.append(f"  Incorporate these terms: {', '.join(h1_terms)}")
+
+    # H2/H3
+    h2h3_terms = [t["term"] for t in related_kw.get("h2_h3", [])[:12]]
+    if h2h3_terms:
+        parts.append(f"\nH2/H3 SUBHEADINGS — distribute these across your subheadings:")
+        parts.append(f"  {', '.join(h2h3_terms)}")
+
+    # Body paragraphs
+    body_terms = [t["term"] for t in related_kw.get("body", [])[:10]]
+    parts.append("\nBODY PARAGRAPHS:")
+    if entities:
+        ent_items = [f"{e['name']} (×{e['recommended_mentions']})" for e in entities[:20]]
+        parts.append(f"  Entities with target mention counts: {', '.join(ent_items)}")
+    if quadgrams:
+        parts.append(f"  Competitor phrases to use naturally: {', '.join(q['phrase'] for q in quadgrams[:15])}")
+    if body_terms:
+        parts.append(f"  Additional body terms: {', '.join(body_terms)}")
+
+    return "\n".join(parts)
+
+
 def _build_score_prompt(
     business_name: str,
     gbp_category: str,
