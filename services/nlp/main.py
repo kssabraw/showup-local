@@ -3439,14 +3439,11 @@ def _rankability_score(
 
 def _infer_is_sab(address: Optional[str]) -> bool:
     """
-    Infer whether a business is a service area business (SAB) from its address.
-    Physical businesses have a street address starting with a number (e.g. "123 Main St").
-    SABs typically hide their address and store only a city, region, or service area
-    description — so the address either starts with a letter or is absent.
+    SABs don't display an address on their GBP listing, so the address field
+    is empty or null when pulled from the API. Physical locations have a
+    street address stored.
     """
-    if not address or not address.strip():
-        return True   # no address stored → treat as SAB
-    return not re.match(r'^\d', address.strip())
+    return not bool(address and address.strip())
 
 
 class RankabilityRequest(BaseModel):
