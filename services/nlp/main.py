@@ -754,7 +754,7 @@ async def analyze(request: Request, body: AnalysisRequest):
     return await _run_serp_analysis(body.keyword, body.location, body.location_code, body.urls)
 
 
-@app.get('/health', dependencies=[Depends(verify_api_key)])
+@app.get('/health')
 async def health():
     return {'status': 'ok'}
 
