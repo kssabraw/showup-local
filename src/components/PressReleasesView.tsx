@@ -99,14 +99,24 @@ function PressReleaseReview({
     if (!feedback.trim()) return;
     setRegenerating(true);
     try {
-      // Fetch analysis data for this keyword/location
-      const { data: analysis } = await supabase
-        .from("keyword_analyses")
-        .select("related_keywords, top_quadgrams, google_entities")
-        .eq("business_id", pr.business_id)
-        .eq("keyword", pr.keyword)
-        .eq("location", pr.location)
-        .maybeSingle();
+      // Fetch analysis data and original page content in parallel
+      const [analysisRes, pageRes] = await Promise.all([
+        supabase
+          .from("keyword_analyses")
+          .select("related_keywords, top_quadgrams, google_entities")
+          .eq("business_id", pr.business_id)
+          .eq("keyword", pr.keyword)
+          .eq("location", pr.location)
+          .maybeSingle(),
+        pr.generated_page_id
+          ? supabase.from("generated_pages").select("content_html").eq("id", pr.generated_page_id).single()
+          : Promise.resolve({ data: null }),
+      ]);
+
+      const analysis = analysisRes.data;
+      const pageText = pageRes.data?.content_html
+        ? new DOMParser().parseFromString(pageRes.data.content_html, "text/html").body.innerText.slice(0, 5000)
+        : "";
 
       const result = await nlp.generatePressRelease({
         business_name: business?.business_name ?? "",
@@ -116,7 +126,7 @@ function PressReleaseReview({
         gbp_category: business?.gbp_category ?? "",
         keyword: pr.keyword,
         location: pr.location,
-        page_content: "",  // no page content on regeneration — use feedback
+        page_content: pageText,
         related_keywords: extractRelatedKeywords(analysis?.related_keywords),
         entities: extractEntities(analysis?.google_entities),
         quadgrams: extractQuadgrams(analysis?.top_quadgrams),
