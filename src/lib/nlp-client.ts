@@ -229,7 +229,7 @@ export const nlp = {
       brand_voice?: unknown;
     },
     signal?: AbortSignal,
-  ) => nlpPost<{ gbp: string[]; facebook: string[]; instagram: string[]; pinterest: string[]; token_usage: Record<string, unknown> }>(
+  ) => nlpPost<{ gbp: string[]; token_usage: Record<string, unknown> }>(
     "/generate-social-posts", body, signal,
   ),
 

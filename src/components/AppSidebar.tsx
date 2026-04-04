@@ -8,9 +8,6 @@ import {
   Zap,
   ClipboardList,
   Store,
-  Facebook,
-  Instagram,
-  Pin,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCredits } from "@/hooks/useCredits";
@@ -31,10 +28,7 @@ const navItems = [
 ];
 
 const comingSoonItems = [
-  { id: "gbp-posts",       label: "GBP Posts",       icon: Store },
-  { id: "facebook-posts",  label: "Facebook Posts",  icon: Facebook },
-  { id: "instagram-posts", label: "Instagram Posts", icon: Instagram },
-  { id: "pinterest-posts", label: "Pinterest Posts", icon: Pin },
+  { id: "gbp-posts", label: "GBP Posts", icon: Store },
 ];
 
 const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarProps) => {

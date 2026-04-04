@@ -75,7 +75,7 @@ export default function GeneratedPageView({
   const [relatedItems, setRelatedItems] = useState<RelatedPageItem[] | null>(null);
   const [relatedError, setRelatedError] = useState("");
   // Social posts state
-  const [socialPosts, setSocialPosts] = useState<{ gbp: string[]; facebook: string[]; instagram: string[]; pinterest: string[] } | null>(null);
+  const [socialPosts, setSocialPosts] = useState<{ gbp: string[] } | null>(null);
   const [socialLoading, setSocialLoading] = useState(false);
   const [copiedPost, setCopiedPost] = useState<string | null>(null);
   const [selections, setSelections] = useState<RelatedSelection>({});
@@ -183,7 +183,7 @@ export default function GeneratedPageView({
         detected_icp,
         brand_voice,
       });
-      setSocialPosts({ gbp: data.gbp, facebook: data.facebook, instagram: data.instagram, pinterest: data.pinterest });
+      setSocialPosts({ gbp: data.gbp });
     } catch {
       // Non-fatal — social tab will show a retry button
     } finally {
@@ -199,15 +199,7 @@ export default function GeneratedPageView({
 
   const downloadSocialPosts = () => {
     if (!socialPosts) return;
-    const platforms = [
-      { label: "GBP Posts", posts: socialPosts.gbp },
-      { label: "Facebook Posts", posts: socialPosts.facebook },
-      { label: "Instagram Posts", posts: socialPosts.instagram },
-      { label: "Pinterest Posts", posts: socialPosts.pinterest },
-    ];
-    const text = platforms.map(({ label, posts }) =>
-      `${label.toUpperCase()}\n${"─".repeat(40)}\n${posts.map((p, i) => `${i + 1}. ${p}`).join("\n\n")}`
-    ).join("\n\n\n");
+    const text = `GBP POSTS\n${"─".repeat(40)}\n${socialPosts.gbp.map((p, i) => `${i + 1}. ${p}`).join("\n\n")}`;
     const blob = new Blob([text], { type: "text/plain" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
@@ -450,37 +442,30 @@ export default function GeneratedPageView({
                   <Download className="w-4 h-4 mr-1.5" /> Download All
                 </Button>
               </div>
-              {([
-                { key: "gbp",       label: "GBP Posts",       wordLimit: "≤200 words" },
-                { key: "facebook",  label: "Facebook Posts",  wordLimit: "≤200 words" },
-                { key: "instagram", label: "Instagram Posts", wordLimit: "≤50 words" },
-                { key: "pinterest", label: "Pinterest Posts", wordLimit: "≤50 words" },
-              ] as const).map(({ key, label, wordLimit }) => (
-                <div key={key} className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-semibold text-foreground">{label}</h3>
-                    <span className="text-xs text-muted-foreground">{wordLimit}</span>
-                  </div>
-                  <div className="space-y-2">
-                    {socialPosts[key].map((post, i) => {
-                      const id = `${key}-${i}`;
-                      return (
-                        <div key={id} className="bg-card rounded-lg border border-border p-4 flex gap-3">
-                          <span className="text-xs font-semibold text-muted-foreground w-4 shrink-0 mt-0.5">{i + 1}</span>
-                          <p className="text-sm text-foreground flex-1 whitespace-pre-wrap">{post}</p>
-                          <button
-                            onClick={() => copyPost(post, id)}
-                            className="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
-                            title="Copy"
-                          >
-                            {copiedPost === id ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-semibold text-foreground">GBP Posts</h3>
+                  <span className="text-xs text-muted-foreground">≤200 words each</span>
                 </div>
-              ))}
+                <div className="space-y-2">
+                  {socialPosts.gbp.map((post, i) => {
+                    const id = `gbp-${i}`;
+                    return (
+                      <div key={id} className="bg-card rounded-lg border border-border p-4 flex gap-3">
+                        <span className="text-xs font-semibold text-muted-foreground w-4 shrink-0 mt-0.5">{i + 1}</span>
+                        <p className="text-sm text-foreground flex-1 whitespace-pre-wrap">{post}</p>
+                        <button
+                          onClick={() => copyPost(post, id)}
+                          className="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+                          title="Copy"
+                        >
+                          {copiedPost === id ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
             </>
           )}
         </div>

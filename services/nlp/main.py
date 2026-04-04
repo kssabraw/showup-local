@@ -3232,13 +3232,11 @@ async def related_pages(request: Request, body: RelatedPagesRequest):
 
 # ── /generate-social-posts ────────────────────────────────────────────────────
 
-_SOCIAL_SYSTEM_PROMPT = """You are a social media copywriter specialising in local service businesses. Given a page's content and business details, generate social media posts that drive local leads.
+_SOCIAL_SYSTEM_PROMPT = """You are a social media copywriter specialising in local service businesses. Given a page's content and business details, generate Google Business Profile posts that drive local leads.
 
 Rules:
-- GBP / Facebook posts: max 200 words. Conversational, benefit-led, clear CTA mentioning the city.
-- Instagram posts: max 50 words. Punchy, emoji-friendly, hashtag line at the end (5–8 tags).
-- Pinterest posts: max 50 words. Descriptive, search-optimised, focus on the service benefit.
-- Vary the angle across the 5 posts per platform (e.g. urgency, social proof, education, offer, story).
+- GBP posts: max 200 words. Conversational, benefit-led, clear CTA mentioning the city.
+- Vary the angle across the 5 posts (e.g. urgency, social proof, education, offer, story).
 - Never fabricate reviews, prices, or guarantees not mentioned in the page content.
 - If brand voice instructions are provided, match that tone and style exactly.
 - If target customer profiles are provided, write to those specific pain points and motivations.
@@ -3259,9 +3257,6 @@ class SocialPostsRequest(BaseModel):
 
 class SocialPostsResponse(BaseModel):
     gbp: List[str]
-    facebook: List[str]
-    instagram: List[str]
-    pinterest: List[str]
     token_usage: dict
 
 @app.post('/generate-social-posts', response_model=SocialPostsResponse, dependencies=[Depends(verify_api_key)])
@@ -3341,12 +3336,9 @@ Phone: {body.phone or "not provided"}{diff_text}{icp_text}{brand_voice_text}
 PAGE CONTENT:
 {page_text}
 
-Generate exactly 5 posts for each of the 4 platforms. Return this JSON structure:
+Generate exactly 5 Google Business Profile posts. Return this JSON structure:
 {{
-  "gbp": ["post1", "post2", "post3", "post4", "post5"],
-  "facebook": ["post1", "post2", "post3", "post4", "post5"],
-  "instagram": ["post1", "post2", "post3", "post4", "post5"],
-  "pinterest": ["post1", "post2", "post3", "post4", "post5"]
+  "gbp": ["post1", "post2", "post3", "post4", "post5"]
 }}"""
 
     try:
@@ -3366,9 +3358,6 @@ Generate exactly 5 posts for each of the 4 platforms. Return this JSON structure
 
     return SocialPostsResponse(
         gbp=data.get("gbp", []),
-        facebook=data.get("facebook", []),
-        instagram=data.get("instagram", []),
-        pinterest=data.get("pinterest", []),
         token_usage=token_rec,
     )
 
