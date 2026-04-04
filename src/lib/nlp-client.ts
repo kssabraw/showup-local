@@ -222,7 +222,11 @@ export const nlp = {
       business_name: string;
       gbp_category: string;
       address?: string;
+      phone?: string;
       page_content: string;
+      differentiators?: unknown[];
+      detected_icp?: unknown;
+      brand_voice?: unknown;
     },
     signal?: AbortSignal,
   ) => nlpPost<{ gbp: string[]; facebook: string[]; instagram: string[]; pinterest: string[]; token_usage: Record<string, unknown> }>(

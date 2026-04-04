@@ -3240,6 +3240,9 @@ Rules:
 - Pinterest posts: max 50 words. Descriptive, search-optimised, focus on the service benefit.
 - Vary the angle across the 5 posts per platform (e.g. urgency, social proof, education, offer, story).
 - Never fabricate reviews, prices, or guarantees not mentioned in the page content.
+- If brand voice instructions are provided, match that tone and style exactly.
+- If target customer profiles are provided, write to those specific pain points and motivations.
+- If differentiators are provided, weave them into posts naturally — include the mechanism, not just the claim.
 - Output valid JSON only — no markdown fences, no commentary."""
 
 class SocialPostsRequest(BaseModel):
@@ -3248,7 +3251,11 @@ class SocialPostsRequest(BaseModel):
     business_name: str
     gbp_category: str
     address: Optional[str] = None
+    phone: Optional[str] = None
     page_content: str          # plain text of the generated page
+    differentiators: Optional[List[dict]] = None
+    detected_icp: Optional[dict] = None
+    brand_voice: Optional[dict] = None
 
 class SocialPostsResponse(BaseModel):
     gbp: List[str]
@@ -3269,11 +3276,67 @@ async def generate_social_posts(request: Request, body: SocialPostsRequest):
     city = body.location.split(",")[0].strip()
     page_text = body.page_content[:4000]  # cap context to keep cost low
 
+    # Build differentiators block
+    diff_text = ""
+    if body.differentiators:
+        diff_text = "\nDIFFERENTIATORS (weave these in naturally — include the mechanism, not just the claim):\n" + \
+            "\n".join(f"  - {d.get('claim','')} (mechanism: {d.get('mechanism','')})" for d in body.differentiators)
+
+    # Build ICP block
+    icp_text = ""
+    if body.detected_icp:
+        segments = body.detected_icp.get("segments", [])
+        if segments:
+            lines = ["\nTARGET CUSTOMER PROFILES (write to these pain points and motivations):"]
+            for seg in segments[:2]:
+                name = seg.get("name", "")
+                desc = seg.get("description", "")
+                msg = seg.get("messaging", {})
+                tone = msg.get("tone", "")
+                hooks = msg.get("hooks", [])
+                lines.append(f"  [{name}] {desc}")
+                if tone:
+                    lines.append(f"    Tone: {tone}")
+                if hooks:
+                    lines.append(f"    Hooks: {'; '.join(hooks[:2])}")
+            icp_text = "\n".join(lines)
+
+    # Build brand voice block
+    brand_voice_text = ""
+    if body.brand_voice:
+        bv = body.brand_voice
+        accepted = bv.get("recommended_accepted")
+        if accepted == "recommended":
+            voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
+        elif accepted == "current":
+            voice = bv.get("current_voice") or {}
+        else:
+            voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
+        guide = bv.get("writer_execution_guide", "")
+        if voice or guide:
+            lines = ["\nBRAND VOICE (match this exactly):"]
+            if voice.get("tone"):
+                lines.append(f"  Tone: {voice['tone']}")
+            if voice.get("personality"):
+                lines.append(f"  Personality: {', '.join(voice['personality'])}")
+            ws = voice.get("writing_style", {})
+            if ws:
+                lines.append(f"  Style: {ws.get('sentence_length','')} sentences, {ws.get('person','')} person, {ws.get('formality','')} formality")
+            vocab = voice.get("vocabulary", {})
+            if vocab.get("use"):
+                lines.append(f"  Words/phrases to use: {', '.join(vocab['use'])}")
+            if vocab.get("avoid"):
+                lines.append(f"  Words/phrases to avoid: {', '.join(vocab['avoid'])}")
+            if guide:
+                lines.append(f"  Writer instructions: {guide}")
+            brand_voice_text = "\n".join(lines)
+
     user_prompt = f"""Business: {body.business_name}
 Category: {body.gbp_category}
 Location: {city}
 Keyword: {body.keyword}
 Address: {body.address or ""}
+Phone: {body.phone or "not provided"}{diff_text}{icp_text}{brand_voice_text}
 
 PAGE CONTENT:
 {page_text}

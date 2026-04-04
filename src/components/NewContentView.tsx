@@ -702,6 +702,10 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         website={selectedBusiness?.website ?? undefined}
         gbpCategory={selectedBusiness?.gbp_category || ""}
         address={selectedBusiness?.address || ""}
+        phone={selectedBusiness?.phone ?? undefined}
+        differentiators={selectedBusiness?.differentiators ?? undefined}
+        detected_icp={selectedBusiness?.detected_icp ?? undefined}
+        brand_voice={selectedBusiness?.brand_voice ?? undefined}
         onBack={() => setView({ kind: "form" })}
         onNewPage={() => { setView({ kind: "form" }); setKeyword(""); setCheckState({ status: "idle" }); }}
         onRelatedAction={handleRelatedAction}
