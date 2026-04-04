@@ -10,7 +10,8 @@ import { SavedPagesList } from "@/components/SavedPagesList";
 import { StepIndicator } from "@/components/StepIndicator";
 import { useBusinessProfiles } from "@/hooks/useBusinessProfiles";
 import { useInvalidateSavedPages } from "@/hooks/useSavedPages";
-import { nlp, nlpStream } from "@/lib/nlp-client";
+import { useCredits, useInvalidateCredits } from "@/hooks/useCredits";
+import { nlp, nlpStream, InsufficientCreditsError } from "@/lib/nlp-client";
 import type { AnalysisResult } from "@/lib/nlp-types";
 import type { SavedPage } from "@/hooks/useSavedPages";
 
@@ -50,6 +51,8 @@ const ANALYSIS_CACHE_MAX_AGE_DAYS = 7;
 const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialLocation, initialBusinessId, isOnboarding = false }: { onBack: () => void; defaultLocation?: string; initialKeyword?: string; initialLocation?: string; initialBusinessId?: string; isOnboarding?: boolean }) => {
   const { data: businesses = [], isLoading: loadingBusinesses } = useBusinessProfiles();
   const invalidateSavedPages = useInvalidateSavedPages();
+  const { data: credits } = useCredits();
+  const invalidateCredits = useInvalidateCredits();
 
   const [selectedBusinessId, setSelectedBusinessId] = useState("");
   const [keyword, setKeyword] = useState(initialKeyword ?? "");
@@ -307,6 +310,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         });
         setCheckState({ status: "idle" });
       }
+      invalidateCredits();
     } catch (e: any) {
       if (e.name === "AbortError") return;
       setError(e.message || "Scoring failed");
@@ -378,6 +382,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           return;
         }
       }
+      invalidateCredits();
     } catch (e: any) {
       if ((e as Error).name === "AbortError") return;
       setError((e as Error).message || "Something went wrong");
@@ -819,9 +824,14 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                 <span>⚠️ This appears to be a blog post, not a dedicated service page.</span>
               </div>
             )}
-            <Button className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
-              onClick={() => runScoreForPage(checkState.page)}>
+            <Button
+              className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
+              onClick={() => runScoreForPage(checkState.page)}
+              disabled={(credits?.balance ?? 0) < 2}
+              title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
+            >
               Score This Page
+              <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span>
             </Button>
             <div className="flex gap-2">
               <input type="url" placeholder="Or enter a different URL…" value={manualUrl}
@@ -928,8 +938,11 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             <Button
               className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
               onClick={handleCreateNewPage}
+              disabled={(credits?.balance ?? 0) < 1}
+              title={(credits?.balance ?? 0) < 1 ? "Insufficient credits" : undefined}
             >
               <Sparkles className="w-4 h-4 mr-2" /> Create New Page
+              <span className="ml-2 text-xs opacity-70 font-normal">1 credit</span>
             </Button>
 
             <div className="flex gap-2">
@@ -1062,9 +1075,11 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
               <Button
                 className="flex-1 bg-accent text-accent-foreground hover:opacity-90 font-semibold"
                 onClick={handleCheckSite}
-                disabled={!canCheck}
+                disabled={!canCheck || (credits !== undefined && (credits?.balance ?? 0) < 2)}
+                title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
               >
                 <FileSearch className="w-4 h-4 mr-2" /> Check My Site
+                <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span>
               </Button>
             </div>
           </div>

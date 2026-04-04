@@ -9,6 +9,7 @@ import {
   ClipboardList
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useCredits } from "@/hooks/useCredits";
 
 interface SidebarProps {
   activeItem: string;
@@ -26,6 +27,12 @@ const navItems = [
 ];
 
 const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarProps) => {
+  const { data: credits } = useCredits();
+  const balance = credits?.balance ?? null;
+  const perMonth = credits?.perMonth ?? 60;
+  const pct = balance !== null ? Math.round((balance / perMonth) * 100) : null;
+  const low = balance !== null && balance <= 5;
+
   return (
     <aside
       className={cn(
@@ -83,6 +90,36 @@ const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarPro
         })}
       </nav>
 
+      {/* Credit balance */}
+      {!collapsed && balance !== null && (
+        <div className="px-3 pb-3">
+          <div className="rounded-lg bg-sidebar-accent/40 px-3 py-2.5">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-xs font-medium text-sidebar-foreground/70">Credits</span>
+              <span className={cn("text-xs font-semibold tabular-nums", low ? "text-red-400" : "text-sidebar-accent-foreground")}>
+                {balance} / {perMonth}
+              </span>
+            </div>
+            <div className="h-1.5 rounded-full bg-sidebar-border overflow-hidden">
+              <div
+                className={cn("h-full rounded-full transition-all", low ? "bg-red-400" : "bg-sidebar-primary")}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            {low && (
+              <p className="text-xs text-red-400 mt-1.5">Credits running low</p>
+            )}
+          </div>
+        </div>
+      )}
+      {collapsed && balance !== null && (
+        <div className="px-3 pb-3 flex justify-center">
+          <div className={cn("text-xs font-bold tabular-nums", low ? "text-red-400" : "text-sidebar-foreground/60")}>
+            {balance}
+          </div>
+        </div>
+      )}
+
       {/* Collapse toggle */}
       <div className="px-3 pb-4">
         <button
@@ -97,3 +134,4 @@ const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarPro
 };
 
 export default AppSidebar;
+

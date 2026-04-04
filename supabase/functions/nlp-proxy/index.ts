@@ -5,11 +5,27 @@ const NLP_SERVICE_URL = Deno.env.get("NLP_SERVICE_URL") ?? "";
 const NLP_API_KEY = Deno.env.get("NLP_API_KEY") ?? "";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+// Credits charged per endpoint (0 = free)
+const ENDPOINT_CREDITS: Record<string, number> = {
+  "/analyze":         2,
+  "/score-page":      2,
+  "/generate-page":   1,
+  "/reoptimize-page": 1,
+};
+
+const ENDPOINT_DESCRIPTIONS: Record<string, string> = {
+  "/analyze":         "Competitor analysis + scoring",
+  "/score-page":      "Competitor analysis + scoring",
+  "/generate-page":   "New page creation",
+  "/reoptimize-page": "Page reoptimization",
 };
 
 serve(async (req: Request) => {
@@ -27,10 +43,11 @@ serve(async (req: Request) => {
     });
   }
 
-  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  // Auth client — uses the user's JWT to identify them
+  const authClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     global: { headers: { Authorization: authHeader } },
   });
-  const { data: { user }, error: authError } = await supabase.auth.getUser();
+  const { data: { user }, error: authError } = await authClient.auth.getUser();
   if (authError || !user) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401,
@@ -39,7 +56,6 @@ serve(async (req: Request) => {
   }
 
   // Extract the NLP endpoint from the URL path
-  // Request URL: .../functions/v1/nlp-proxy/some-endpoint
   const url = new URL(req.url);
   const pathMatch = url.pathname.match(/\/nlp-proxy(\/.*)?$/);
   const endpoint = pathMatch?.[1] || "/";
@@ -58,7 +74,42 @@ serve(async (req: Request) => {
     });
   }
 
-  // Forward request to NLP service
+  // ── Credit check + deduction ─────────────────────────────────────────────────
+  const creditsRequired = ENDPOINT_CREDITS[endpoint] ?? 0;
+  if (creditsRequired > 0) {
+    // Service role client — needed to call SECURITY DEFINER deduct_credits()
+    const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    const { data: ok, error: deductError } = await adminClient.rpc("deduct_credits", {
+      p_user_id:    user.id,
+      p_amount:     creditsRequired,
+      p_endpoint:   endpoint,
+      p_description: ENDPOINT_DESCRIPTIONS[endpoint] ?? endpoint,
+    });
+
+    if (deductError) {
+      console.error("Credit deduction error:", deductError);
+      return new Response(JSON.stringify({ error: "Could not process credits" }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    if (!ok) {
+      return new Response(
+        JSON.stringify({
+          error: "Insufficient credits",
+          credits_required: creditsRequired,
+          code: "INSUFFICIENT_CREDITS",
+        }),
+        {
+          status: 402,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
+      );
+    }
+  }
+
+  // ── Forward request to NLP service ───────────────────────────────────────────
   try {
     const nlpResponse = await fetch(`${NLP_SERVICE_URL}${endpoint}`, {
       method: req.method,

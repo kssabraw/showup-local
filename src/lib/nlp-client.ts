@@ -22,7 +22,24 @@ async function getAuthHeader(): Promise<string> {
   return session?.access_token ? `Bearer ${session.access_token}` : "";
 }
 
+// ── Errors ────────────────────────────────────────────────────────────────────
+
+export class InsufficientCreditsError extends Error {
+  readonly creditsRequired: number;
+  constructor(creditsRequired: number) {
+    super(`Insufficient credits — this action requires ${creditsRequired} credit${creditsRequired !== 1 ? "s" : ""}`);
+    this.name = "InsufficientCreditsError";
+    this.creditsRequired = creditsRequired;
+  }
+}
+
 // ── Core helpers ──────────────────────────────────────────────────────────────
+
+function throwIfInsufficientCredits(res: Response, d: Record<string, unknown>) {
+  if (res.status === 402) {
+    throw new InsufficientCreditsError((d.credits_required as number) ?? 1);
+  }
+}
 
 /** Non-streaming POST — resolves to JSON or throws a human-readable error. */
 async function nlpPost<T>(
@@ -42,6 +59,7 @@ async function nlpPost<T>(
   });
   if (!res.ok) {
     const d = await res.json().catch(() => ({}));
+    throwIfInsufficientCredits(res, d);
     throw new Error((d as { detail?: string; error?: string }).detail || (d as { detail?: string; error?: string }).error || `NLP error: ${res.status}`);
   }
   return res.json() as Promise<T>;
@@ -68,6 +86,7 @@ export async function* nlpStream<T>(
   });
   if (!res.ok || !res.body) {
     const d = await res.json().catch(() => ({}));
+    throwIfInsufficientCredits(res, d);
     throw new Error((d as { detail?: string; error?: string }).detail || (d as { detail?: string; error?: string }).error || `NLP error: ${res.status}`);
   }
 

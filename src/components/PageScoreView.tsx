@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Loader2, CheckCircle, AlertTriangle, XCircle, ChevronDown, ChevronUp } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { nlp, nlpStream } from "@/lib/nlp-client";
+import { useCredits, useInvalidateCredits } from "@/hooks/useCredits";
 import type { ScoreResult, ReoptimizeResult, AnalysisResult, EngineScore } from "@/lib/nlp-types";
 
 // Re-export for backward compat with callers that destructure the prop shape
@@ -75,6 +76,8 @@ export default function PageScoreView({
   const [error, setError] = useState("");
   const [expandedEngines, setExpandedEngines] = useState<Set<string>>(new Set());
   const abortRef = useRef<AbortController | null>(null);
+  const { data: credits } = useCredits();
+  const invalidateCredits = useInvalidateCredits();
 
   const saveTokenUsage = async (record: Record<string, any>) => {
     await supabase.from("token_usage").insert({
@@ -111,8 +114,7 @@ export default function PageScoreView({
       );
       setScoreResult(data);
       await saveTokenUsage(data.token_usage);
-      // If scoring ran SERP analysis inline, bubble it up so the parent can
-      // cache it in Supabase and pass it back for future operations.
+      invalidateCredits();
       if (data.serp_analysis && onSerpAnalysis) {
         onSerpAnalysis(data.serp_analysis);
       }
@@ -152,6 +154,7 @@ export default function PageScoreView({
         if ("step" in evt && evt.step === "error") throw new Error(evt.message || "Reoptimize failed");
         if ("step" in evt && evt.step === "done" && evt.result) {
           await saveTokenUsage(evt.result.token_usage);
+          invalidateCredits();
           onGenerated(evt.result as GeneratedResult, "reoptimize");
           return;
         }
@@ -196,11 +199,12 @@ export default function PageScoreView({
           <Button
             className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
             onClick={runScore}
-            disabled={scoring}
+            disabled={scoring || (credits !== undefined && (credits?.balance ?? 0) < 2)}
+            title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
           >
             {scoring
               ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{serp_analysis ? "Scoring page…" : "Analyzing competitors…"}</>
-              : "Score This Page"}
+              : <>"Score This Page" <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span></>}
           </Button>
           {scoring && (
             <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
@@ -308,9 +312,12 @@ export default function PageScoreView({
                 <Button
                   className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
                   onClick={runReoptimize}
-                  disabled={reoptimizing}
+                  disabled={reoptimizing || (credits !== undefined && (credits?.balance ?? 0) < 1)}
+                  title={(credits?.balance ?? 0) < 1 ? "Insufficient credits" : undefined}
                 >
-                  {reoptimizing ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Reoptimizing…</> : "Reoptimize This Page"}
+                  {reoptimizing
+                    ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Reoptimizing…</>
+                    : <>"Reoptimize This Page" <span className="ml-2 text-xs opacity-70 font-normal">1 credit</span></>}
                 </Button>
                 {reoptimizing && (
                   <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
