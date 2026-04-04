@@ -74,13 +74,14 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # Reads allowed origins from CORS_ORIGINS env var (comma-separated).
 # Falls back to * in development. Tighten to your Railway/Vercel frontend
 # URL in production via the Railway dashboard.
-_cors_origins_env = os.environ.get("CORS_ORIGINS", "*")
-CORS_ORIGINS = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+_cors_raw = os.environ.get("CORS_ORIGINS", "*")
+CORS_ORIGINS = [o.strip() for o in _cors_raw.split(",") if o.strip()]
+_cors_wildcard = CORS_ORIGINS == ["*"]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=not _cors_wildcard,  # Never allow credentials with *
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -654,7 +655,7 @@ async def analyze(request: Request, body: AnalysisRequest):
     )
 
 
-@app.get('/health')
+@app.get('/health', dependencies=[Depends(verify_api_key)])
 async def health():
     return {'status': 'ok'}
 

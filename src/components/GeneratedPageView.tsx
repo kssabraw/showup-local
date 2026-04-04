@@ -6,6 +6,7 @@ import { nlp } from "@/lib/nlp-client";
 import { StepIndicator } from "@/components/StepIndicator";
 import { useInvalidateSavedPages } from "@/hooks/useSavedPages";
 import type { RelatedPageItem } from "@/lib/nlp-types";
+import DOMPurify from 'dompurify';
 
 import type { TokenUsage, CostBreakdown } from "@/lib/nlp-types";
 
@@ -283,7 +284,7 @@ export default function GeneratedPageView({
             className="bg-card rounded-xl border border-border p-8 prose prose-sm max-w-none
                        prose-headings:text-foreground prose-p:text-foreground prose-li:text-foreground
                        prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg"
-            dangerouslySetInnerHTML={{ __html: contentHtml.replace(/<\/p>\s*<p/g, '</p><br><br><p') }}
+            dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(contentHtml.replace(/<\/p>\s*<p/g, '</p><br><br><p')) }}
           />
           {/* HTML/CSS improvement notes — reoptimize only */}
           {mode === "reoptimize" && htmlCssNotes && htmlCssNotes.length > 0 && (
@@ -324,7 +325,7 @@ export default function GeneratedPageView({
                        prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg
                        prose-headings:font-bold prose-strong:font-bold
                        select-all cursor-text"
-            dangerouslySetInnerHTML={{ __html: contentHtml }}
+            dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(contentHtml) }}
           />
         </div>
       )}
