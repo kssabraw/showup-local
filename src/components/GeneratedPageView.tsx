@@ -231,10 +231,10 @@ export default function GeneratedPageView({
         <div className="bg-muted/40 border border-border rounded-xl px-5 py-4 text-xs space-y-1.5">
           <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Cost Breakdown (estimates)</p>
           {[
-            { label: "DataForSEO SERP fetch", value: costBreakdown?.dataforseo },
-            { label: `ScrapeOwl (${costBreakdown?.scrapeowl_pages ?? 0} pages)`, value: costBreakdown?.scrapeowl },
-            { label: `Google NLP (${((costBreakdown?.google_nlp_chars ?? 0) / 1000).toFixed(0)}k chars)`, value: costBreakdown?.google_nlp },
-            { label: `Claude ${costBreakdown?.claude_model?.includes("haiku") ? "Haiku" : "Sonnet"} (${costBreakdown?.claude_input_tokens ?? 0}+${costBreakdown?.claude_output_tokens ?? 0} tokens)`, value: costBreakdown?.claude },
+            { label: "Search data", value: costBreakdown?.dataforseo },
+            { label: `Page analysis (${costBreakdown?.scrapeowl_pages ?? 0} pages)`, value: costBreakdown?.scrapeowl },
+            { label: `Content analysis (${((costBreakdown?.google_nlp_chars ?? 0) / 1000).toFixed(0)}k chars)`, value: costBreakdown?.google_nlp },
+            { label: `${costBreakdown?.claude_model?.includes("haiku") ? "Keyword research" : "Page generation"} (${costBreakdown?.claude_input_tokens ?? 0}+${costBreakdown?.claude_output_tokens ?? 0} tokens)`, value: costBreakdown?.claude },
           ].map(({ label, value }) =>
             value != null ? (
               <div key={label} className="flex justify-between text-muted-foreground">

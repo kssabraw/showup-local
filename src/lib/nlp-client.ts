@@ -7,6 +7,7 @@ import type {
   RankabilityResult,
   StreamEvent,
 } from "./nlp-types";
+import { supabase } from "@/integrations/supabase/client";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 // Single source of truth — import these from here, not from env directly in components
@@ -14,13 +15,11 @@ import type {
 export const NLP_SERVICE_URL =
   import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
 
-export const NLP_API_KEY = import.meta.env.VITE_NLP_API_KEY ?? "";
+const PROXY_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/nlp-proxy`;
 
-function nlpHeaders(): HeadersInit {
-  return {
-    "Content-Type": "application/json",
-    ...(NLP_API_KEY ? { "X-API-Key": NLP_API_KEY } : {}),
-  };
+async function getAuthHeader(): Promise<string> {
+  const { data: { session } } = await supabase.auth.getSession();
+  return session?.access_token ? `Bearer ${session.access_token}` : "";
 }
 
 // ── Core helpers ──────────────────────────────────────────────────────────────
@@ -31,15 +30,19 @@ async function nlpPost<T>(
   body: unknown,
   signal?: AbortSignal,
 ): Promise<T> {
-  const res = await fetch(`${NLP_SERVICE_URL}${endpoint}`, {
+  const authHeader = await getAuthHeader();
+  const res = await fetch(`${PROXY_URL}${endpoint}`, {
     method: "POST",
-    headers: nlpHeaders(),
+    headers: {
+      "Content-Type": "application/json",
+      ...(authHeader ? { Authorization: authHeader } : {}),
+    },
     body: JSON.stringify(body),
     signal,
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error((err as { detail?: string }).detail || `Request failed: ${res.status}`);
+    const d = await res.json().catch(() => ({}));
+    throw new Error((d as { detail?: string; error?: string }).detail || (d as { detail?: string; error?: string }).error || `NLP error: ${res.status}`);
   }
   return res.json() as Promise<T>;
 }
@@ -53,15 +56,19 @@ export async function* nlpStream<T>(
   body: unknown,
   signal?: AbortSignal,
 ): AsyncGenerator<StreamEvent<T>> {
-  const res = await fetch(`${NLP_SERVICE_URL}${endpoint}`, {
+  const authHeader = await getAuthHeader();
+  const res = await fetch(`${PROXY_URL}${endpoint}`, {
     method: "POST",
-    headers: nlpHeaders(),
+    headers: {
+      "Content-Type": "application/json",
+      ...(authHeader ? { Authorization: authHeader } : {}),
+    },
     body: JSON.stringify(body),
     signal,
   });
   if (!res.ok || !res.body) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error((err as { detail?: string }).detail || `Request failed: ${res.status}`);
+    const d = await res.json().catch(() => ({}));
+    throw new Error((d as { detail?: string; error?: string }).detail || (d as { detail?: string; error?: string }).error || `NLP error: ${res.status}`);
   }
 
   const reader = res.body.getReader();

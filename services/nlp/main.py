@@ -87,6 +87,19 @@ app.add_middleware(
 )
 logger.info(f"CORS origins: {CORS_ORIGINS}")
 
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
+
+class LimitRequestSizeMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: StarletteRequest, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > 2_000_000:  # 2MB limit
+            from starlette.responses import JSONResponse
+            return JSONResponse({"detail": "Request body too large"}, status_code=413)
+        return await call_next(request)
+
+app.add_middleware(LimitRequestSizeMiddleware)
+
 STOP_WORDS = set(stopwords.words('english'))
 
 # ── API credentials (set all in Railway environment variables) ────────────────
@@ -118,7 +131,7 @@ for name, val in [
     ("ANTHROPIC_API_KEY",  ANTHROPIC_API_KEY),
 ]:
     if val:
-        logger.info(f"{name} is set (length={len(val)})")
+        logger.info(f"{name} is set")
     else:
         logger.warning(f"{name} not set — related feature will be skipped")
 
@@ -153,6 +166,29 @@ SKIP_DOMAINS = {
     "wikipedia.org", "amazon.com", "ebay.com",
     "angieslist.com", "nextdoor.com", "mapquest.com", "maps.google.com",
 }
+
+
+import ipaddress as _ipaddress
+import urllib.parse as _urlparse
+
+
+def _block_ssrf(url: str) -> None:
+    """Raise HTTPException 400 if the URL targets a private/internal network."""
+    try:
+        parsed = _urlparse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise HTTPException(status_code=400, detail="Invalid URL scheme")
+        hostname = parsed.hostname or ""
+        try:
+            ip = _ipaddress.ip_address(hostname)
+            if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
+                raise HTTPException(status_code=400, detail="URL targets a private network address")
+        except ValueError:
+            pass  # Not an IP address — hostname, allow
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid URL")
 
 
 # ── Request / Response models ─────────────────────────────────────────────────
@@ -1199,6 +1235,7 @@ async def crawl_website(website_url: str, max_pages: int = 200) -> List[dict]:
     """
     import urllib.parse
 
+    _block_ssrf(website_url)
     url = website_url.strip()
     if not url.startswith(('http://', 'https://')):
         url = f"https://{url}"
@@ -1391,6 +1428,8 @@ async def analyze_business(request: Request, body: BusinessAnalysisRequest):
       2. Classify each page as service / location / city_service / other
       3. Use Claude Haiku to detect ICP and extract differentiators
     """
+    if body.website_url and body.website_url.strip():
+        _block_ssrf(body.website_url)
     pages = []
     if body.website_url and body.website_url.strip():
         url = body.website_url.strip()
@@ -1413,7 +1452,8 @@ async def analyze_business(request: Request, body: BusinessAnalysisRequest):
             body.gbp_categories,
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Anthropic analysis failed: {e}")
+        logger.exception("Anthropic analysis failed")
+        raise HTTPException(status_code=502, detail="Analysis service temporarily unavailable")
 
     status = 'complete' if pages else 'partial'
 
@@ -1435,6 +1475,7 @@ async def _crawl_pages_for_brand_voice(website_url: str, client: httpx.AsyncClie
     Skips blog pages and admin/legal slugs.
     """
     import urllib.parse
+    _block_ssrf(website_url)
     parsed = urllib.parse.urlparse(website_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
 
@@ -1684,6 +1725,8 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
       - With website: crawl up to 25 pages, extract text, analyze with Claude Haiku
       - Without website: generate category-based recommended voice with Claude Haiku
     """
+    if body.website_url and body.website_url.strip():
+        _block_ssrf(body.website_url)
     page_contents: List[str] = []
     pages_sampled = 0
 
@@ -1705,9 +1748,10 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
                         detail=f"Your website returned a {probe.status_code} error. Check that the URL is correct and the site is live."
                     )
             except httpx.RequestError as e:
+                logger.warning(f"Brand voice website probe failed for {url}: {type(e).__name__}: {e}")
                 raise HTTPException(
                     status_code=422,
-                    detail=f"Your website couldn't be reached ({type(e).__name__}). Check that the URL is correct and your site is live."
+                    detail="Your website couldn't be reached. Check that the URL is correct and your site is live."
                 )
 
             selected = await _crawl_pages_for_brand_voice(url, client, max_pages=25)
@@ -2491,7 +2535,8 @@ async def score_page(request: Request, body: ScorePageRequest):
                 _resp.raise_for_status()
                 page_html = _resp.text
         except Exception as _e:
-            raise HTTPException(status_code=422, detail=f"Could not fetch {body.page_url}: {_e}")
+            logger.warning(f"Could not fetch page_url for scoring: {_e}")
+            raise HTTPException(status_code=422, detail="Could not fetch the provided page URL. Check that it is correct and publicly accessible.")
     if not page_html:
         raise HTTPException(status_code=422, detail="Either page_content or page_url is required")
     page_text = _BS(page_html, "html.parser").get_text(separator="\n", strip=True)[:8000]
@@ -2507,7 +2552,8 @@ async def score_page(request: Request, body: ScorePageRequest):
             messages=[{"role": "user", "content": prompt}],
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Claude scoring error: {e}")
+        logger.exception("Claude scoring error")
+        raise HTTPException(status_code=502, detail="Scoring service temporarily unavailable")
 
     token_rec = _token_record("score-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
     scores = _parse_claude_json(msg.content[0].text)
@@ -2769,7 +2815,8 @@ HARD RULES — NEVER:
             messages=[{"role": "user", "content": prompt}],
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Claude generation error: {e}")
+        logger.exception("Claude generation error")
+        raise HTTPException(status_code=502, detail="Content generation failed. Please try again.")
 
     token_rec = _token_record("generate-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
     raw = msg.content[0].text.strip()
@@ -2862,7 +2909,8 @@ async def reoptimize_page(request: Request, body: ReoptimizePageRequest):
                 _resp.raise_for_status()
                 existing_html = _resp.text
         except Exception as _e:
-            raise HTTPException(status_code=422, detail=f"Could not fetch {body.existing_page_url}: {_e}")
+            logger.warning(f"Could not fetch existing_page_url for reoptimize: {_e}")
+            raise HTTPException(status_code=422, detail="Could not fetch the provided page URL. Check that it is correct and publicly accessible.")
     if not existing_html:
         raise HTTPException(status_code=422, detail="Either existing_page_html or existing_page_url is required")
 
@@ -2908,7 +2956,8 @@ List each HTML/CSS structural change that would further improve SEO but that you
             messages=[{"role": "user", "content": prompt}],
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Claude reoptimize error: {e}")
+        logger.exception("Claude reoptimize error")
+        raise HTTPException(status_code=502, detail="Content generation failed. Please try again.")
 
     token_rec = _token_record("reoptimize-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
     raw = msg.content[0].text.strip()
