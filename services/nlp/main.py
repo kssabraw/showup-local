@@ -2239,13 +2239,11 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             biz_location = (body.location or "").strip()
             city = biz_location.split(",")[0].strip()
 
-            # ── Run sitemap discovery + site: search in parallel ──────────────────
-            # site: search uses Google's own index — most reliable source.
-            # Sitemap gives additional URLs not yet indexed or filtered by Google.
-            async def _run_site_search() -> dict:
-                """Returns {url: title} from DataForSEO site: search."""
-                if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
-                    return {}
+            # ── Primary: DataForSEO site: search ─────────────────────────────────
+            # Google's own index already ranked by relevance for this keyword.
+            # This is the most reliable signal — trust it directly.
+            serp_titles: dict = {}
+            if DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD:
                 try:
                     site_query = f"site:{base_netloc} {body.keyword} {city}".strip()
                     logger.info(f"find-page-for-keyword: site-search query: {site_query!r}")
@@ -2258,7 +2256,6 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                         json=[{"keyword": site_query, "language_name": "English", "depth": 10, "se_domain": "google.com"}],
                         timeout=30.0,
                     )
-                    results: dict = {}
                     if _sr.status_code == 200:
                         for _task in (_sr.json().get("tasks") or []):
                             for _result in (_task.get("result") or []):
@@ -2266,31 +2263,46 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                                     if _item.get("type") == "organic":
                                         _u = _item.get("url", "")
                                         if _u and base_netloc in _u:
-                                            results[_u] = _item.get("title", "") or _u
-                    logger.info(f"find-page-for-keyword: site-search found {len(results)} URLs")
-                    return results
+                                            serp_titles[_u] = _item.get("title", "") or _u
+                    logger.info(f"find-page-for-keyword: site-search found {len(serp_titles)} URLs: {list(serp_titles.keys())[:5]}")
                 except Exception as _se:
                     logger.warning(f"find-page-for-keyword: site-search failed ({_se})")
-                    return {}
 
-            async def _run_sitemap() -> List[str]:
-                discovered = await _discover_via_sitemap(url, client)
-                if not discovered:
-                    discovered = await _discover_via_nav(url, client)
-                return [u for u in discovered if _same_domain(u)]
+            # If site: search returned results, pick the best non-blog one.
+            # Google already sorted by relevance so we trust the ranking.
+            if serp_titles:
+                # Prefer non-blog pages; fall back to blog if nothing else
+                best_url: Optional[str] = None
+                best_title: str = ""
+                for _u, _t in serp_titles.items():
+                    if not _is_likely_blog_post(_u):
+                        best_url = _u
+                        best_title = _t
+                        break
+                if best_url is None:
+                    # All results look like blog posts — return the first anyway
+                    best_url, best_title = next(iter(serp_titles.items()))
 
-            # Fire both concurrently
-            sitemap_urls, serp_titles = await asyncio.gather(_run_sitemap(), _run_site_search())
+                logger.info(f"find-page-for-keyword: site-search primary result → {best_url}")
+                is_blog = _is_likely_blog_post(best_url)
+                return FindPageResponse(
+                    found=True,
+                    page={'url': best_url, 'title': best_title, 'h1': '', 'is_blog_post': is_blog},
+                    is_blog_post=is_blog,
+                )
 
-            # Merge: site: results first (Google-confirmed), then sitemap
+            # ── Fallback: sitemap discovery + slug filter ─────────────────────────
+            # Only runs if DataForSEO returned nothing (not indexed, API down, etc.)
+            logger.info("find-page-for-keyword: no site-search results, falling back to sitemap")
+            discovered = await _discover_via_sitemap(url, client)
+            if not discovered:
+                discovered = await _discover_via_nav(url, client)
             all_urls = list(dict.fromkeys(
-                [origin]
-                + list(serp_titles.keys())         # Google-confirmed pages first
-                + sitemap_urls                      # sitemap pages second
+                [origin] + [u for u in discovered if _same_domain(u)]
             ))
-            logger.info(f"find-page-for-keyword: {len(all_urls)} total URLs ({len(serp_titles)} from site-search, {len(sitemap_urls)} from sitemap)")
+            logger.info(f"find-page-for-keyword: sitemap fallback found {len(all_urls)} URLs")
 
-            # ── Step 1: Python substring filter ──────────────────────────────────────
+            # Slug-match filter
             svc_matches = [u for u in all_urls if any(_word_in_slug(w, urllib.parse.urlparse(u).path) for w in kw_words)]
             loc_matches = [u for u in all_urls if any(_word_in_slug(w, urllib.parse.urlparse(u).path) for w in loc_words)]
             seen: set = set()
@@ -2302,135 +2314,45 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             candidate_pool.sort(key=_slug_match_score, reverse=True)
             candidate_pool = candidate_pool[:25]
 
-            # ── Direct URL guessing (if substring filter found nothing) ───────────
-            if not candidate_pool:
-                svc_slug = "-".join(kw_words)
-                loc_slug = "-".join(loc_words[:2]) if loc_words else ""
-                guesses = []
-                if svc_slug and loc_slug:
-                    guesses += [
-                        f"{origin}/{loc_slug}-{svc_slug}/",
-                        f"{origin}/{loc_slug}-{svc_slug}s/",
-                        f"{origin}/{svc_slug}-{loc_slug}/",
-                        f"{origin}/{svc_slug}s-{loc_slug}/",
-                    ]
-                if svc_slug:
-                    guesses += [f"{origin}/{svc_slug}/", f"{origin}/{svc_slug}s/"]
+            logger.info(f"find-page-for-keyword: {len(candidate_pool)} slug-matched candidates")
 
-                async def _probe(u: str) -> Optional[str]:
+            if candidate_pool:
+                # Use Haiku to pick the best slug-matched candidate
+                haiku_pick: Optional[str] = None
+                if ANTHROPIC_API_KEY:
                     try:
-                        r = await client.head(u, timeout=5.0)
-                        return u if r.status_code in (200, 301, 302) else None
-                    except Exception:
-                        return None
+                        _ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+                        url_list_text = "\n".join(f"{i+1}. {u}" for i, u in enumerate(candidate_pool))
+                        location_context = biz_location if biz_location else "unknown"
+                        _msg = await _ac.messages.create(
+                            model="claude-haiku-4-5-20251001",
+                            max_tokens=64,
+                            temperature=0,
+                            messages=[{"role": "user", "content": (
+                                f"Keyword: \"{body.keyword}\"\nLocation: {location_context}\n\n"
+                                f"Pick the single best URL that is a DEDICATED SERVICE PAGE for this keyword.\n"
+                                f"- Prefer URLs with service words AND location words in the slug\n"
+                                f"- Business-type words (company, contractor, etc.) won't appear in slugs — ignore them\n"
+                                f"- Reject blog posts, news, guides, about pages, homepages\n"
+                                f"- A near-match is better than 0\n\n"
+                                f"Reply with ONLY the number, or 0 if every URL is unrelated.\n\n{url_list_text}"
+                            )}],
+                        )
+                        raw_pick = _msg.content[0].text.strip()
+                        pick_num = int(re.search(r'\d+', raw_pick).group()) if re.search(r'\d+', raw_pick) else 0
+                        if 1 <= pick_num <= len(candidate_pool):
+                            haiku_pick = candidate_pool[pick_num - 1]
+                            logger.info(f"find-page-for-keyword: Haiku picked #{pick_num} → {haiku_pick}")
+                    except Exception as _he:
+                        logger.warning(f"find-page-for-keyword: Haiku failed ({_he})")
 
-                probe_results = await asyncio.gather(*[_probe(g) for g in guesses])
-                guessed = [u for u in probe_results if u]
-                if guessed:
-                    logger.info(f"find-page-for-keyword: direct-guess found {guessed}")
-                    candidate_pool = guessed
-
-            # Generic fallback: if still nothing, take top 10 discovered URLs
-            if not candidate_pool:
-                candidate_pool = all_urls[:10]
-
-            logger.info(f"find-page-for-keyword: {len(candidate_pool)} candidates ({len(svc_matches)} svc, {len(loc_matches)} loc matches from {len(all_urls)} total)")
-            for i, u in enumerate(candidate_pool[:15]):
-                score = _slug_match_score(u)
-                logger.info(f"  candidate #{i+1} (both={score[0]}, svc={score[1]}, loc={score[2]}): {u}")
-
-            # ── Step 2: Haiku picks the best candidate ────────────────────────────────
-            haiku_pick: Optional[str] = None
-            if ANTHROPIC_API_KEY and candidate_pool:
-                try:
-                    _ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-                    url_list_text = "\n".join(f"{i+1}. {u}" for i, u in enumerate(candidate_pool))
-
-                    # Build location context line
-                    location_context = biz_location if biz_location else "unknown"
-
-                    location_rule = (
-                        f"  - Target location: {location_context}\n"
-                        f"  - Strongly prefer URLs whose slug contains BOTH the service words AND location words (e.g. city name).\n"
-                        f"  - A URL with just the service words (no location in slug) is acceptable if no location-specific page exists.\n"
-                    ) if biz_location else (
-                        "  - Find the best dedicated service page for this service type.\n"
-                    )
-                    _msg = await _ac.messages.create(
-                        model="claude-haiku-4-5-20251001",
-                        max_tokens=64,
-                        temperature=0,
-                        messages=[{"role": "user", "content": (
-                            f"Keyword: \"{body.keyword}\"\n"
-                            f"Location: {location_context}\n\n"
-                            f"Pick the single best URL below that is a DEDICATED SERVICE PAGE targeting this keyword for this location.\n"
-                            f"Guidelines:\n"
-                            f"{location_rule}"
-                            f"  - Business-type words in the keyword (company, contractor, professional, etc.) will NOT appear in URL slugs — ignore them when scoring slug relevance\n"
-                            f"  - Prefer URLs whose slug contains the core service concept (e.g. 'tree-service', 'tree-trimming') and optionally the location\n"
-                            f"  - Reject blog posts, news, guides, how-to articles, about pages, homepages\n"
-                            f"  - A near-match service page is better than no result — prefer the closest match over 0\n\n"
-                            f"Reply with ONLY the number of the best URL, or 0 only if every URL is clearly a blog post or unrelated.\n\n"
-                            f"{url_list_text}"
-                        )}],
-                    )
-                    raw_pick = _msg.content[0].text.strip()
-                    logger.info(f"find-page-for-keyword: Haiku raw response: {repr(raw_pick)}")
-                    pick_num = int(re.search(r'\d+', raw_pick).group()) if re.search(r'\d+', raw_pick) else 0
-                    if 1 <= pick_num <= len(candidate_pool):
-                        haiku_pick = candidate_pool[pick_num - 1]
-                        logger.info(f"find-page-for-keyword: Haiku picked #{pick_num} → {haiku_pick}")
-                    else:
-                        logger.info(f"find-page-for-keyword: Haiku returned 0 or out-of-range ({pick_num}), using regex fallback")
-                except Exception as _he:
-                    logger.warning(f"find-page-for-keyword: Haiku selection failed ({_he}), falling back to regex")
-
-            # If Haiku picked a URL, fetch it for title/H1.
-            # If the site blocks bots (403/etc.), fall back to the DataForSEO title
-            # we already have — the URL existence is confirmed by Google's index.
-            if haiku_pick:
-                title_text = serp_titles.get(haiku_pick, "")
-                h1_text = ""
-                try:
-                    resp = await client.get(haiku_pick, timeout=8.0)
-                    if resp.status_code == 200:
-                        soup = BeautifulSoup(resp.text, 'html.parser')
-                        title_tag = soup.find('title')
-                        h1_tag = soup.find('h1')
-                        title_text = (title_tag.get_text(strip=True) if title_tag else "") or title_text or haiku_pick
-                        h1_text = h1_tag.get_text(strip=True) if h1_tag else ''
-                except Exception as _fe:
-                    logger.warning(f"find-page-for-keyword: could not fetch Haiku pick ({_fe}), using cached title")
-                # Return even if fetch failed — URL confirmed by sitemap or Google
-                is_blog = _is_likely_blog_post(haiku_pick)
+                picked = haiku_pick or candidate_pool[0]
+                is_blog = _is_likely_blog_post(picked)
                 return FindPageResponse(
                     found=True,
-                    page={'url': haiku_pick, 'title': title_text or haiku_pick, 'h1': h1_text, 'is_blog_post': is_blog},
+                    page={'url': picked, 'title': picked, 'h1': '', 'is_blog_post': is_blog},
                     is_blog_post=is_blog,
                 )
-
-            # If we have site: search results but Haiku didn't fire, use the top
-            # result directly (site is confirmed by Google, no fetch needed).
-            if serp_titles and candidate_pool:
-                top = candidate_pool[0]
-                is_blog = _is_likely_blog_post(top)
-                logger.info(f"find-page-for-keyword: returning top site-search result → {top}")
-                return FindPageResponse(
-                    found=True,
-                    page={'url': top, 'title': serp_titles.get(top, top), 'h1': '', 'is_blog_post': is_blog},
-                    is_blog_post=is_blog,
-                )
-
-            # Fallback: check top candidates with keyword-in-title gate
-            to_check = [u for u in candidate_pool if u != haiku_pick]
-            results = await asyncio.gather(*[_check_page(u, client) for u in to_check])
-            matches = [r for r in results if r]
-            matches.sort(key=lambda r: r.get('is_blog_post', False))
-            if matches:
-                res = matches[0]
-                is_blog = res.get('is_blog_post', False)
-                logger.info(f"find-page-for-keyword: found {'blog' if is_blog else 'service'} page → {res['url']}")
-                return FindPageResponse(found=True, page=res, is_blog_post=is_blog)
 
     except Exception as e:
         logger.warning(f"find-page-for-keyword error ({url}): {e}")
