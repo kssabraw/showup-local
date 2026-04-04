@@ -23,6 +23,7 @@ logger.info(f"Files in cwd: {os.listdir('.')}")
 try:
     from fastapi import FastAPI, HTTPException, Depends, Security, Request
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import StreamingResponse
     from fastapi.security import APIKeyHeader
     from pydantic import BaseModel
     from typing import List, Dict, Optional
@@ -1834,6 +1835,97 @@ def compute_zone_targets(
     return targets
 
 
+def _parse_page_zones(html: str) -> dict:
+    """Parse existing page HTML into zones for coverage analysis."""
+    return extract_zones(html)
+
+
+def _compute_coverage(page_zones: dict, serp_analysis: dict) -> dict:
+    """
+    Compute entity/quadgram/keyword coverage gaps between competitor benchmark and existing page.
+    Returns a dict with present/missing lists per signal type and zone.
+    Quadgrams are checked in paragraphs only.
+    """
+    entities = serp_analysis.get("google_entities", [])
+    quadgrams = serp_analysis.get("top_quadgrams", [])
+    related_kw = serp_analysis.get("related_keywords", {})
+
+    full_text = " ".join(v for v in page_zones.values() if isinstance(v, str)).lower()
+    para_text = page_zones.get("paragraphs", "").lower()
+
+    # Entity coverage — checked against full page text
+    present_entities, missing_entities = [], []
+    for e in entities:
+        (present_entities if e["name"].lower() in full_text else missing_entities).append(e)
+
+    # Quadgram coverage — paragraphs only
+    present_quadgrams, missing_quadgrams = [], []
+    for q in quadgrams:
+        (present_quadgrams if q["phrase"].lower() in para_text else missing_quadgrams).append(q)
+
+    # Related keyword coverage per zone
+    zone_keyword_coverage: dict = {}
+    for zone in ("title", "h1", "h2_h3", "body"):
+        zone_text = page_zones.get(zone if zone != "h2_h3" else "h2_h3", "").lower()
+        terms = related_kw.get(zone, []) if isinstance(related_kw, dict) else []
+        present = [t for t in terms if t["term"].lower() in zone_text]
+        missing = [t for t in terms if t["term"].lower() not in zone_text]
+        zone_keyword_coverage[zone] = {"present": present, "missing": missing}
+
+    return {
+        "present_entities": present_entities,
+        "missing_entities": missing_entities,
+        "present_quadgrams": present_quadgrams,
+        "missing_quadgrams": missing_quadgrams,
+        "zone_keyword_coverage": zone_keyword_coverage,
+    }
+
+
+def _coverage_context(coverage: dict) -> str:
+    """Format coverage gaps into a prompt-friendly string for scoring and reoptimization."""
+    parts: list = []
+
+    # Zone keyword coverage
+    zone_labels = {
+        "title": "PAGE TITLE",
+        "h1": "H1 HEADING",
+        "h2_h3": "H2/H3 SUBHEADINGS",
+        "body": "BODY TEXT",
+    }
+    zkc = coverage.get("zone_keyword_coverage", {})
+    for zone, label in zone_labels.items():
+        zc = zkc.get(zone, {})
+        present = zc.get("present", [])
+        missing = zc.get("missing", [])
+        total = len(present) + len(missing)
+        if total == 0:
+            continue
+        parts.append(f"\n{label}: {len(present)}/{total} competitor terms present")
+        if missing:
+            parts.append(f"  Missing: {', '.join(t['term'] for t in missing[:12])}")
+
+    # Entity coverage
+    p_ent = coverage.get("present_entities", [])
+    m_ent = coverage.get("missing_entities", [])
+    total_ent = len(p_ent) + len(m_ent)
+    if total_ent:
+        parts.append(f"\nENTITIES: {len(p_ent)}/{total_ent} competitor entities present in page")
+        if m_ent:
+            ent_items = [f"{e['name']} (×{e['recommended_mentions']})" for e in m_ent[:15]]
+            parts.append(f"  Missing: {', '.join(ent_items)}")
+
+    # Quadgram coverage (paragraphs only)
+    p_q = coverage.get("present_quadgrams", [])
+    m_q = coverage.get("missing_quadgrams", [])
+    total_q = len(p_q) + len(m_q)
+    if total_q:
+        parts.append(f"\nCOMPETITOR PHRASES (paragraphs only): {len(p_q)}/{total_q} present")
+        if m_q:
+            parts.append(f"  Missing: {', '.join(q['phrase'] for q in m_q[:12])}")
+
+    return "\n".join(parts) if parts else ""
+
+
 def _build_score_prompt(
     business_name: str,
     gbp_category: str,
@@ -1842,7 +1934,9 @@ def _build_score_prompt(
     address: Optional[str],
     serp_ctx: str,
     page_text: str,
+    coverage_ctx: str = "",
 ) -> str:
+    coverage_block = f"\nCOVERAGE GAPS (computed from competitor benchmark):{coverage_ctx}" if coverage_ctx else ""
     return f"""You are an expert local SEO analyst. Score this page against all 7 engines below.
 
 CONTEXT
@@ -1851,7 +1945,7 @@ Category: {gbp_category}
 Keyword: {keyword}
 City: {city}
 Address: {address or "Not provided"}
-{serp_ctx}
+{serp_ctx}{coverage_block}
 
 PAGE CONTENT (first 8,000 chars):
 {page_text}
@@ -1862,7 +1956,12 @@ SCORING CRITERIA — score each engine 0–100:
 
 2. gbp_maps (weight 25%): exact city name present; service matches GBP category; brand+service+city entity triplet; NAP signals consistent; multiple service mentions.
 
-3. entity_establishment (weight 15%): brand+service+city co-occurrence in ≥3 sections; sub-services mentioned; descriptive anchor text signals; topical depth.
+3. entity_establishment (weight 15%): Use the COVERAGE GAPS block above to score this engine precisely.
+   - Zone keyword coverage: penalise missing competitor terms per zone (title, H1, H2/H3, body)
+   - Entity coverage: penalise each missing competitor entity (especially high recommended_mentions ones)
+   - Phrase coverage: penalise missing competitor phrases from paragraphs
+   - Also consider: brand+service+city co-occurrence in ≥3 sections; sub-services mentioned; topical depth.
+   - In issues/recommendations, list specific missing entities and phrases by name.
 
 4. icp_alignment (weight 10%): detect ICP from keyword modifier (emergency→urgent tone; commercial→B2B tone; general→professional/reliable); CTA matches ICP; pain points addressed.
 
@@ -2415,7 +2514,6 @@ async def score_page(request: Request, body: ScorePageRequest):
     import anthropic as _anthropic
     client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-    from bs4 import BeautifulSoup as _BS
     page_html = body.page_content
     if not page_html and body.page_url:
         try:
@@ -2428,11 +2526,28 @@ async def score_page(request: Request, body: ScorePageRequest):
             raise HTTPException(status_code=422, detail=f"Could not fetch {body.page_url}: {_e}")
     if not page_html:
         raise HTTPException(status_code=422, detail="Either page_content or page_url is required")
-    page_text = _BS(page_html, "html.parser").get_text(separator="\n", strip=True)[:8000]
+    page_zones = _parse_page_zones(page_html)
+    page_text = " ".join([
+        page_zones.get("title", ""),
+        page_zones.get("h1", ""),
+        page_zones.get("h2_h3", ""),
+        page_zones.get("body", ""),
+    ])[:8000]
     city = body.location.split(",")[0].strip()
     serp_ctx = _serp_context(body.serp_analysis)
 
-    prompt = _build_score_prompt(body.business_name, body.gbp_category, body.keyword, city, body.address, serp_ctx, page_text)
+    # Run Google NLP on the page's paragraphs and compute coverage gaps
+    coverage: dict = {}
+    if body.serp_analysis:
+        async with httpx.AsyncClient() as _nlp_client:
+            page_raw_entities = await fetch_google_entities(page_zones.get("paragraphs", ""), _nlp_client)
+        # Inject page's own entities into page_zones for coverage check
+        page_entity_names = {e.get("name", "").lower() for e in page_raw_entities}
+        # Recompute full_text to include entity names found by NLP (belt-and-suspenders)
+        coverage = _compute_coverage(page_zones, body.serp_analysis)
+
+    coverage_ctx = _coverage_context(coverage)
+    prompt = _build_score_prompt(body.business_name, body.gbp_category, body.keyword, city, body.address, serp_ctx, page_text, coverage_ctx)
 
     try:
         msg = await client.messages.create(
@@ -2774,40 +2889,119 @@ class ReoptimizePageResponse(BaseModel):
     html_css_notes: List[str] = []
 
 
-@app.post('/reoptimize-page', response_model=ReoptimizePageResponse, dependencies=[Depends(verify_api_key)])
+@app.post('/reoptimize-page', dependencies=[Depends(verify_api_key)])
 @limiter.limit("5/minute")
 async def reoptimize_page(request: Request, body: ReoptimizePageRequest):
     if not ANTHROPIC_API_KEY:
         raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
 
-    import anthropic as _anthropic
-    client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    async def event_stream():
+        import anthropic as _anthropic
 
-    city = body.location.split(",")[0].strip()
-    serp_ctx = _serp_context(body.serp_analysis)
+        def sse(data: dict) -> str:
+            return f"data: {json.dumps(data)}\n\n"
 
-    # Fetch existing page if URL given but no HTML
-    existing_html = body.existing_page_html or ""
-    if not existing_html and body.existing_page_url:
         try:
-            async with httpx.AsyncClient() as _fc:
-                _resp = await _fc.get(body.existing_page_url, timeout=15.0,
-                                      headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"})
-                _resp.raise_for_status()
-                existing_html = _resp.text
-        except Exception as _e:
-            raise HTTPException(status_code=422, detail=f"Could not fetch {body.existing_page_url}: {_e}")
-    if not existing_html:
-        raise HTTPException(status_code=422, detail="Either existing_page_html or existing_page_url is required")
+            city = body.location.split(",")[0].strip()
 
-    deficiency_text = "\n".join(
-        f"  Engine: {d['engine']} (score: {d['score']}/100)\n"
-        f"  Issues: {'; '.join(d.get('issues', []))}\n"
-        f"  Fixes needed: {'; '.join(d.get('recommendations', []))}"
-        for d in body.deficiencies
-    )
+            # ── Step 1: Fetch competitor URLs ────────────────────────────────
+            yield sse({"step": "fetching_serp", "message": "Fetching competitor URLs from Google…", "progress": 5})
+            async with httpx.AsyncClient() as _sc:
+                comp_urls = await fetch_serp_urls(body.keyword, body.location, _sc)
+            if not comp_urls:
+                yield sse({"step": "error", "message": "DataForSEO returned no competitor URLs"})
+                return
+            yield sse({"step": "fetching_serp_done", "message": f"Found {len(comp_urls)} competitor URLs", "progress": 15})
 
-    prompt = f"""You are an expert local SEO content writer. Fix the SEO deficiencies in the page below by updating its text content only.
+            # ── Step 2: Scrape competitor pages ──────────────────────────────
+            yield sse({"step": "scraping", "message": f"Scraping {len(comp_urls)} competitor pages…", "progress": 20})
+            comp_pages = await scrape_urls(comp_urls)
+            if len(comp_pages) < 2:
+                yield sse({"step": "error", "message": "Could not scrape enough competitor pages"})
+                return
+            yield sse({"step": "scraping_done", "message": f"Scraped {len(comp_pages)} pages successfully", "progress": 40})
+
+            # ── Step 3: Analyze competitor signals ───────────────────────────
+            yield sse({"step": "analyzing_competitors", "message": "Extracting competitor entities and phrases…", "progress": 45})
+            comp_zone_buckets: Dict[str, List[str]] = {z: [] for z in ["title", "h1", "h2_h3", "body", "paragraphs"]}
+            for html in comp_pages:
+                zones = extract_zones(html)
+                for z in comp_zone_buckets:
+                    comp_zone_buckets[z].append(zones.get(z, ""))
+            comp_entities = await get_google_entities(comp_zone_buckets["paragraphs"])
+            comp_quadgrams = get_top_quadgrams(comp_zone_buckets["paragraphs"], body.keyword)
+            comp_related: dict = {}
+            for zone in ("title", "h1", "h2_h3", "body"):
+                comp_related[zone] = get_related_keywords_for_zone(comp_zone_buckets[zone], body.keyword)
+            fresh_serp_analysis = {
+                "google_entities": comp_entities,
+                "top_quadgrams": comp_quadgrams,
+                "related_keywords": comp_related,
+            }
+            yield sse({"step": "analyzing_competitors_done", "message": f"Found {len(comp_entities)} entities, {len(comp_quadgrams)} phrases", "progress": 55})
+
+            # ── Step 4: Fetch and analyze existing page ──────────────────────
+            yield sse({"step": "analyzing_page", "message": "Analyzing your existing page…", "progress": 60})
+            existing_html = body.existing_page_html or ""
+            if not existing_html and body.existing_page_url:
+                try:
+                    async with httpx.AsyncClient() as _fc:
+                        _resp = await _fc.get(body.existing_page_url, timeout=15.0,
+                                              headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"})
+                        _resp.raise_for_status()
+                        existing_html = _resp.text
+                except Exception as _e:
+                    yield sse({"step": "error", "message": f"Could not fetch existing page: {_e}"})
+                    return
+            if not existing_html:
+                yield sse({"step": "error", "message": "Either existing_page_html or existing_page_url is required"})
+                return
+
+            page_zones = _parse_page_zones(existing_html)
+            async with httpx.AsyncClient() as _nlp_client:
+                _page_raw_entities = await fetch_google_entities(page_zones.get("paragraphs", ""), _nlp_client)
+            yield sse({"step": "analyzing_page_done", "message": "Page analysis complete", "progress": 65})
+
+            # ── Step 5: Compute coverage gaps ────────────────────────────────
+            yield sse({"step": "computing_gaps", "message": "Identifying content gaps…", "progress": 70})
+            coverage = _compute_coverage(page_zones, fresh_serp_analysis)
+            coverage_ctx = _coverage_context(coverage)
+
+            # Build detailed gap instructions for Claude
+            missing_entities = coverage.get("missing_entities", [])
+            missing_quadgrams = coverage.get("missing_quadgrams", [])
+            zkc = coverage.get("zone_keyword_coverage", {})
+
+            gap_instructions = []
+            for zone, label in [("title", "Page title"), ("h1", "H1 heading"), ("h2_h3", "H2/H3 subheadings"), ("body", "Body text")]:
+                missing_terms = zkc.get(zone, {}).get("missing", [])
+                if missing_terms:
+                    gap_instructions.append(f"{label}: add missing competitor terms: {', '.join(t['term'] for t in missing_terms[:10])}")
+            if missing_entities:
+                ent_items = [f"{e['name']} (×{e['recommended_mentions']})" for e in missing_entities[:20]]
+                gap_instructions.append(
+                    f"Entities — add these across title, headings, and paragraphs as appropriate, "
+                    f"with the indicated mention frequency: {', '.join(ent_items)}"
+                )
+            if missing_quadgrams:
+                gap_instructions.append(f"Paragraphs — naturally incorporate these missing competitor phrases: {', '.join(q['phrase'] for q in missing_quadgrams[:15])}")
+
+            gap_text = "\n".join(f"  • {g}" for g in gap_instructions) if gap_instructions else "  • No major gaps detected"
+            yield sse({"step": "computing_gaps_done", "message": "Gap analysis complete", "progress": 72})
+
+            # ── Step 6: Rewrite with Claude ──────────────────────────────────
+            yield sse({"step": "rewriting", "message": "Rewriting page content…", "progress": 75})
+
+            serp_ctx = _serp_context(body.serp_analysis or fresh_serp_analysis)
+
+            deficiency_text = "\n".join(
+                f"  Engine: {d['engine']} (score: {d['score']}/100)\n"
+                f"  Issues: {'; '.join(d.get('issues', []))}\n"
+                f"  Fixes needed: {'; '.join(d.get('recommendations', []))}"
+                for d in body.deficiencies
+            )
+
+            prompt = f"""You are an expert local SEO content writer. Fix the SEO deficiencies in the page below by updating its text content only.
 
 BUSINESS: {body.business_name} | CATEGORY: {body.gbp_category}
 KEYWORD: {body.keyword} | CITY: {city}
@@ -2815,8 +3009,11 @@ PHONE: {body.phone or "[PHONE]"}
 ADDRESS: {body.address or "Not provided"}
 {serp_ctx}
 
-DEFICIENCIES TO FIX:
+SCORING DEFICIENCIES TO FIX:
 {deficiency_text}
+
+CONTENT GAP TARGETS — close these gaps by adding missing signals naturally into the page copy:
+{gap_text}
 
 EXISTING PAGE:
 {existing_html[:12000]}
@@ -2825,8 +3022,9 @@ STRICT RULES — follow exactly:
 1. TEXT ONLY: Only change text content (words between HTML tags). You may also update SEO-relevant attributes: alt, title, meta[content], og:title, og:description, aria-label, and JSON-LD schema text values.
 2. PRESERVE EVERYTHING ELSE: Do not change any element types, CSS classes, IDs, data-* attributes, href, src, or any non-content attributes. Do not add, remove, or reorder any HTML elements.
 3. Fix every deficiency listed above through word choices, phrasing, and copy — not by adding new HTML sections.
-4. Naturally incorporate competitor entities and phrases from SERP data where missing.
-5. Do not fabricate reviews or placeholder text. Do not use "near me" literally in body copy.
+4. Close every content gap listed under CONTENT GAP TARGETS. Entity mention counts are targets — weave them naturally across title, headings, and paragraphs as appropriate.
+5. Competitor phrases (quadgrams) go in paragraph text only — NOT in headings or the page title. Entities may appear anywhere.
+6. Do not fabricate reviews or placeholder text. Do not use "near me" literally in body copy.
 
 Return your response in EXACTLY this format (do not deviate):
 
@@ -2835,55 +3033,58 @@ List each HTML/CSS structural change that would further improve SEO but that you
 <<<HTML>>>
 [Complete page HTML with ONLY text content and SEO attributes changed]"""
 
-    try:
-        msg = await client.messages.create(
-            model=GENERATION_MODEL,
-            max_tokens=8000,
-            messages=[{"role": "user", "content": prompt}],
-        )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Claude reoptimize error: {e}")
+            _ac = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+            msg = await _ac.messages.create(
+                model=GENERATION_MODEL,
+                max_tokens=8000,
+                messages=[{"role": "user", "content": prompt}],
+            )
 
-    token_rec = _token_record("reoptimize-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
-    raw = msg.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
-        raw = re.sub(r'\n?```$', '', raw)
-        raw = raw.strip()
+            token_rec = _token_record("reoptimize-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
+            raw = msg.content[0].text.strip()
+            if raw.startswith("```"):
+                raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
+                raw = re.sub(r'\n?```$', '', raw)
+                raw = raw.strip()
 
-    # Split on delimiter to extract notes and HTML separately
-    html_css_notes: List[str] = []
-    if "<<<HTML>>>" in raw:
-        parts = raw.split("<<<HTML>>>", 1)
-        notes_block = parts[0]
-        html_block = parts[1].strip()
-        # Extract bullet lines from the notes block (between <<<NOTES>>> and <<<HTML>>>)
-        if "<<<NOTES>>>" in notes_block:
-            notes_text = notes_block.split("<<<NOTES>>>", 1)[1].strip()
-        else:
-            notes_text = notes_block.strip()
-        if notes_text and notes_text.lower() != "none.":
-            for line in notes_text.splitlines():
-                line = line.strip().lstrip("-•*123456789. ").strip()
-                if line and line.lower() != "none.":
-                    html_css_notes.append(line)
-    else:
-        html_block = raw
+            html_css_notes: List[str] = []
+            if "<<<HTML>>>" in raw:
+                parts = raw.split("<<<HTML>>>", 1)
+                notes_block = parts[0]
+                html_block = parts[1].strip()
+                if "<<<NOTES>>>" in notes_block:
+                    notes_text = notes_block.split("<<<NOTES>>>", 1)[1].strip()
+                else:
+                    notes_text = notes_block.strip()
+                if notes_text and notes_text.lower() != "none.":
+                    for line in notes_text.splitlines():
+                        line = line.strip().lstrip("-•*123456789. ").strip()
+                        if line and line.lower() != "none.":
+                            html_css_notes.append(line)
+            else:
+                html_block = raw
 
-    schema_split = html_block.find('<script type="application/ld+json">')
-    if schema_split != -1:
-        content_html = html_block[:schema_split].strip()
-        schema_json = html_block[schema_split:].strip()
-    else:
-        content_html = html_block
-        schema_json = None
+            schema_split = html_block.find('<script type="application/ld+json">')
+            if schema_split != -1:
+                content_html = html_block[:schema_split].strip()
+                schema_json = html_block[schema_split:].strip()
+            else:
+                content_html = html_block
+                schema_json = None
 
-    return ReoptimizePageResponse(
-        content_html=content_html,
-        schema_json=schema_json,
-        token_usage=token_rec,
-        html_css_notes=html_css_notes,
-    )
+            result = {
+                "content_html": content_html,
+                "schema_json": schema_json,
+                "token_usage": token_rec,
+                "html_css_notes": html_css_notes,
+            }
+            yield sse({"step": "done", "progress": 100, "result": result})
+
+        except Exception as e:
+            logger.warning(f"reoptimize-page error: {e}")
+            yield sse({"step": "error", "message": str(e)})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 # ── /related-pages ─────────────────────────────────────────────────────────────

@@ -89,6 +89,8 @@ export default function PageScoreView({
   const [scoreResult, setScoreResult] = useState<ScoreResult | null>(initialScoreResult ?? null);
   const [scoring, setScoring] = useState(false);
   const [reoptimizing, setReoptimizing] = useState(false);
+  const [reoptimizeProgress, setReoptimizeProgress] = useState(0);
+  const [reoptimizeStep, setReoptimizeStep] = useState("");
   const [error, setError] = useState("");
   const [expandedEngines, setExpandedEngines] = useState<Set<string>>(new Set());
 
@@ -134,6 +136,8 @@ export default function PageScoreView({
   const runReoptimize = async () => {
     if (!scoreResult) return;
     setReoptimizing(true);
+    setReoptimizeProgress(0);
+    setReoptimizeStep("Starting…");
     setError("");
     try {
       const res = await fetch(`${NLP_SERVICE_URL}/reoptimize-page`, {
@@ -142,7 +146,6 @@ export default function PageScoreView({
         body: JSON.stringify({
           keyword,
           location,
-          existing_page_html: "",   // backend will re-fetch from page_url via score-page HTML
           existing_page_url: pageUrl,
           deficiencies: scoreResult.deficiencies,
           business_name: businessName,
@@ -156,13 +159,35 @@ export default function PageScoreView({
         const d = await res.json().catch(() => ({}));
         throw new Error(d.detail || `Reoptimize error: ${res.status}`);
       }
-      const data: GeneratedResult = await res.json();
-      await saveTokenUsage(data.token_usage);
-      onGenerated(data, "reoptimize");
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          let evt: any;
+          try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+          if (evt.progress !== undefined) setReoptimizeProgress(evt.progress);
+          if (evt.message) setReoptimizeStep(evt.message);
+          if (evt.step === "error") throw new Error(evt.message || "Reoptimize failed");
+          if (evt.step === "done" && evt.result) {
+            await saveTokenUsage(evt.result.token_usage);
+            onGenerated(evt.result as GeneratedResult, "reoptimize");
+            return;
+          }
+        }
+      }
     } catch (e: any) {
       setError(e.message || "Reoptimize failed");
     } finally {
       setReoptimizing(false);
+      setReoptimizeProgress(0);
+      setReoptimizeStep("");
     }
   };
 
@@ -306,6 +331,17 @@ export default function PageScoreView({
                 >
                   {reoptimizing ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Reoptimizing…</> : "Reoptimize This Page"}
                 </Button>
+                {reoptimizing && (
+                  <div className="space-y-1.5">
+                    <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-accent rounded-full transition-all duration-500"
+                        style={{ width: `${reoptimizeProgress}%` }}
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground text-center">{reoptimizeStep}</p>
+                  </div>
+                )}
                 <Button
                   variant="outline"
                   className="w-full font-semibold py-6"
