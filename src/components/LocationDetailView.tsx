@@ -156,10 +156,7 @@ const LocationDetailView = ({
     if (!website) {
       website = await fetchWebsiteFromGBP(b);
     }
-    if (!website) {
-      setRescanning(false);
-      return;
-    }
+    // website may still be null — backend handles no-website case gracefully
 
     // Set status to running
     await supabase
@@ -172,7 +169,7 @@ const LocationDetailView = ({
         method: "POST",
         headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
         body: JSON.stringify({
-          website_url: website,
+          ...(website ? { website_url: website } : {}),
           business_name: b.business_name,
           gbp_category: b.gbp_category,
           gbp_categories: b.gbp_categories || [],
@@ -282,7 +279,7 @@ const LocationDetailView = ({
     let website = b.website;
     if (!website) {
       website = await fetchWebsiteFromGBP(b);
-      if (!website) return;
+      // website may still be null — backend handles no-website case via category inference
     }
     setScanningBrandVoice(true);
     try {
@@ -290,8 +287,9 @@ const LocationDetailView = ({
         method: "POST",
         headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
         body: JSON.stringify({
-          website_url: website,
+          ...(website ? { website_url: website } : {}),
           business_name: b.business_name,
+          gbp_category: b.gbp_category || "",
         }),
       });
       if (!response.ok) {
@@ -541,7 +539,7 @@ const LocationDetailView = ({
                     className="flex items-center gap-1.5 text-xs font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     {rescanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                    {rescanning ? "Scanning..." : icp ? "Re-run" : "Scan Website"}
+                    {rescanning ? "Scanning..." : icp ? "Re-run" : (business.website ? "Scan Website" : "Detect from Category")}
                   </button>
                 )}
                 {editingIcp && (
@@ -712,7 +710,7 @@ const LocationDetailView = ({
             {/* Empty state */}
             {!editingIcp && !icp && (
               <p className="text-sm text-muted-foreground text-center py-4">
-                {analysisStatus === "running" ? "Detecting ICP…" : "Click Scan Website above to auto-detect ICP."}
+                {analysisStatus === "running" ? "Detecting ICP…" : (business.website ? "Click Scan Website above to auto-detect ICP." : "Click Detect from Category above to infer ICP from your business type.")}
               </p>
             )}
           </div>
@@ -935,7 +933,7 @@ const LocationDetailView = ({
                       className="flex items-center gap-1.5 text-xs font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       {scanningBrandVoice ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                      {scanningBrandVoice ? "Scanning..." : bv ? "Re-scan" : "Scan Website"}
+                      {scanningBrandVoice ? "Scanning..." : bv ? "Re-scan" : (business.website ? "Scan Website" : "Generate from Category")}
                     </button>
                   )}
                   {editingBrandVoice && (
@@ -951,7 +949,9 @@ const LocationDetailView = ({
 
               {!bv && (
                 <p className="text-sm text-muted-foreground text-center py-4">
-                  {scanningBrandVoice ? "Scanning website for brand voice signals…" : "Click Scan Website to auto-generate a brand voice profile."}
+                  {scanningBrandVoice
+                    ? (business.website ? "Scanning website for brand voice signals…" : "Generating brand voice from business category…")
+                    : (business.website ? "Click Scan Website to auto-generate a brand voice profile." : "No website found. Click Generate from Category to create a brand voice profile based on your business type.")}
                 </p>
               )}
 
