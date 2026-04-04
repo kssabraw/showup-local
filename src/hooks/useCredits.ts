@@ -2,28 +2,32 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 
 export interface CreditsData {
-  balance: number;
+  balance: number;       // combined: monthly + bonus
+  monthlyBalance: number;
+  bonusCredits: number;
   perMonth: number;
   plan: string;
 }
 
 async function fetchCredits(): Promise<CreditsData> {
-  // Try user_profiles directly first (more data)
   const { data: profile, error } = await supabase
     .from("user_profiles")
-    .select("credits_balance, credits_per_month, plan")
+    .select("credits_balance, bonus_credits, credits_per_month, plan")
     .single();
 
   if (error || !profile) {
-    // Fall back to the get_credits() RPC if profile row doesn't exist yet
     const { data: balance } = await supabase.rpc("get_credits");
-    return { balance: balance ?? 0, perMonth: 60, plan: "starter" };
+    return { balance: balance ?? 0, monthlyBalance: balance ?? 0, bonusCredits: 0, perMonth: 60, plan: "starter" };
   }
 
+  const monthly = profile.credits_balance ?? 0;
+  const bonus   = (profile as { bonus_credits?: number }).bonus_credits ?? 0;
   return {
-    balance: profile.credits_balance,
-    perMonth: profile.credits_per_month,
-    plan: profile.plan,
+    balance:        monthly + bonus,
+    monthlyBalance: monthly,
+    bonusCredits:   bonus,
+    perMonth:       profile.credits_per_month,
+    plan:           profile.plan,
   };
 }
 

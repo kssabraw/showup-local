@@ -11,8 +11,9 @@ import { StepIndicator } from "@/components/StepIndicator";
 import { useBusinessProfiles } from "@/hooks/useBusinessProfiles";
 import { useInvalidateSavedPages } from "@/hooks/useSavedPages";
 import { useCredits, useInvalidateCredits } from "@/hooks/useCredits";
-import { nlp, nlpStream, InsufficientCreditsError, RankabilityLimitError, purchaseRankabilityPack } from "@/lib/nlp-client";
+import { nlp, nlpStream, InsufficientCreditsError, RankabilityLimitError, purchaseRankabilityPack, purchaseCreditPack } from "@/lib/nlp-client";
 import RankabilityPackModal from "@/components/RankabilityPackModal";
+import CreditPackModal from "@/components/CreditPackModal";
 import type { AnalysisResult, RankabilityResult } from "@/lib/nlp-types";
 import type { SavedPage } from "@/hooks/useSavedPages";
 
@@ -75,6 +76,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const [rankability, setRankability] = useState<RankabilityResult | null>(null);
   const [rankabilityLoading, setRankabilityLoading] = useState(false);
   const [showPackModal, setShowPackModal] = useState(false);
+  const [showCreditModal, setShowCreditModal] = useState(false);
   const [relatedLoading, setRelatedLoading] = useState(false);
   const [selectedForCreate, setSelectedForCreate] = useState<Set<string>>(new Set());
   const [bulkCreating, setBulkCreating] = useState(false);
@@ -334,6 +336,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
       invalidateCredits();
     } catch (e: any) {
       if (e.name === "AbortError") return;
+      if (e instanceof InsufficientCreditsError) { setShowCreditModal(true); setCheckState({ status: "idle" }); return; }
       setError(e.message || "Scoring failed");
       setCheckState({ status: "idle" });
     }
@@ -406,6 +409,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
       invalidateCredits();
     } catch (e: any) {
       if ((e as Error).name === "AbortError") return;
+      if (e instanceof InsufficientCreditsError) { setShowCreditModal(true); setCheckState({ status: "idle" }); return; }
       setError((e as Error).message || "Something went wrong");
       setCheckState({ status: "not_found" });
     } finally {
@@ -720,6 +724,16 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const isChecking = checkState.status === "scanning" || checkState.status === "scoring" || checkState.status === "found";
 
   // ── Main form ──────────────────────────────────────────────────────────────
+  const handleCreditPurchase = async (pack: { id: "25" | "60" | "150" }) => {
+    const result = await purchaseCreditPack(pack.id);
+    if (result.checkout_url) {
+      window.location.href = result.checkout_url;
+    } else {
+      setShowCreditModal(false);
+      setError(result.message ?? "Payment processing is not yet available. Please check back soon.");
+    }
+  };
+
   const handlePurchase = async (pack: { id: "5" | "10" | "20"; checks: number }) => {
     const result = await purchaseRankabilityPack(pack.id);
     if (result.checkout_url) {
@@ -732,6 +746,12 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
 
   return (
     <>
+    {showCreditModal && (
+      <CreditPackModal
+        onClose={() => setShowCreditModal(false)}
+        onPurchase={handleCreditPurchase}
+      />
+    )}
     {showPackModal && (
       <RankabilityPackModal
         onClose={() => setShowPackModal(false)}

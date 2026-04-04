@@ -2,9 +2,10 @@ import { useState, useRef, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader2, CheckCircle, AlertTriangle, XCircle, ChevronDown, ChevronUp } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { nlp, nlpStream } from "@/lib/nlp-client";
+import { nlp, nlpStream, InsufficientCreditsError, purchaseCreditPack } from "@/lib/nlp-client";
 import { useCredits, useInvalidateCredits } from "@/hooks/useCredits";
 import type { ScoreResult, ReoptimizeResult, AnalysisResult, EngineScore } from "@/lib/nlp-types";
+import CreditPackModal from "@/components/CreditPackModal";
 
 // Re-export for backward compat with callers that destructure the prop shape
 interface GeneratedResult {
@@ -74,10 +75,21 @@ export default function PageScoreView({
   const [scoring, setScoring] = useState(false);
   const [reoptimizing, setReoptimizing] = useState(false);
   const [error, setError] = useState("");
+  const [showCreditModal, setShowCreditModal] = useState(false);
   const [expandedEngines, setExpandedEngines] = useState<Set<string>>(new Set());
   const abortRef = useRef<AbortController | null>(null);
   const { data: credits } = useCredits();
   const invalidateCredits = useInvalidateCredits();
+
+  const handleCreditPurchase = async (pack: { id: "25" | "60" | "150" }) => {
+    const result = await purchaseCreditPack(pack.id);
+    if (result.checkout_url) {
+      window.location.href = result.checkout_url;
+    } else {
+      setShowCreditModal(false);
+      setError(result.message ?? "Payment processing is not yet available. Please check back soon.");
+    }
+  };
 
   const saveTokenUsage = async (record: Record<string, any>) => {
     await supabase.from("token_usage").insert({
@@ -120,6 +132,7 @@ export default function PageScoreView({
       }
     } catch (e: any) {
       if ((e as Error).name === "AbortError") return;
+      if (e instanceof InsufficientCreditsError) { setShowCreditModal(true); return; }
       setError((e as Error).message || "Scoring failed");
     } finally {
       setScoring(false);
@@ -161,6 +174,7 @@ export default function PageScoreView({
       }
     } catch (e: any) {
       if ((e as Error).name === "AbortError") return;
+      if (e instanceof InsufficientCreditsError) { setShowCreditModal(true); return; }
       setError((e as Error).message || "Reoptimize failed");
     } finally {
       setReoptimizing(false);
@@ -176,6 +190,13 @@ export default function PageScoreView({
   };
 
   return (
+    <>
+    {showCreditModal && (
+      <CreditPackModal
+        onClose={() => setShowCreditModal(false)}
+        onPurchase={handleCreditPurchase}
+      />
+    )}
     <div className="max-w-3xl mx-auto space-y-6">
       <div>
         <button onClick={onBack} className="text-sm text-muted-foreground hover:text-foreground mb-2 transition-colors">
@@ -354,5 +375,6 @@ export default function PageScoreView({
 
       {relatedPagePanel}
     </div>
+    </>
   );
 }

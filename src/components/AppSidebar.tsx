@@ -40,8 +40,10 @@ const comingSoonItems = [
 const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarProps) => {
   const { data: credits } = useCredits();
   const balance = credits?.balance ?? null;
+  const monthly = credits?.monthlyBalance ?? null;
+  const bonus = credits?.bonusCredits ?? 0;
   const perMonth = credits?.perMonth ?? 60;
-  const pct = balance !== null ? Math.round((balance / perMonth) * 100) : null;
+  const pct = monthly !== null ? Math.min(100, Math.round((monthly / perMonth) * 100)) : null;
   const low = balance !== null && balance <= 5;
 
   return (
@@ -133,7 +135,8 @@ const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarPro
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-xs font-medium text-sidebar-foreground/70">Credits</span>
               <span className={cn("text-xs font-semibold tabular-nums", low ? "text-red-400" : "text-sidebar-accent-foreground")}>
-                {balance} / {perMonth}
+                {monthly} / {perMonth}
+                {bonus > 0 && <span className="text-primary ml-1">+{bonus}</span>}
               </span>
             </div>
             <div className="h-1.5 rounded-full bg-sidebar-border overflow-hidden">
@@ -142,8 +145,14 @@ const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarPro
                 style={{ width: `${pct}%` }}
               />
             </div>
-            {low && (
+            {bonus > 0 && (
+              <p className="text-xs text-primary mt-1.5">{bonus} bonus credit{bonus !== 1 ? "s" : ""}</p>
+            )}
+            {low && !bonus && (
               <p className="text-xs text-red-400 mt-1.5">Credits running low</p>
+            )}
+            {low && bonus > 0 && (
+              <p className="text-xs text-amber-400 mt-1.5">Monthly credits low — using bonus</p>
             )}
           </div>
         </div>
