@@ -214,6 +214,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         gbp_category: b.gbp_category,
         business_name: b.business_name,
         business_address: b.address,
+        business_review_count: b.gbp_review_count ?? null,
         business_lat: b.latitude ?? null,
         business_lng: b.longitude ?? null,
         website: b.website,
@@ -1089,9 +1090,9 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                 <div className="px-3 space-y-1.5">
                   {[
                     { label: "Category match", key: "category_match", max: 35 },
-                    { label: "Competition barrier", key: "competition_barrier", max: 25 },
+                    { label: "Competition barrier", key: "competition_barrier", max: 15 },
                     { label: "Distance from city center", key: "distance", max: 20 },
-                    { label: "Keyword in competitor names", key: "keyword_in_competitor_names", max: 15 },
+                    { label: "Keyword in competitor names", key: "keyword_in_competitor_names", max: 25 },
                     { label: "In top 10 organic", key: "in_top10_organic", max: 5 },
                   ].map(({ label, key, max }) => {
                     const pts = rankability.score_breakdown[key] ?? 0;
@@ -1130,10 +1131,19 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                       ))}
                     </div>
                     {rankability.min_reviews_in_pack != null && (
-                      <p className="text-muted-foreground mt-1.5">
-                        Min reviews in pack: <span className="font-semibold text-foreground">{rankability.min_reviews_in_pack}</span>
-                        {rankability.avg_rating_in_pack != null && <> · Avg rating: <span className="font-semibold text-foreground">★ {rankability.avg_rating_in_pack}</span></>}
-                      </p>
+                      <div className="text-muted-foreground mt-1.5 space-y-0.5">
+                        <p>
+                          Reviews in pack: <span className="font-semibold text-foreground">{rankability.min_reviews_in_pack}</span> min
+                          {rankability.max_reviews_in_pack != null && <> · <span className="font-semibold text-foreground">{rankability.max_reviews_in_pack}</span> max</>}
+                          {rankability.avg_rating_in_pack != null && <> · ★ <span className="font-semibold text-foreground">{rankability.avg_rating_in_pack}</span> avg</>}
+                        </p>
+                        {rankability.review_gap != null && rankability.review_gap > 0 && (
+                          <p className="text-amber-600">Need <span className="font-semibold">{rankability.review_gap}</span> more reviews to match weakest competitor</p>
+                        )}
+                        {rankability.review_gap === 0 && (
+                          <p className="text-green-700">✓ Review count meets or exceeds weakest competitor</p>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}

@@ -3351,10 +3351,12 @@ async def _geocode_location(location: str) -> Optional[tuple[float, float]]:
 
 
 def _rankability_score(
-    category_match: str,       # "exact" | "partial" | "none"
-    min_reviews: Optional[int],
+    category_match: str,           # "exact" | "partial" | "none"
+    client_reviews: Optional[int], # client's own GBP review count
+    max_reviews: Optional[int],    # highest review count in map pack
+    min_reviews: Optional[int],    # lowest review count in map pack
     distance_miles: Optional[float],
-    keyword_name_count: int,   # how many of 3 competitors have keyword in name
+    keyword_name_count: int,       # how many of 3 competitors have keyword in name
     in_top10_organic: bool,
     is_sab: bool = False,
     physical_competitor_count: int = 0,
@@ -3365,35 +3367,30 @@ def _rankability_score(
     # 1. Category match (35 pts)
     cat_pts = {"exact": 35, "partial": 18, "none": 0}.get(category_match, 0)
 
-    # 2. Competition barrier — min reviews in pack (25 pts)
-    if min_reviews is None:
-        comp_pts = 12  # neutral / no pack
-    elif min_reviews < 25:
-        comp_pts = 25
-    elif min_reviews < 75:
-        comp_pts = 20
-    elif min_reviews < 150:
-        comp_pts = 14
-    elif min_reviews < 300:
-        comp_pts = 7
+    # 2. Competition barrier — client reviews vs. pack (15 pts)
+    if client_reviews is None or min_reviews is None or max_reviews is None:
+        comp_pts = 7  # neutral when data unavailable
+    elif client_reviews >= max_reviews:
+        comp_pts = 15
+    elif client_reviews >= min_reviews:
+        comp_pts = 10
+    elif min_reviews > 0 and client_reviews >= min_reviews * 0.80:
+        comp_pts = 5   # up to 20% below lowest in pack
     else:
-        comp_pts = 2
+        comp_pts = 0
 
     # 3. Distance from city center (20 pts)
     if distance_miles is None:
         dist_pts = 10  # neutral / unknown
-    elif distance_miles < 2:
+    elif distance_miles <= 5:
         dist_pts = 20
-    elif distance_miles < 5:
-        dist_pts = 15
-    elif distance_miles < 10:
-        dist_pts = 8
+    elif distance_miles <= 7:
+        dist_pts = 5
     else:
         dist_pts = 0
 
-    # 4. Keyword in competitor names (15 pts)
-    # Fewer competitors with keyword in name = more level playing field
-    kw_name_pts = {0: 15, 1: 10, 2: 5, 3: 0}.get(min(keyword_name_count, 3), 0)
+    # 4. Keyword in competitor names (25 pts)
+    kw_name_pts = {0: 25, 1: 10, 2: 5, 3: 0}.get(min(keyword_name_count, 3), 0)
 
     # 5. Business website in top 10 organic (5 pts)
     organic_pts = 5 if in_top10_organic else 0
@@ -3401,8 +3398,6 @@ def _rankability_score(
     total = cat_pts + comp_pts + dist_pts + kw_name_pts + organic_pts
 
     # SAB vs physical-dominant pack penalty (-40 pts)
-    # If this is an SAB and majority of the pack are physical location businesses,
-    # Google heavily favors proximity → major disadvantage for SABs
     sab_penalty = 0
     sab_pack_mismatch = False
     if is_sab and total_pack_count > 0:
@@ -3452,7 +3447,8 @@ class RankabilityRequest(BaseModel):
     location_code: Optional[int] = None
     gbp_category: str
     business_name: Optional[str] = None
-    business_address: Optional[str] = None  # used to infer SAB (no street number = SAB)
+    business_address: Optional[str] = None   # used to infer SAB (empty = SAB)
+    business_review_count: Optional[int] = None  # client's own GBP review count
     business_lat: Optional[float] = None
     business_lng: Optional[float] = None
     website: Optional[str] = None  # to check top-10 organic presence
@@ -3478,6 +3474,7 @@ class RankabilityResponse(BaseModel):
 
     # Competition metrics
     min_reviews_in_pack: Optional[int] = None
+    max_reviews_in_pack: Optional[int] = None
     avg_reviews_in_pack: Optional[float] = None
     avg_rating_in_pack: Optional[float] = None
     review_gap: Optional[int] = None  # vs. weakest competitor in pack
@@ -3616,6 +3613,7 @@ async def check_rankability(request: Request, body: RankabilityRequest):
     review_counts = [c.review_count for c in competitors if c.review_count is not None]
     ratings = [c.rating for c in competitors if c.rating is not None]
     min_reviews = min(review_counts) if review_counts else None
+    max_reviews = max(review_counts) if review_counts else None
     avg_reviews = round(sum(review_counts) / len(review_counts), 1) if review_counts else None
     avg_rating = round(sum(ratings) / len(ratings), 2) if ratings else None
 
@@ -3637,6 +3635,8 @@ async def check_rankability(request: Request, body: RankabilityRequest):
     # ── Score ──────────────────────────────────────────────────────────────────
     score_data = _rankability_score(
         category_match=category_match,
+        client_reviews=body.business_review_count,
+        max_reviews=max_reviews,
         min_reviews=min_reviews,
         distance_miles=distance_miles,
         keyword_name_count=keyword_name_count,
@@ -3646,9 +3646,10 @@ async def check_rankability(request: Request, body: RankabilityRequest):
         total_pack_count=len(local_pack_items[:3]),
     )
 
-    # ── Review gap ─────────────────────────────────────────────────────────────
+    # ── Review gap — reviews needed to match weakest competitor ───────────────
     review_gap = None
-    # (Would need user's review count passed in — left as None for now)
+    if body.business_review_count is not None and min_reviews is not None:
+        review_gap = max(0, min_reviews - body.business_review_count)
 
     # ── Human-readable message ─────────────────────────────────────────────────
     verdict_labels = {
@@ -3677,6 +3678,7 @@ async def check_rankability(request: Request, body: RankabilityRequest):
         competitors=competitors,
         ranking_categories=ranking_categories,
         min_reviews_in_pack=min_reviews,
+        max_reviews_in_pack=max_reviews,
         avg_reviews_in_pack=avg_reviews,
         avg_rating_in_pack=avg_rating,
         review_gap=review_gap,

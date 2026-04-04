@@ -181,9 +181,10 @@ export interface RankabilityResult {
 
   // Competition metrics
   min_reviews_in_pack?: number;
+  max_reviews_in_pack?: number;
   avg_reviews_in_pack?: number;
   avg_rating_in_pack?: number;
-  review_gap?: number;
+  review_gap?: number;  // reviews needed to match weakest competitor
 
   // Category match
   category_match: string;     // "exact" | "partial" | "none"

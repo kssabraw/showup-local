@@ -193,6 +193,7 @@ export const nlp = {
       gbp_category: string;
       business_name?: string;
       business_address?: string | null;
+      business_review_count?: number | null;
       business_lat?: number | null;
       business_lng?: number | null;
       website?: string | null;
