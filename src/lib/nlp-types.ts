@@ -197,8 +197,8 @@ export interface RankabilityResult {
   keyword_in_competitor_names: number;
   competitor_name_examples: string[];
 
-  // Organic presence
-  in_top10_organic: boolean;
+  // Google Maps presence
+  in_maps_results: boolean;
 
   // SAB vs physical pack
   is_sab: boolean;

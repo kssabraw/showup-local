@@ -3357,7 +3357,7 @@ def _rankability_score(
     min_reviews: Optional[int],    # lowest review count in map pack
     distance_miles: Optional[float],
     keyword_name_count: int,       # how many of 3 competitors have keyword in name
-    in_top10_organic: bool,
+    in_maps_results: bool,
     is_sab: bool = False,
     physical_competitor_count: int = 0,
     total_pack_count: int = 0,
@@ -3393,7 +3393,7 @@ def _rankability_score(
     kw_name_pts = {0: 25, 1: 10, 2: 5, 3: 0}.get(min(keyword_name_count, 3), 0)
 
     # 5. Business website in top 10 organic (5 pts)
-    organic_pts = 5 if in_top10_organic else 0
+    organic_pts = 5 if in_maps_results else 0
 
     total = cat_pts + comp_pts + dist_pts + kw_name_pts + organic_pts
 
@@ -3426,7 +3426,7 @@ def _rankability_score(
             "competition_barrier": comp_pts,
             "distance": dist_pts,
             "keyword_in_competitor_names": kw_name_pts,
-            "in_top10_organic": organic_pts,
+            "in_maps_results": organic_pts,
             "sab_penalty": sab_penalty,
         },
     }
@@ -3491,7 +3491,7 @@ class RankabilityResponse(BaseModel):
     competitor_name_examples: List[str] = []
 
     # Organic presence
-    in_top10_organic: bool = False
+    in_maps_results: bool = False
 
     # SAB vs physical pack
     is_sab: bool = False
@@ -3545,14 +3545,14 @@ async def check_rankability(request: Request, body: RankabilityRequest):
                 elif t == "local_pack":
                     local_pack_items.append(item)
 
-    # ── Business in top 10 organic ─────────────────────────────────────────────
-    in_top10_organic = False
-    if body.website:
-        biz_domain = re.sub(r'^www\.', '', httpx.URL(body.website).host.lower()) if body.website else ""
-        for item in organic_items[:10]:
-            item_domain = re.sub(r'^www\.', '', httpx.URL(item.get("url", "http://x.com")).host.lower())
-            if biz_domain and biz_domain == item_domain:
-                in_top10_organic = True
+    # ── Business in Google Maps results ───────────────────────────────────────
+    # Check if the client's business name appears in any local_pack item returned
+    # by DataForSEO (typically the 3-pack; "More places" would need a Maps query).
+    in_maps_results = False
+    if body.business_name:
+        for item in local_pack_items:
+            if _keyword_in_name(body.business_name, item.get("title", "")):
+                in_maps_results = True
                 break
 
     # ── Local pack analysis ────────────────────────────────────────────────────
@@ -3640,7 +3640,7 @@ async def check_rankability(request: Request, body: RankabilityRequest):
         min_reviews=min_reviews,
         distance_miles=distance_miles,
         keyword_name_count=keyword_name_count,
-        in_top10_organic=in_top10_organic,
+        in_maps_results=in_maps_results,
         is_sab=is_sab,
         physical_competitor_count=physical_competitor_count,
         total_pack_count=len(local_pack_items[:3]),
@@ -3687,7 +3687,7 @@ async def check_rankability(request: Request, body: RankabilityRequest):
         distance_ok=distance_ok,
         keyword_in_competitor_names=keyword_name_count,
         competitor_name_examples=competitor_name_examples,
-        in_top10_organic=in_top10_organic,
+        in_maps_results=in_maps_results,
         is_sab=is_sab,
         sab_pack_mismatch=score_data.get("sab_pack_mismatch", False),
         physical_competitors_in_pack=physical_competitor_count,

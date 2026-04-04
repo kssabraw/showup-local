@@ -226,7 +226,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         has_map_pack: false, competitors: [], ranking_categories: [],
         category_match: "none", distance_ok: true,
         keyword_in_competitor_names: 0, competitor_name_examples: [],
-        in_top10_organic: false, is_sab: false, sab_pack_mismatch: false,
+        in_maps_results: false, is_sab: false, sab_pack_mismatch: false,
         physical_competitors_in_pack: 0,
         message: "Could not retrieve map pack data.", match_count: 0, total_results: 0,
       });
@@ -1093,7 +1093,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                     { label: "Competition barrier", key: "competition_barrier", max: 15 },
                     { label: "Distance from city center", key: "distance", max: 20 },
                     { label: "Keyword in competitor names", key: "keyword_in_competitor_names", max: 25 },
-                    { label: "In top 10 organic", key: "in_top10_organic", max: 5 },
+                    { label: "Appears in Google Maps", key: "in_maps_results", max: 5 },
                   ].map(({ label, key, max }) => {
                     const pts = rankability.score_breakdown[key] ?? 0;
                     return (
@@ -1162,8 +1162,8 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                   {rankability.keyword_in_competitor_names > 0 && (
                     <p className="text-amber-600">⚠ {rankability.keyword_in_competitor_names} competitor(s) have keyword in name: {rankability.competitor_name_examples.join(", ")}</p>
                   )}
-                  {rankability.in_top10_organic && (
-                    <p className="text-green-700">✓ Your website appears in top 10 organic</p>
+                  {rankability.in_maps_results && (
+                    <p className="text-green-700">✓ Business appears in Google Maps results</p>
                   )}
                   {rankability.category_match === "none" && (
                     <p className="text-red-600">✗ GBP category mismatch — pack uses different categories</p>
