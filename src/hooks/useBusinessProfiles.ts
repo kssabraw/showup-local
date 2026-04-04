@@ -14,6 +14,8 @@ export type BusinessProfile = Pick<
   | "existing_pages"
   | "brand_voice"
   | "detected_icp"
+  | "latitude"
+  | "longitude"
 >;
 
 export const BUSINESS_PROFILES_KEY = ["business_profiles"] as const;
@@ -25,7 +27,7 @@ export function useBusinessProfiles() {
       const { data, error } = await supabase
         .from("business_profiles")
         .select(
-          "id, business_name, address, gbp_category, website, phone, differentiators, existing_pages, brand_voice, detected_icp",
+          "id, business_name, address, gbp_category, website, phone, differentiators, existing_pages, brand_voice, detected_icp, latitude, longitude",
         )
         .order("created_at", { ascending: false });
       if (error) throw error;

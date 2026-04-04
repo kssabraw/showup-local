@@ -161,10 +161,51 @@ export interface RelatedPageItem {
 
 // ── Rankability ───────────────────────────────────────────────────────────────
 
+export interface RankabilityCompetitor {
+  name: string;
+  rating?: number;
+  review_count?: number;
+  has_keyword_in_name: boolean;
+}
+
 export interface RankabilityResult {
-  verdict: string;
+  // Score
+  score: number;
+  verdict: string;          // "strong" | "moderate" | "difficult" | "very_difficult"
+  score_breakdown: Record<string, number>;
+
+  // Map pack
+  has_map_pack: boolean;
+  competitors: RankabilityCompetitor[];
+  ranking_categories: Array<{ category: string; count: number }>;
+
+  // Competition metrics
+  min_reviews_in_pack?: number;
+  avg_reviews_in_pack?: number;
+  avg_rating_in_pack?: number;
+  review_gap?: number;
+
+  // Category match
+  category_match: string;     // "exact" | "partial" | "none"
+
+  // Distance
+  distance_miles?: number;
+  distance_ok: boolean;
+
+  // Keyword-in-name
+  keyword_in_competitor_names: number;
+  competitor_name_examples: string[];
+
+  // Organic presence
+  in_top10_organic: boolean;
+
+  // SAB vs physical pack
+  is_sab: boolean;
+  sab_pack_mismatch: boolean;
+  physical_competitors_in_pack: number;
+
+  // Human-readable
   message: string;
   match_count: number;
   total_results: number;
-  ranking_categories: Array<{ category: string; count: number }>;
 }

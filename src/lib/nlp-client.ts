@@ -186,7 +186,17 @@ export const nlp = {
   ) => nlpPost<{ items: RelatedPageItem[] }>("/related-pages", body, signal),
 
   checkRankability: (
-    body: { keyword: string; location: string; gbp_category: string },
+    body: {
+      keyword: string;
+      location: string;
+      location_code?: number | null;
+      gbp_category: string;
+      business_name?: string;
+      business_lat?: number | null;
+      business_lng?: number | null;
+      website?: string | null;
+      is_sab?: boolean;
+    },
     signal?: AbortSignal,
   ) => nlpPost<RankabilityResult>("/check-rankability", body, signal),
 

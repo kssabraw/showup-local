@@ -3308,3 +3308,376 @@ Generate exactly 5 posts for each of the 4 platforms. Return this JSON structure
         pinterest=data.get("pinterest", []),
         token_usage=token_rec,
     )
+
+
+# ── /check-rankability ────────────────────────────────────────────────────────
+
+def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in miles between two lat/lng points."""
+    import math
+    R = 3958.8  # Earth radius in miles
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _keyword_in_name(keyword: str, business_name: str) -> bool:
+    """True if 60%+ of keyword tokens appear in business name (case-insensitive)."""
+    kw_tokens = set(re.sub(r'[^a-z0-9\s]', '', keyword.lower()).split())
+    name_lower = re.sub(r'[^a-z0-9\s]', '', business_name.lower())
+    if not kw_tokens:
+        return False
+    matches = sum(1 for t in kw_tokens if t in name_lower)
+    return matches / len(kw_tokens) >= 0.6
+
+
+async def _geocode_location(location: str) -> Optional[tuple[float, float]]:
+    """Geocode a city/location string using Nominatim (free, no key)."""
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": location, "format": "json", "limit": 1},
+                headers={"User-Agent": "ShowUPLocal/1.0 (contact@showuplocal.com)"},
+            )
+            results = resp.json()
+            if results:
+                return float(results[0]["lat"]), float(results[0]["lon"])
+    except Exception as e:
+        logger.warning(f"Geocoding failed for '{location}': {e}")
+    return None
+
+
+def _rankability_score(
+    category_match: str,       # "exact" | "partial" | "none"
+    min_reviews: Optional[int],
+    distance_miles: Optional[float],
+    keyword_name_count: int,   # how many of 3 competitors have keyword in name
+    in_top10_organic: bool,
+    is_sab: bool = False,
+    physical_competitor_count: int = 0,
+    total_pack_count: int = 0,
+) -> dict:
+    """Compute 0-100 rankability score with breakdown."""
+
+    # 1. Category match (35 pts)
+    cat_pts = {"exact": 35, "partial": 18, "none": 0}.get(category_match, 0)
+
+    # 2. Competition barrier — min reviews in pack (25 pts)
+    if min_reviews is None:
+        comp_pts = 12  # neutral / no pack
+    elif min_reviews < 25:
+        comp_pts = 25
+    elif min_reviews < 75:
+        comp_pts = 20
+    elif min_reviews < 150:
+        comp_pts = 14
+    elif min_reviews < 300:
+        comp_pts = 7
+    else:
+        comp_pts = 2
+
+    # 3. Distance from city center (20 pts)
+    if distance_miles is None:
+        dist_pts = 10  # neutral / unknown
+    elif distance_miles < 2:
+        dist_pts = 20
+    elif distance_miles < 5:
+        dist_pts = 15
+    elif distance_miles < 10:
+        dist_pts = 8
+    else:
+        dist_pts = 0
+
+    # 4. Keyword in competitor names (15 pts)
+    # Fewer competitors with keyword in name = more level playing field
+    kw_name_pts = {0: 15, 1: 10, 2: 5, 3: 0}.get(min(keyword_name_count, 3), 0)
+
+    # 5. Business website in top 10 organic (5 pts)
+    organic_pts = 5 if in_top10_organic else 0
+
+    total = cat_pts + comp_pts + dist_pts + kw_name_pts + organic_pts
+
+    # SAB vs physical-dominant pack penalty (-40 pts)
+    # If this is an SAB and majority of the pack are physical location businesses,
+    # Google heavily favors proximity → major disadvantage for SABs
+    sab_penalty = 0
+    sab_pack_mismatch = False
+    if is_sab and total_pack_count > 0:
+        physical_ratio = physical_competitor_count / total_pack_count
+        if physical_ratio >= 0.5:
+            sab_penalty = -40
+            sab_pack_mismatch = True
+
+    total = max(0, total + sab_penalty)
+
+    if total >= 70:
+        verdict = "strong"
+    elif total >= 45:
+        verdict = "moderate"
+    elif total >= 20:
+        verdict = "difficult"
+    else:
+        verdict = "very_difficult"
+
+    return {
+        "total": total,
+        "verdict": verdict,
+        "sab_pack_mismatch": sab_pack_mismatch,
+        "breakdown": {
+            "category_match": cat_pts,
+            "competition_barrier": comp_pts,
+            "distance": dist_pts,
+            "keyword_in_competitor_names": kw_name_pts,
+            "in_top10_organic": organic_pts,
+            "sab_penalty": sab_penalty,
+        },
+    }
+
+
+class RankabilityRequest(BaseModel):
+    keyword: str
+    location: str
+    location_code: Optional[int] = None
+    gbp_category: str
+    business_name: Optional[str] = None
+    business_lat: Optional[float] = None
+    business_lng: Optional[float] = None
+    website: Optional[str] = None  # to check top-10 organic presence
+    is_sab: bool = False            # service area business (hides address)
+
+
+class CompetitorInfo(BaseModel):
+    name: str
+    rating: Optional[float] = None
+    review_count: Optional[int] = None
+    has_keyword_in_name: bool = False
+
+
+class RankabilityResponse(BaseModel):
+    # Score
+    score: int
+    verdict: str          # "strong" | "moderate" | "difficult" | "very_difficult"
+    score_breakdown: dict
+
+    # Map pack data
+    has_map_pack: bool
+    competitors: List[CompetitorInfo]
+    ranking_categories: List[dict]    # [{category, count}]
+
+    # Competition metrics
+    min_reviews_in_pack: Optional[int] = None
+    avg_reviews_in_pack: Optional[float] = None
+    avg_rating_in_pack: Optional[float] = None
+    review_gap: Optional[int] = None  # vs. weakest competitor in pack
+
+    # Category match
+    category_match: str               # "exact" | "partial" | "none"
+
+    # Distance
+    distance_miles: Optional[float] = None
+    distance_ok: bool = True
+
+    # Keyword-in-name
+    keyword_in_competitor_names: int = 0  # count of 3-pack with keyword in name
+    competitor_name_examples: List[str] = []
+
+    # Organic presence
+    in_top10_organic: bool = False
+
+    # SAB vs physical pack
+    is_sab: bool = False
+    sab_pack_mismatch: bool = False  # True when SAB faces majority-physical pack
+    physical_competitors_in_pack: int = 0
+
+    # Legacy fields for backward compat with existing frontend
+    message: str = ""
+    match_count: int = 0
+    total_results: int = 0
+
+
+@app.post('/check-rankability', response_model=RankabilityResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+async def check_rankability(request: Request, body: RankabilityRequest):
+    if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
+        raise HTTPException(status_code=503, detail="DataForSEO credentials not configured")
+
+    credentials = base64.b64encode(
+        f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
+    ).decode()
+    loc_field = {"location_code": body.location_code} if body.location_code else {"location_name": body.location}
+
+    # Single DataForSEO SERP call — returns both organic + local_pack items
+    payload = [{
+        "keyword": body.keyword,
+        **loc_field,
+        "language_name": "English",
+        "depth": 10,
+        "se_domain": "google.com",
+    }]
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            DATAFORSEO_ENDPOINT,
+            headers={"Authorization": f"Basic {credentials}", "Content-Type": "application/json"},
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    # Parse items
+    organic_items: List[dict] = []
+    local_pack_items: List[dict] = []
+    for task in (data.get("tasks") or []):
+        for result in (task.get("result") or []):
+            for item in (result.get("items") or []):
+                t = item.get("type", "")
+                if t == "organic":
+                    organic_items.append(item)
+                elif t == "local_pack":
+                    local_pack_items.append(item)
+
+    # ── Business in top 10 organic ─────────────────────────────────────────────
+    in_top10_organic = False
+    if body.website:
+        biz_domain = re.sub(r'^www\.', '', httpx.URL(body.website).host.lower()) if body.website else ""
+        for item in organic_items[:10]:
+            item_domain = re.sub(r'^www\.', '', httpx.URL(item.get("url", "http://x.com")).host.lower())
+            if biz_domain and biz_domain == item_domain:
+                in_top10_organic = True
+                break
+
+    # ── Local pack analysis ────────────────────────────────────────────────────
+    has_map_pack = len(local_pack_items) > 0
+    competitors: List[CompetitorInfo] = []
+    category_counts: Dict[str, int] = {}
+    keyword_name_count = 0
+    competitor_name_examples: List[str] = []
+    physical_competitor_count = 0
+
+    for item in local_pack_items[:3]:
+        name = item.get("title", "")
+        rating = item.get("rating", {}).get("value") if isinstance(item.get("rating"), dict) else item.get("rating")
+        review_count = item.get("rating", {}).get("votes_count") if isinstance(item.get("rating"), dict) else item.get("rating_votes")
+
+        # Physical location = has a non-empty address shown in the pack
+        address_val = item.get("address") or item.get("address_info", {}) or ""
+        is_physical = bool(address_val) if isinstance(address_val, str) else bool(address_val)
+        if is_physical:
+            physical_competitor_count += 1
+
+        has_kw = _keyword_in_name(body.keyword, name)
+        if has_kw:
+            keyword_name_count += 1
+            competitor_name_examples.append(name)
+
+        # Collect categories from snippet/categories field
+        for cat in (item.get("categories") or []):
+            category_counts[cat] = category_counts.get(cat, 0) + 1
+
+        competitors.append(CompetitorInfo(
+            name=name,
+            rating=float(rating) if rating else None,
+            review_count=int(review_count) if review_count else None,
+            has_keyword_in_name=has_kw,
+        ))
+
+    ranking_categories = [{"category": k, "count": v}
+                          for k, v in sorted(category_counts.items(), key=lambda x: -x[1])]
+
+    # ── Category match ─────────────────────────────────────────────────────────
+    gbp_cat_lower = body.gbp_category.lower()
+    cat_tokens = set(re.sub(r'[^a-z0-9\s]', '', gbp_cat_lower).split())
+    match_count = sum(1 for rc in ranking_categories
+                      if gbp_cat_lower in rc["category"].lower()
+                      or rc["category"].lower() in gbp_cat_lower)
+    partial_count = sum(1 for rc in ranking_categories
+                        for t in cat_tokens
+                        if len(t) > 3 and t in rc["category"].lower())
+    if match_count > 0:
+        category_match = "exact"
+    elif partial_count > 0:
+        category_match = "partial"
+    else:
+        category_match = "none"
+
+    # ── Review metrics ─────────────────────────────────────────────────────────
+    review_counts = [c.review_count for c in competitors if c.review_count is not None]
+    ratings = [c.rating for c in competitors if c.rating is not None]
+    min_reviews = min(review_counts) if review_counts else None
+    avg_reviews = round(sum(review_counts) / len(review_counts), 1) if review_counts else None
+    avg_rating = round(sum(ratings) / len(ratings), 2) if ratings else None
+
+    # ── Distance ───────────────────────────────────────────────────────────────
+    distance_miles = None
+    distance_ok = True
+    if body.business_lat and body.business_lng:
+        city_coords = await _geocode_location(body.location)
+        if city_coords:
+            distance_miles = round(_haversine_miles(
+                body.business_lat, body.business_lng,
+                city_coords[0], city_coords[1]
+            ), 1)
+            distance_ok = distance_miles <= 10.0
+
+    # ── Score ──────────────────────────────────────────────────────────────────
+    score_data = _rankability_score(
+        category_match=category_match,
+        min_reviews=min_reviews,
+        distance_miles=distance_miles,
+        keyword_name_count=keyword_name_count,
+        in_top10_organic=in_top10_organic,
+        is_sab=body.is_sab,
+        physical_competitor_count=physical_competitor_count,
+        total_pack_count=len(local_pack_items[:3]),
+    )
+
+    # ── Review gap ─────────────────────────────────────────────────────────────
+    review_gap = None
+    # (Would need user's review count passed in — left as None for now)
+
+    # ── Human-readable message ─────────────────────────────────────────────────
+    verdict_labels = {
+        "strong": "Strong map pack rankability",
+        "moderate": "Moderate — achievable with work",
+        "difficult": "Difficult — real barriers present",
+        "very_difficult": "Very difficult — consider a different keyword or location",
+    }
+    message = verdict_labels.get(score_data["verdict"], "")
+    if not has_map_pack:
+        message = "No map pack found for this keyword — may be a low local-intent query"
+    elif score_data.get("sab_pack_mismatch"):
+        message += f". Your service area business faces a pack dominated by {physical_competitor_count} physical location(s) — Google heavily favors proximity for this keyword"
+
+    logger.info(
+        f"Rankability '{body.keyword}' @ '{body.location}': "
+        f"score={score_data['total']} verdict={score_data['verdict']} "
+        f"cat={category_match} dist={distance_miles}mi pack={has_map_pack}"
+    )
+
+    return RankabilityResponse(
+        score=score_data["total"],
+        verdict=score_data["verdict"],
+        score_breakdown=score_data["breakdown"],
+        has_map_pack=has_map_pack,
+        competitors=competitors,
+        ranking_categories=ranking_categories,
+        min_reviews_in_pack=min_reviews,
+        avg_reviews_in_pack=avg_reviews,
+        avg_rating_in_pack=avg_rating,
+        review_gap=review_gap,
+        category_match=category_match,
+        distance_miles=distance_miles,
+        distance_ok=distance_ok,
+        keyword_in_competitor_names=keyword_name_count,
+        competitor_name_examples=competitor_name_examples,
+        in_top10_organic=in_top10_organic,
+        is_sab=body.is_sab,
+        sab_pack_mismatch=score_data.get("sab_pack_mismatch", False),
+        physical_competitors_in_pack=physical_competitor_count,
+        message=message,
+        match_count=match_count,
+        total_results=len(local_pack_items),
+    )

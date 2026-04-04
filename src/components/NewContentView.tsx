@@ -12,7 +12,7 @@ import { useBusinessProfiles } from "@/hooks/useBusinessProfiles";
 import { useInvalidateSavedPages } from "@/hooks/useSavedPages";
 import { useCredits, useInvalidateCredits } from "@/hooks/useCredits";
 import { nlp, nlpStream, InsufficientCreditsError } from "@/lib/nlp-client";
-import type { AnalysisResult } from "@/lib/nlp-types";
+import type { AnalysisResult, RankabilityResult } from "@/lib/nlp-types";
 import type { SavedPage } from "@/hooks/useSavedPages";
 
 interface BusinessProfile {
@@ -71,8 +71,9 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const bulkCancelledRef = useRef(false);
 
   const [relatedPages, setRelatedPages] = useState<Array<{ keyword: string; group: string; status: string; url?: string; composite_score?: number }> | null>(null);
-  const [rankability, setRankability] = useState<{ verdict: string; message: string; match_count: number; total_results: number; ranking_categories: { category: string; count: number }[] } | null>(null);
+  const [rankability, setRankability] = useState<RankabilityResult | null>(null);
   const [rankabilityLoading, setRankabilityLoading] = useState(false);
+  const [isSab, setIsSab] = useState(false);
   const [relatedLoading, setRelatedLoading] = useState(false);
   const [selectedForCreate, setSelectedForCreate] = useState<Set<string>>(new Set());
   const [bulkCreating, setBulkCreating] = useState(false);
@@ -210,11 +211,25 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
       const data = await nlp.checkRankability({
         keyword: keyword.trim(),
         location: location.trim(),
+        location_code: locationCode,
         gbp_category: b.gbp_category,
+        business_name: b.business_name,
+        business_lat: b.latitude ?? null,
+        business_lng: b.longitude ?? null,
+        website: b.website,
+        is_sab: isSab,
       });
       setRankability(data);
     } catch {
-      setRankability({ verdict: "unknown", message: "Could not retrieve map pack data.", match_count: 0, total_results: 0, ranking_categories: [] });
+      setRankability({
+        score: 0, verdict: "unknown", score_breakdown: {},
+        has_map_pack: false, competitors: [], ranking_categories: [],
+        category_match: "none", distance_ok: true,
+        keyword_in_competitor_names: 0, competitor_name_examples: [],
+        in_top10_organic: false, is_sab: isSab, sab_pack_mismatch: false,
+        physical_competitors_in_pack: 0,
+        message: "Could not retrieve map pack data.", match_count: 0, total_results: 0,
+      });
     } finally {
       setRankabilityLoading(false);
     }
@@ -1042,28 +1057,129 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         {/* Idle — show Check My Site button */}
         {checkState.status === "idle" && (
           <div className="space-y-2">
-            {/* Rankability result banner */}
-            {rankability && (
-              <div className={`px-3 py-2.5 rounded-lg text-xs border space-y-1.5 ${
-                rankability.verdict === "match" ? "bg-green-500/10 border-green-500/20 text-green-700" :
-                rankability.verdict === "partial" ? "bg-amber-500/10 border-amber-500/20 text-amber-700" :
-                "bg-red-500/10 border-red-500/20 text-red-700"
-              }`}>
-                <p className="font-medium">{
-                  rankability.verdict === "match" ? "✓ Strong map pack rankability" :
-                  rankability.verdict === "partial" ? "⚠ Partial category match" :
-                  rankability.verdict === "mismatch" ? "✗ Category mismatch — unlikely to rank in Maps" :
-                  "Map pack data unavailable"
-                }</p>
-                <p className="opacity-90">{rankability.message}</p>
-                {rankability.ranking_categories.length > 0 && (
-                  <p className="opacity-75">
-                    Map pack categories: {rankability.ranking_categories.slice(0, 4).map(c => `${c.category} (${c.count})`).join(", ")}
-                  </p>
+            {/* Rankability result panel */}
+            {rankability && rankability.verdict !== "unknown" && (
+              <div className="rounded-lg border text-xs space-y-2.5 overflow-hidden">
+                {/* Score header */}
+                <div className={`px-3 py-2.5 flex items-center justify-between ${
+                  rankability.verdict === "strong" ? "bg-green-500/10 border-b border-green-500/20" :
+                  rankability.verdict === "moderate" ? "bg-amber-500/10 border-b border-amber-500/20" :
+                  "bg-red-500/10 border-b border-red-500/20"
+                }`}>
+                  <div>
+                    <p className={`font-semibold ${
+                      rankability.verdict === "strong" ? "text-green-700" :
+                      rankability.verdict === "moderate" ? "text-amber-700" :
+                      "text-red-700"
+                    }`}>
+                      {rankability.verdict === "strong" ? "✓ Strong rankability" :
+                       rankability.verdict === "moderate" ? "⚠ Moderate — achievable with work" :
+                       rankability.verdict === "difficult" ? "✗ Difficult — real barriers present" :
+                       "✗ Very difficult — consider a different keyword"}
+                    </p>
+                    <p className="text-muted-foreground mt-0.5">{rankability.message}</p>
+                  </div>
+                  <div className={`text-2xl font-bold tabular-nums ml-3 flex-shrink-0 ${
+                    rankability.verdict === "strong" ? "text-green-600" :
+                    rankability.verdict === "moderate" ? "text-amber-600" :
+                    "text-red-600"
+                  }`}>{rankability.score}</div>
+                </div>
+
+                {/* Score breakdown */}
+                <div className="px-3 space-y-1.5">
+                  {[
+                    { label: "Category match", key: "category_match", max: 35 },
+                    { label: "Competition barrier", key: "competition_barrier", max: 25 },
+                    { label: "Distance from city center", key: "distance", max: 20 },
+                    { label: "Keyword in competitor names", key: "keyword_in_competitor_names", max: 15 },
+                    { label: "In top 10 organic", key: "in_top10_organic", max: 5 },
+                  ].map(({ label, key, max }) => {
+                    const pts = rankability.score_breakdown[key] ?? 0;
+                    return (
+                      <div key={key} className="flex items-center gap-2">
+                        <span className="flex-1 text-muted-foreground truncate">{label}</span>
+                        <div className="w-20 h-1.5 rounded-full bg-muted overflow-hidden flex-shrink-0">
+                          <div className="h-full rounded-full bg-primary/60 transition-all" style={{ width: `${(pts / max) * 100}%` }} />
+                        </div>
+                        <span className="w-10 text-right tabular-nums text-muted-foreground">{pts}/{max}</span>
+                      </div>
+                    );
+                  })}
+                  {rankability.sab_pack_mismatch && (
+                    <div className="flex items-center gap-2 text-red-600 font-medium">
+                      <span className="flex-1">SAB vs physical pack penalty</span>
+                      <span className="w-10 text-right tabular-nums">{rankability.score_breakdown["sab_penalty"] ?? -40}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Competitor cards */}
+                {rankability.competitors.length > 0 && (
+                  <div className="px-3 pb-1">
+                    <p className="text-muted-foreground mb-1.5 font-medium">Map pack competitors</p>
+                    <div className="space-y-1">
+                      {rankability.competitors.map((c, i) => (
+                        <div key={i} className="flex items-center justify-between bg-muted/50 rounded px-2 py-1">
+                          <span className="truncate flex-1 font-medium">{c.name}</span>
+                          <div className="flex items-center gap-2 ml-2 flex-shrink-0 text-muted-foreground">
+                            {c.review_count != null && <span>{c.review_count} reviews</span>}
+                            {c.rating != null && <span>★ {c.rating}</span>}
+                            {c.has_keyword_in_name && <span className="text-amber-600 font-semibold">KW</span>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    {rankability.min_reviews_in_pack != null && (
+                      <p className="text-muted-foreground mt-1.5">
+                        Min reviews in pack: <span className="font-semibold text-foreground">{rankability.min_reviews_in_pack}</span>
+                        {rankability.avg_rating_in_pack != null && <> · Avg rating: <span className="font-semibold text-foreground">★ {rankability.avg_rating_in_pack}</span></>}
+                      </p>
+                    )}
+                  </div>
                 )}
+
+                {/* Warnings */}
+                <div className="px-3 pb-2.5 space-y-1">
+                  {!rankability.has_map_pack && (
+                    <p className="text-amber-600">⚠ No map pack found — low local intent keyword</p>
+                  )}
+                  {rankability.distance_miles != null && !rankability.distance_ok && (
+                    <p className="text-red-600">✗ {rankability.distance_miles} mi from city center — proximity disadvantage</p>
+                  )}
+                  {rankability.distance_miles != null && rankability.distance_ok && (
+                    <p className="text-green-700">✓ {rankability.distance_miles} mi from city center — good proximity</p>
+                  )}
+                  {rankability.keyword_in_competitor_names > 0 && (
+                    <p className="text-amber-600">⚠ {rankability.keyword_in_competitor_names} competitor(s) have keyword in name: {rankability.competitor_name_examples.join(", ")}</p>
+                  )}
+                  {rankability.in_top10_organic && (
+                    <p className="text-green-700">✓ Your website appears in top 10 organic</p>
+                  )}
+                  {rankability.category_match === "none" && (
+                    <p className="text-red-600">✗ GBP category mismatch — pack uses different categories</p>
+                  )}
+                  {rankability.ranking_categories.length > 0 && (
+                    <p className="text-muted-foreground">Pack categories: {rankability.ranking_categories.slice(0, 3).map(c => c.category).join(", ")}</p>
+                  )}
+                </div>
               </div>
             )}
-            <div className="flex gap-2">
+            {rankability && rankability.verdict === "unknown" && (
+              <div className="px-3 py-2.5 rounded-lg text-xs border bg-muted/50 text-muted-foreground">
+                {rankability.message}
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  className="w-3.5 h-3.5 accent-primary"
+                  checked={isSab}
+                  onChange={e => setIsSab(e.target.checked)}
+                />
+                SAB
+              </label>
               <Button
                 variant="outline"
                 className="flex-none text-xs h-9 px-3"
