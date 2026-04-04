@@ -8,6 +8,8 @@ import LocationsView from "@/components/LocationsView";
 import LocationDetailView from "@/components/LocationDetailView";
 import LoginView from "@/components/LoginView";
 import SettingsView from "@/components/SettingsView";
+import PressReleasesView from "@/components/PressReleasesView";
+import AdminView from "@/components/AdminView";
 import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
@@ -23,12 +25,23 @@ const Index = () => {
   const [planningKeyword, setPlanningKeyword] = useState("");
   const [planningLocation, setPlanningLocation] = useState("");
   const [onboardingBusinessId, setOnboardingBusinessId] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
     return () => subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (!session) { setIsAdmin(false); return; }
+    supabase
+      .from("profiles" as any)
+      .select("role")
+      .eq("id", session.user.id)
+      .single()
+      .then(({ data }) => setIsAdmin((data as any)?.role === "admin"));
+  }, [session?.user.id]);
 
   const handleItemClick = (item: string) => {
     setActiveItem(item);
@@ -145,6 +158,7 @@ const Index = () => {
         onItemClick={handleItemClick}
         collapsed={collapsed}
         onToggle={() => setCollapsed(!collapsed)}
+        isAdmin={isAdmin}
       />
       <main
         className={cn(
@@ -206,6 +220,8 @@ const Index = () => {
               }}
             />
           )}
+          {activeItem === "press-releases" && <PressReleasesView />}
+          {activeItem === "admin" && isAdmin && <AdminView />}
           {activeItem === "settings" && session && (
             <SettingsView session={session} />
           )}

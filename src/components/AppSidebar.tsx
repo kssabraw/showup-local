@@ -8,6 +8,8 @@ import {
   Zap,
   ClipboardList,
   Store,
+  Newspaper,
+  ShieldCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCredits } from "@/hooks/useCredits";
@@ -17,21 +19,23 @@ interface SidebarProps {
   onItemClick: (item: string) => void;
   collapsed: boolean;
   onToggle: () => void;
+  isAdmin?: boolean;
 }
 
 const navItems = [
-  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { id: "content", label: "Content", icon: FileText },
-  { id: "planning", label: "Planning", icon: ClipboardList },
-  { id: "locations", label: "Locations", icon: MapPin },
-  { id: "settings", label: "Settings", icon: Settings },
+  { id: "dashboard",       label: "Dashboard",       icon: LayoutDashboard },
+  { id: "content",         label: "Content",         icon: FileText },
+  { id: "planning",        label: "Planning",        icon: ClipboardList },
+  { id: "press-releases",  label: "Press Releases",  icon: Newspaper },
+  { id: "locations",       label: "Locations",       icon: MapPin },
+  { id: "settings",        label: "Settings",        icon: Settings },
 ];
 
 const comingSoonItems = [
   { id: "gbp-posts", label: "GBP Posts", icon: Store },
 ];
 
-const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarProps) => {
+const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle, isAdmin }: SidebarProps) => {
   const { data: credits } = useCredits();
   const balance = credits?.balance ?? null;
   const monthly = credits?.monthlyBalance ?? null;
@@ -95,6 +99,23 @@ const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarPro
             </button>
           );
         })}
+
+        {/* Admin item */}
+        {isAdmin && (
+          <button
+            onClick={() => onItemClick("admin")}
+            className={cn(
+              "w-full flex items-center gap-3 rounded-lg text-sm font-medium transition-colors",
+              collapsed ? "justify-center p-2" : "px-3 py-2.5",
+              activeItem === "admin"
+                ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50"
+            )}
+          >
+            <ShieldCheck className="w-4 h-4 flex-shrink-0" />
+            {!collapsed && "Admin"}
+          </button>
+        )}
 
         {/* Coming soon items */}
         {comingSoonItems.map((item) => {
