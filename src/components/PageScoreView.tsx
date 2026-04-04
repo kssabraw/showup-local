@@ -1,4 +1,4 @@
-import { useState, useRef, ReactNode } from "react";
+import { useState, useRef, useEffect, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader2, CheckCircle, AlertTriangle, XCircle, ChevronDown, ChevronUp } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
@@ -103,6 +103,25 @@ export default function PageScoreView({
     });
   };
 
+  const persistScore = async (result: ScoreResult) => {
+    // Only updates rows that exist — pages scored from external URLs won't match
+    await supabase
+      .from("generated_pages")
+      .update({
+        composite_score: result.composite_score,
+        composite_status: result.composite_status,
+        scored_at: new Date().toISOString(),
+      })
+      .eq("business_id", businessId)
+      .eq("keyword", keyword)
+      .eq("location", location);
+  };
+
+  // Persist initial score result if the view was pre-loaded with one
+  useEffect(() => {
+    if (initialScoreResult) persistScore(initialScoreResult);
+  }, []);
+
   const cancelOperation = () => {
     abortRef.current?.abort();
     abortRef.current = null;
@@ -135,7 +154,7 @@ export default function PageScoreView({
       }
       const data: ScoreResult = await res.json();
       setScoreResult(data);
-      await saveTokenUsage(data.token_usage);
+      await Promise.all([saveTokenUsage(data.token_usage), persistScore(data)]);
     } catch (e: any) {
       if (e.name === "AbortError") return;
       setError(e.message || "Scoring failed");

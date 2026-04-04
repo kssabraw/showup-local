@@ -9,6 +9,7 @@ interface Props {
 interface Stats {
   locations: number;
   totalContent: number;
+  avgScore: number | null;
 }
 
 const DashboardView = ({ onNavigate }: Props) => {
@@ -17,11 +18,15 @@ const DashboardView = ({ onNavigate }: Props) => {
 
   useEffect(() => {
     const load = async () => {
-      const [{ count: locations }, { count: totalContent }] = await Promise.all([
+      const [{ count: locations }, { count: totalContent }, { data: scored }] = await Promise.all([
         supabase.from("business_profiles").select("id", { count: "exact", head: true }),
         supabase.from("generated_pages").select("id", { count: "exact", head: true }),
+        supabase.from("generated_pages").select("composite_score").not("composite_score", "is", null),
       ]);
-      setStats({ locations: locations ?? 0, totalContent: totalContent ?? 0 });
+      const avgScore = scored && scored.length > 0
+        ? Math.round(scored.reduce((sum, p) => sum + (p.composite_score as number), 0) / scored.length)
+        : null;
+      setStats({ locations: locations ?? 0, totalContent: totalContent ?? 0, avgScore });
       setLoading(false);
     };
     load();
@@ -77,7 +82,23 @@ const DashboardView = ({ onNavigate }: Props) => {
                 <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Avg. SEO Score</span>
                 <TrendingUp className="w-4 h-4 text-accent" />
               </div>
-              <p className="text-2xl font-display font-bold text-muted-foreground">—</p>
+              {stats?.avgScore != null ? (
+                <div className="flex items-end gap-2">
+                  <p className={`text-2xl font-display font-bold ${
+                    stats.avgScore >= 80 ? "text-green-500" :
+                    stats.avgScore >= 60 ? "text-amber-500" :
+                    "text-red-500"
+                  }`}>
+                    {stats.avgScore}
+                  </p>
+                  <p className="text-sm text-muted-foreground mb-0.5">/ 100</p>
+                </div>
+              ) : (
+                <div>
+                  <p className="text-2xl font-display font-bold text-muted-foreground">—</p>
+                  <p className="text-xs text-muted-foreground mt-1">Score pages to see your average</p>
+                </div>
+              )}
             </div>
           </>
         )}
