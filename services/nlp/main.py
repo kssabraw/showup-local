@@ -3228,3 +3228,83 @@ async def related_pages(request: Request, body: RelatedPagesRequest):
         total_input_tokens, total_output_tokens,
     )
     return RelatedPagesResponse(items=items, token_usage=token_rec)
+
+
+# ── /generate-social-posts ────────────────────────────────────────────────────
+
+_SOCIAL_SYSTEM_PROMPT = """You are a social media copywriter specialising in local service businesses. Given a page's content and business details, generate social media posts that drive local leads.
+
+Rules:
+- GBP / Facebook posts: max 200 words. Conversational, benefit-led, clear CTA mentioning the city.
+- Instagram posts: max 50 words. Punchy, emoji-friendly, hashtag line at the end (5–8 tags).
+- Pinterest posts: max 50 words. Descriptive, search-optimised, focus on the service benefit.
+- Vary the angle across the 5 posts per platform (e.g. urgency, social proof, education, offer, story).
+- Never fabricate reviews, prices, or guarantees not mentioned in the page content.
+- Output valid JSON only — no markdown fences, no commentary."""
+
+class SocialPostsRequest(BaseModel):
+    keyword: str
+    location: str
+    business_name: str
+    gbp_category: str
+    address: Optional[str] = None
+    page_content: str          # plain text of the generated page
+
+class SocialPostsResponse(BaseModel):
+    gbp: List[str]
+    facebook: List[str]
+    instagram: List[str]
+    pinterest: List[str]
+    token_usage: dict
+
+@app.post('/generate-social-posts', response_model=SocialPostsResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+async def generate_social_posts(request: Request, body: SocialPostsRequest):
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+
+    import anthropic as _anthropic
+    client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+    city = body.location.split(",")[0].strip()
+    page_text = body.page_content[:4000]  # cap context to keep cost low
+
+    user_prompt = f"""Business: {body.business_name}
+Category: {body.gbp_category}
+Location: {city}
+Keyword: {body.keyword}
+Address: {body.address or ""}
+
+PAGE CONTENT:
+{page_text}
+
+Generate exactly 5 posts for each of the 4 platforms. Return this JSON structure:
+{{
+  "gbp": ["post1", "post2", "post3", "post4", "post5"],
+  "facebook": ["post1", "post2", "post3", "post4", "post5"],
+  "instagram": ["post1", "post2", "post3", "post4", "post5"],
+  "pinterest": ["post1", "post2", "post3", "post4", "post5"]
+}}"""
+
+    try:
+        msg = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=3000,
+            system=[{"type": "text", "text": _SOCIAL_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+    except Exception:
+        logger.exception("Social posts generation error")
+        raise HTTPException(status_code=502, detail="Social posts generation temporarily unavailable")
+
+    token_rec = _token_record("generate-social-posts", "claude-haiku-4-5-20251001",
+                              msg.usage.input_tokens, msg.usage.output_tokens)
+    data = _parse_claude_json(msg.content[0].text)
+
+    return SocialPostsResponse(
+        gbp=data.get("gbp", []),
+        facebook=data.get("facebook", []),
+        instagram=data.get("instagram", []),
+        pinterest=data.get("pinterest", []),
+        token_usage=token_rec,
+    )

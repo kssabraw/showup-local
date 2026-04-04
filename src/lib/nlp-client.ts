@@ -190,6 +190,20 @@ export const nlp = {
     signal?: AbortSignal,
   ) => nlpPost<RankabilityResult>("/check-rankability", body, signal),
 
+  generateSocialPosts: (
+    body: {
+      keyword: string;
+      location: string;
+      business_name: string;
+      gbp_category: string;
+      address?: string;
+      page_content: string;
+    },
+    signal?: AbortSignal,
+  ) => nlpPost<{ gbp: string[]; facebook: string[]; instagram: string[]; pinterest: string[]; token_usage: Record<string, unknown> }>(
+    "/generate-social-posts", body, signal,
+  ),
+
   analyzeBusiness: (
     body: {
       website_url: string;

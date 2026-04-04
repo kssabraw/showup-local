@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { Copy, Check, Save, Loader2, ExternalLink } from "lucide-react";
+import { Copy, Check, Save, Loader2, ExternalLink, Download } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { nlp } from "@/lib/nlp-client";
 import { StepIndicator } from "@/components/StepIndicator";
@@ -64,11 +64,15 @@ export default function GeneratedPageView({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState("");
-  const [activeTab, setActiveTab] = useState<"preview" | "raw-text" | "html" | "schema" | "related">("preview");
+  const [activeTab, setActiveTab] = useState<"preview" | "raw-text" | "html" | "schema" | "social" | "related">("preview");
   // Related pages state
   const [relatedLoading, setRelatedLoading] = useState(false);
   const [relatedItems, setRelatedItems] = useState<RelatedPageItem[] | null>(null);
   const [relatedError, setRelatedError] = useState("");
+  // Social posts state
+  const [socialPosts, setSocialPosts] = useState<{ gbp: string[]; facebook: string[]; instagram: string[]; pinterest: string[] } | null>(null);
+  const [socialLoading, setSocialLoading] = useState(false);
+  const [copiedPost, setCopiedPost] = useState<string | null>(null);
   const [selections, setSelections] = useState<RelatedSelection>({});
 
   const copyHtml = async () => {
@@ -149,10 +153,59 @@ export default function GeneratedPageView({
     }
   };
 
-  // Start fetching related pages in the background as soon as the component mounts
+  // Start fetching related pages + social posts in the background on mount
   useEffect(() => {
     fetchRelatedPages();
+    fetchSocialPosts();
   }, []);
+
+  const fetchSocialPosts = async () => {
+    if (socialLoading || socialPosts) return;
+    setSocialLoading(true);
+    try {
+      const pageText = new DOMParser()
+        .parseFromString(contentHtml, "text/html")
+        .body.innerText;
+      const data = await nlp.generateSocialPosts({
+        keyword,
+        location,
+        business_name: businessName,
+        gbp_category: gbpCategory,
+        address,
+        page_content: pageText,
+      });
+      setSocialPosts({ gbp: data.gbp, facebook: data.facebook, instagram: data.instagram, pinterest: data.pinterest });
+    } catch {
+      // Non-fatal — social tab will show a retry button
+    } finally {
+      setSocialLoading(false);
+    }
+  };
+
+  const copyPost = async (text: string, id: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopiedPost(id);
+    setTimeout(() => setCopiedPost(null), 2000);
+  };
+
+  const downloadSocialPosts = () => {
+    if (!socialPosts) return;
+    const platforms = [
+      { label: "GBP Posts", posts: socialPosts.gbp },
+      { label: "Facebook Posts", posts: socialPosts.facebook },
+      { label: "Instagram Posts", posts: socialPosts.instagram },
+      { label: "Pinterest Posts", posts: socialPosts.pinterest },
+    ];
+    const text = platforms.map(({ label, posts }) =>
+      `${label.toUpperCase()}\n${"─".repeat(40)}\n${posts.map((p, i) => `${i + 1}. ${p}`).join("\n\n")}`
+    ).join("\n\n\n");
+    const blob = new Blob([text], { type: "text/plain" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${keyword.replace(/\s+/g, "-")}-social-posts.txt`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
 
   // Also re-fetch if user manually retries from the related tab
   // (fetchRelatedPages is called directly from the Retry button)
@@ -253,7 +306,7 @@ export default function GeneratedPageView({
 
       {/* Tabs */}
       <div className="flex gap-2 border-b border-border flex-wrap">
-        {(["preview", "raw-text", "html", "schema", "related"] as const).map(tab => (
+        {(["preview", "raw-text", "html", "schema", "social", "related"] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -266,7 +319,9 @@ export default function GeneratedPageView({
             {tab === "schema" ? "JSON-LD Schema"
               : tab === "related" ? "Related Pages"
               : tab === "raw-text" ? "Raw Text"
-              : tab.charAt(0).toUpperCase() + tab.slice(1)}
+              : tab === "social"
+                ? <span className="flex items-center gap-1.5">Social Posts {socialLoading && <Loader2 className="w-3 h-3 animate-spin" />}</span>
+                : tab.charAt(0).toUpperCase() + tab.slice(1)}
           </button>
         ))}
       </div>
@@ -360,6 +415,64 @@ export default function GeneratedPageView({
             </>
           ) : (
             <p className="text-sm text-muted-foreground">No schema was generated for this page.</p>
+          )}
+        </div>
+      )}
+
+      {/* Social Posts tab */}
+      {activeTab === "social" && (
+        <div className="space-y-6">
+          {socialLoading && (
+            <div className="flex flex-col items-center justify-center py-12 gap-3 text-muted-foreground">
+              <Loader2 className="w-6 h-6 animate-spin" />
+              <p className="text-sm">Generating 20 social posts…</p>
+            </div>
+          )}
+          {!socialLoading && !socialPosts && (
+            <div className="flex flex-col items-center justify-center py-12 gap-3 text-muted-foreground">
+              <p className="text-sm">Social posts could not be generated.</p>
+              <Button variant="outline" size="sm" onClick={fetchSocialPosts}>Retry</Button>
+            </div>
+          )}
+          {socialPosts && (
+            <>
+              <div className="flex justify-end">
+                <Button variant="outline" size="sm" onClick={downloadSocialPosts}>
+                  <Download className="w-4 h-4 mr-1.5" /> Download All
+                </Button>
+              </div>
+              {([
+                { key: "gbp",       label: "GBP Posts",       wordLimit: "≤200 words" },
+                { key: "facebook",  label: "Facebook Posts",  wordLimit: "≤200 words" },
+                { key: "instagram", label: "Instagram Posts", wordLimit: "≤50 words" },
+                { key: "pinterest", label: "Pinterest Posts", wordLimit: "≤50 words" },
+              ] as const).map(({ key, label, wordLimit }) => (
+                <div key={key} className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-semibold text-foreground">{label}</h3>
+                    <span className="text-xs text-muted-foreground">{wordLimit}</span>
+                  </div>
+                  <div className="space-y-2">
+                    {socialPosts[key].map((post, i) => {
+                      const id = `${key}-${i}`;
+                      return (
+                        <div key={id} className="bg-card rounded-lg border border-border p-4 flex gap-3">
+                          <span className="text-xs font-semibold text-muted-foreground w-4 shrink-0 mt-0.5">{i + 1}</span>
+                          <p className="text-sm text-foreground flex-1 whitespace-pre-wrap">{post}</p>
+                          <button
+                            onClick={() => copyPost(post, id)}
+                            className="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+                            title="Copy"
+                          >
+                            {copiedPost === id ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </>
           )}
         </div>
       )}
