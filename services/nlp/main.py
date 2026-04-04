@@ -106,9 +106,10 @@ async def verify_api_key(api_key: str = Security(_api_key_header)):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
     return api_key
 
-GOOGLE_NLP_ENDPOINT  = "https://language.googleapis.com/v1/documents:analyzeEntities"
-DATAFORSEO_ENDPOINT  = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced"
-SCRAPEOWL_ENDPOINT   = "https://api.scrapeowl.com/v1/scrape"
+GOOGLE_NLP_ENDPOINT       = "https://language.googleapis.com/v1/documents:analyzeEntities"
+DATAFORSEO_ENDPOINT       = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced"
+DATAFORSEO_MAPS_ENDPOINT  = "https://api.dataforseo.com/v3/serp/google/maps/live/advanced"
+SCRAPEOWL_ENDPOINT        = "https://api.scrapeowl.com/v1/scrape"
 
 logger.info("App initialized, ready to serve")
 for name, val in [
@@ -2254,6 +2255,120 @@ def _serp_context(serp_analysis: Optional[dict]) -> str:
                 parts.append(f"    \"{h['text']}\" ({h['page_count']} pages)")
 
     return "\n".join(parts)
+
+
+# ── /check-rankability ────────────────────────────────────────────────────────
+
+class CheckRankabilityRequest(BaseModel):
+    keyword: str
+    location: str
+    gbp_category: str
+
+class CheckRankabilityResponse(BaseModel):
+    verdict: str            # "match" | "partial" | "mismatch"
+    client_category: str
+    match_count: int        # how many of the top results share the client's category
+    total_results: int
+    ranking_categories: List[dict]   # [{"category": str, "count": int}]
+    top_businesses: List[dict]       # [{"name": str, "category": str, "rating": float}]
+    message: str
+
+
+def _category_matches(client: str, ranking: str) -> bool:
+    """Loose match: exact, plural-insensitive, or substring."""
+    c = client.lower().strip().rstrip("s")
+    r = ranking.lower().strip().rstrip("s")
+    return c == r or c in r or r in c
+
+
+@app.post('/check-rankability', response_model=CheckRankabilityResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("20/minute")
+async def check_rankability(request: Request, body: CheckRankabilityRequest):
+    if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
+        raise HTTPException(status_code=503, detail="DataForSEO credentials not configured")
+
+    creds = base64.b64encode(f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()).decode()
+    city = body.location.split(",")[0].strip()
+
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.post(
+                DATAFORSEO_MAPS_ENDPOINT,
+                headers={"Authorization": f"Basic {creds}", "Content-Type": "application/json"},
+                json=[{
+                    "keyword": f"{body.keyword} {city}".strip(),
+                    "location_name": body.location,
+                    "language_name": "English",
+                    "depth": 20,
+                }],
+                timeout=30.0,
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"DataForSEO Maps error: {e}")
+
+    top_businesses: List[dict] = []
+    category_counts: Dict[str, int] = {}
+
+    for task in (resp.json().get("tasks") or []):
+        for result in (task.get("result") or []):
+            for item in (result.get("items") or []):
+                if item.get("type") != "maps_search":
+                    continue
+                name = item.get("title", "")
+                cat = item.get("category", "") or ""
+                rating_obj = item.get("rating") or {}
+                rating = rating_obj.get("value", 0) or 0
+                if cat:
+                    category_counts[cat] = category_counts.get(cat, 0) + 1
+                top_businesses.append({"name": name, "category": cat, "rating": float(rating)})
+                if len(top_businesses) >= 10:
+                    break
+
+    total = len(top_businesses)
+    match_count = sum(
+        1 for b in top_businesses if _category_matches(body.gbp_category, b["category"])
+    )
+
+    # Sort ranking categories by frequency
+    ranking_categories = sorted(
+        [{"category": c, "count": n} for c, n in category_counts.items()],
+        key=lambda x: x["count"], reverse=True,
+    )
+
+    if total == 0:
+        verdict = "unknown"
+        message = "No map pack results found for this keyword and location."
+    elif match_count >= max(1, round(total * 0.4)):
+        verdict = "match"
+        message = (
+            f"Your category '{body.gbp_category}' appears in {match_count}/{total} map pack results. "
+            f"Strong signal that you can rank for this keyword."
+        )
+    elif match_count > 0:
+        verdict = "partial"
+        message = (
+            f"Your category '{body.gbp_category}' appears in {match_count}/{total} map pack results. "
+            f"You may be able to rank with a highly optimised page, but competition is from different categories."
+        )
+    else:
+        verdict = "mismatch"
+        top_cats = ", ".join(c["category"] for c in ranking_categories[:3])
+        message = (
+            f"Your category '{body.gbp_category}' does not appear in the map pack for this keyword. "
+            f"The map pack is dominated by: {top_cats}. "
+            f"You are unlikely to rank here in Google Maps."
+        )
+
+    return CheckRankabilityResponse(
+        verdict=verdict,
+        client_category=body.gbp_category,
+        match_count=match_count,
+        total_results=total,
+        ranking_categories=ranking_categories,
+        top_businesses=top_businesses,
+        message=message,
+    )
 
 
 # ── /plan-pages ──────────────────────────────────────────────────────────────

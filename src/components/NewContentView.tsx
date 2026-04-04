@@ -86,6 +86,8 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const [relatedPages, setRelatedPages] = useState<any[] | null>(null);
+  const [rankability, setRankability] = useState<{ verdict: string; message: string; match_count: number; total_results: number; ranking_categories: {category: string; count: number}[] } | null>(null);
+  const [rankabilityLoading, setRankabilityLoading] = useState(false);
   const [relatedLoading, setRelatedLoading] = useState(false);
   const [selectedForCreate, setSelectedForCreate] = useState<Set<string>>(new Set());
   const [bulkCreating, setBulkCreating] = useState(false);
@@ -254,6 +256,27 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
       },
       { onConflict: "business_id,keyword,location" }
     );
+  };
+
+  const handleCheckRankability = async () => {
+    const b = businesses.find(b => b.id === selectedBusinessId);
+    if (!b || !keyword.trim() || !location) return;
+    setRankabilityLoading(true);
+    setRankability(null);
+    try {
+      const res = await fetch(`${NLP_SERVICE_URL}/check-rankability`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
+        body: JSON.stringify({ keyword: keyword.trim(), location: location.trim(), gbp_category: b.gbp_category }),
+      });
+      if (!res.ok) throw new Error("Rankability check failed");
+      const data = await res.json();
+      setRankability(data);
+    } catch {
+      setRankability({ verdict: "unknown", message: "Could not retrieve map pack data.", match_count: 0, total_results: 0, ranking_categories: [] });
+    } finally {
+      setRankabilityLoading(false);
+    }
   };
 
   const handleCheckSite = async () => {
@@ -815,7 +838,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           <input
             type="text"
             value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
+            onChange={(e) => { setKeyword(e.target.value); setRankability(null); }}
             disabled={isChecking}
             placeholder="e.g. emergency plumber"
             className="w-full bg-background border border-input rounded-lg px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60"
@@ -1092,13 +1115,46 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
 
         {/* Idle — show Check My Site button */}
         {checkState.status === "idle" && (
-          <Button
-            className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
-            onClick={handleCheckSite}
-            disabled={!canCheck}
-          >
-            <FileSearch className="w-4 h-4 mr-2" /> Check My Site
-          </Button>
+          <div className="space-y-2">
+            {/* Rankability result banner */}
+            {rankability && (
+              <div className={`px-3 py-2.5 rounded-lg text-xs border space-y-1.5 ${
+                rankability.verdict === "match" ? "bg-green-500/10 border-green-500/20 text-green-700" :
+                rankability.verdict === "partial" ? "bg-amber-500/10 border-amber-500/20 text-amber-700" :
+                "bg-red-500/10 border-red-500/20 text-red-700"
+              }`}>
+                <p className="font-medium">{
+                  rankability.verdict === "match" ? "✓ Strong map pack rankability" :
+                  rankability.verdict === "partial" ? "⚠ Partial category match" :
+                  rankability.verdict === "mismatch" ? "✗ Category mismatch — unlikely to rank in Maps" :
+                  "Map pack data unavailable"
+                }</p>
+                <p className="opacity-90">{rankability.message}</p>
+                {rankability.ranking_categories.length > 0 && (
+                  <p className="opacity-75">
+                    Map pack categories: {rankability.ranking_categories.slice(0, 4).map(c => `${c.category} (${c.count})`).join(", ")}
+                  </p>
+                )}
+              </div>
+            )}
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                className="flex-none text-xs h-9 px-3"
+                onClick={handleCheckRankability}
+                disabled={!canCheck || rankabilityLoading}
+              >
+                {rankabilityLoading ? <><Loader2 className="w-3 h-3 mr-1.5 animate-spin" />Checking…</> : "Check Map Pack"}
+              </Button>
+              <Button
+                className="flex-1 bg-accent text-accent-foreground hover:opacity-90 font-semibold"
+                onClick={handleCheckSite}
+                disabled={!canCheck}
+              >
+                <FileSearch className="w-4 h-4 mr-2" /> Check My Site
+              </Button>
+            </div>
+          </div>
         )}
       </div>
 

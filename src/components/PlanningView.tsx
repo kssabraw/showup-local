@@ -14,6 +14,15 @@ interface Business {
   id: string;
   business_name: string;
   website?: string;
+  gbp_category?: string;
+}
+
+interface RankabilityResult {
+  verdict: string;
+  match_count: number;
+  total_results: number;
+  ranking_categories: { category: string; count: number }[];
+  message: string;
 }
 
 interface PlanItem {
@@ -52,13 +61,15 @@ export default function PlanningView({ onCreatePage }: Props) {
   const [results, setResults] = useState<PlanItem[]>([]);
   const [error, setError] = useState("");
   const readerRef = useRef<ReadableStreamDefaultReader | null>(null);
+  const [rankabilityMap, setRankabilityMap] = useState<Record<string, RankabilityResult>>({});
+  const [rankabilityLoading, setRankabilityLoading] = useState<Record<string, boolean>>({});
 
   // Lazy-load businesses
   const loadBusinesses = async () => {
     if (businessesLoaded) return;
     const { data } = await supabase
       .from("business_profiles")
-      .select("id, business_name, website")
+      .select("id, business_name, website, gbp_category")
       .order("business_name");
     setBusinesses(data ?? []);
     setBusinessesLoaded(true);
@@ -121,6 +132,25 @@ export default function PlanningView({ onCreatePage }: Props) {
     } finally {
       setScanning(false);
       setCurrentKw("");
+    }
+  };
+
+  const handleCheckRankability = async (kw: string) => {
+    if (!selectedBusiness?.gbp_category || !location.trim()) return;
+    setRankabilityLoading(prev => ({ ...prev, [kw]: true }));
+    try {
+      const res = await fetch(`${NLP_SERVICE_URL}/check-rankability`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
+        body: JSON.stringify({ keyword: kw, location: location.trim(), gbp_category: selectedBusiness.gbp_category }),
+      });
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      setRankabilityMap(prev => ({ ...prev, [kw]: data }));
+    } catch {
+      setRankabilityMap(prev => ({ ...prev, [kw]: { verdict: "unknown", match_count: 0, total_results: 0, ranking_categories: [], message: "Could not retrieve map pack data." } }));
+    } finally {
+      setRankabilityLoading(prev => ({ ...prev, [kw]: false }));
     }
   };
 
@@ -256,52 +286,83 @@ export default function PlanningView({ onCreatePage }: Props) {
                 <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{label} Keywords</span>
               </div>
               <div className="divide-y">
-                {items.map((item, i) => (
-                  <div key={i} className="flex items-center gap-3 px-4 py-3">
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium truncate">{item.keyword}</p>
-                      {item.page_url && (
-                        <a
-                          href={item.page_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-xs text-muted-foreground hover:text-accent flex items-center gap-1 mt-0.5 truncate"
-                        >
-                          <ExternalLink className="w-3 h-3 shrink-0" />
-                          <span className="truncate">{item.page_title || item.page_url}</span>
-                        </a>
-                      )}
-                    </div>
-                    <Badge
-                      className={`shrink-0 ${item.status === "exists" ? "bg-green-100 text-green-700 hover:bg-green-100" : "bg-amber-100 text-amber-700 hover:bg-amber-100"}`}
-                    >
-                      {item.status === "exists" ? "Exists" : "Missing"}
-                    </Badge>
-                    {item.status === "missing" && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="shrink-0"
-                        onClick={() => onCreatePage(item.keyword, location)}
+                {items.map((item, i) => {
+                  const rank = rankabilityMap[item.keyword];
+                  const rankLoading = rankabilityLoading[item.keyword];
+                  return (
+                  <div key={i} className="px-4 py-3 space-y-2">
+                    <div className="flex items-center gap-3">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium truncate">{item.keyword}</p>
+                        {item.page_url && (
+                          <a
+                            href={item.page_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-muted-foreground hover:text-accent flex items-center gap-1 mt-0.5 truncate"
+                          >
+                            <ExternalLink className="w-3 h-3 shrink-0" />
+                            <span className="truncate">{item.page_title || item.page_url}</span>
+                          </a>
+                        )}
+                      </div>
+                      <Badge
+                        className={`shrink-0 ${item.status === "exists" ? "bg-green-100 text-green-700 hover:bg-green-100" : "bg-amber-100 text-amber-700 hover:bg-amber-100"}`}
                       >
-                        <Plus className="w-3.5 h-3.5 mr-1" />
-                        Create
-                      </Button>
-                    )}
-                    {item.status === "exists" && item.page_url && (
+                        {item.status === "exists" ? "Exists" : "Missing"}
+                      </Badge>
                       <Button
                         size="sm"
                         variant="ghost"
-                        className="shrink-0 text-muted-foreground"
-                        asChild
+                        className="shrink-0 text-xs text-muted-foreground h-7 px-2"
+                        onClick={() => handleCheckRankability(item.keyword)}
+                        disabled={rankLoading}
                       >
-                        <a href={item.page_url} target="_blank" rel="noopener noreferrer">
-                          <ExternalLink className="w-3.5 h-3.5" />
-                        </a>
+                        {rankLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : rank ? "Recheck" : "Check Maps"}
                       </Button>
+                      {item.status === "missing" && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="shrink-0"
+                          onClick={() => onCreatePage(item.keyword, location)}
+                        >
+                          <Plus className="w-3.5 h-3.5 mr-1" />
+                          Create
+                        </Button>
+                      )}
+                      {item.status === "exists" && item.page_url && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="shrink-0 text-muted-foreground"
+                          asChild
+                        >
+                          <a href={item.page_url} target="_blank" rel="noopener noreferrer">
+                            <ExternalLink className="w-3.5 h-3.5" />
+                          </a>
+                        </Button>
+                      )}
+                    </div>
+                    {rank && (
+                      <div className={`text-xs px-2.5 py-1.5 rounded-md border ${
+                        rank.verdict === "match" ? "bg-green-50 border-green-200 text-green-700" :
+                        rank.verdict === "partial" ? "bg-amber-50 border-amber-200 text-amber-700" :
+                        "bg-red-50 border-red-200 text-red-700"
+                      }`}>
+                        <span className="font-medium">{
+                          rank.verdict === "match" ? "✓ Strong Maps rankability" :
+                          rank.verdict === "partial" ? "⚠ Partial category match" :
+                          rank.verdict === "mismatch" ? "✗ Category mismatch" : "Unknown"
+                        }</span>
+                        {rank.total_results > 0 && (
+                          <span className="ml-1.5 opacity-80">({rank.match_count}/{rank.total_results} map results match your category)</span>
+                        )}
+                      </div>
                     )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           ))}
