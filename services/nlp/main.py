@@ -2349,7 +2349,7 @@ async def check_rankability(request: Request, body: CheckRankabilityRequest):
         verdict = "partial"
         message = (
             f"Your category '{body.gbp_category}' appears in {match_count}/{total} map pack results. "
-            f"You may be able to rank with a highly optimised page, but competition is from different categories."
+            f"You may be able to rank with a highly optimized page, but will need to heavily include offpage signals including links, clicks, citations, and brand mentions."
         )
     else:
         verdict = "mismatch"
