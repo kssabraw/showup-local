@@ -3437,6 +3437,27 @@ def _rankability_score(
     }
 
 
+# SAB category keywords — if any of these appear in the GBP category, the business
+# is assumed to be a service area business (comes to the customer, not vice versa).
+_SAB_CATEGORY_KEYWORDS = {
+    "plumb", "electri", "roofer", "roofing", "hvac", "heating", "cooling",
+    "air condition", "landscap", "lawn", "pest control", "locksmith",
+    "cleaning service", "maid", "handyman", "tree service", "tree trim",
+    "gutter", "carpet clean", "pressure wash", "window clean", "chimney",
+    "pool service", "pool clean", "moving", "mover", "junk removal",
+    "appliance repair", "garage door", "painting contractor", "painter",
+    "siding", "insulation", "drywall", "flooring install", "tile install",
+    "fence", "deck builder", "concrete", "masonry", "septic",
+    "water heater", "drain", "sewer", "irrigation", "sprinkler",
+    "exterminator", "wildlife", "snow removal", "towing",
+}
+
+def _infer_is_sab(gbp_category: str) -> bool:
+    """Infer whether a GBP category is typically a service area business."""
+    cat_lower = gbp_category.lower()
+    return any(kw in cat_lower for kw in _SAB_CATEGORY_KEYWORDS)
+
+
 class RankabilityRequest(BaseModel):
     keyword: str
     location: str
@@ -3446,7 +3467,6 @@ class RankabilityRequest(BaseModel):
     business_lat: Optional[float] = None
     business_lng: Optional[float] = None
     website: Optional[str] = None  # to check top-10 organic presence
-    is_sab: bool = False            # service area business (hides address)
 
 
 class CompetitorInfo(BaseModel):
@@ -3622,6 +3642,9 @@ async def check_rankability(request: Request, body: RankabilityRequest):
             ), 1)
             distance_ok = distance_miles <= 10.0
 
+    # ── SAB auto-detection ─────────────────────────────────────────────────────
+    is_sab = _infer_is_sab(body.gbp_category)
+
     # ── Score ──────────────────────────────────────────────────────────────────
     score_data = _rankability_score(
         category_match=category_match,
@@ -3629,7 +3652,7 @@ async def check_rankability(request: Request, body: RankabilityRequest):
         distance_miles=distance_miles,
         keyword_name_count=keyword_name_count,
         in_top10_organic=in_top10_organic,
-        is_sab=body.is_sab,
+        is_sab=is_sab,
         physical_competitor_count=physical_competitor_count,
         total_pack_count=len(local_pack_items[:3]),
     )
@@ -3674,7 +3697,7 @@ async def check_rankability(request: Request, body: RankabilityRequest):
         keyword_in_competitor_names=keyword_name_count,
         competitor_name_examples=competitor_name_examples,
         in_top10_organic=in_top10_organic,
-        is_sab=body.is_sab,
+        is_sab=is_sab,
         sab_pack_mismatch=score_data.get("sab_pack_mismatch", False),
         physical_competitors_in_pack=physical_competitor_count,
         message=message,

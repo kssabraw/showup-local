@@ -73,7 +73,6 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const [relatedPages, setRelatedPages] = useState<Array<{ keyword: string; group: string; status: string; url?: string; composite_score?: number }> | null>(null);
   const [rankability, setRankability] = useState<RankabilityResult | null>(null);
   const [rankabilityLoading, setRankabilityLoading] = useState(false);
-  const [isSab, setIsSab] = useState(false);
   const [relatedLoading, setRelatedLoading] = useState(false);
   const [selectedForCreate, setSelectedForCreate] = useState<Set<string>>(new Set());
   const [bulkCreating, setBulkCreating] = useState(false);
@@ -217,7 +216,6 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         business_lat: b.latitude ?? null,
         business_lng: b.longitude ?? null,
         website: b.website,
-        is_sab: isSab,
       });
       setRankability(data);
     } catch {
@@ -226,7 +224,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         has_map_pack: false, competitors: [], ranking_categories: [],
         category_match: "none", distance_ok: true,
         keyword_in_competitor_names: 0, competitor_name_examples: [],
-        in_top10_organic: false, is_sab: isSab, sab_pack_mismatch: false,
+        in_top10_organic: false, is_sab: false, sab_pack_mismatch: false,
         physical_competitors_in_pack: 0,
         message: "Could not retrieve map pack data.", match_count: 0, total_results: 0,
       });
@@ -1171,15 +1169,6 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
               </div>
             )}
             <div className="flex items-center gap-2">
-              <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  className="w-3.5 h-3.5 accent-primary"
-                  checked={isSab}
-                  onChange={e => setIsSab(e.target.checked)}
-                />
-                SAB
-              </label>
               <Button
                 variant="outline"
                 className="flex-none text-xs h-9 px-3"

@@ -195,7 +195,6 @@ export const nlp = {
       business_lat?: number | null;
       business_lng?: number | null;
       website?: string | null;
-      is_sab?: boolean;
     },
     signal?: AbortSignal,
   ) => nlpPost<RankabilityResult>("/check-rankability", body, signal),
