@@ -165,7 +165,7 @@ const Index = () => {
           </div>
         </header>
         <div className="p-6">
-          {activeItem === "dashboard" && <DashboardView />}
+          {activeItem === "dashboard" && <DashboardView onNavigate={handleItemClick} />}
           {activeItem === "new" && (
             <BusinessSearchView
               onBack={() => setActiveItem("dashboard")}
