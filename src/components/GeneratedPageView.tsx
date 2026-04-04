@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { Copy, Check, Save, Loader2, ExternalLink, Download, Mail, ChevronDown, ChevronUp } from "lucide-react";
+import { Copy, Check, Save, Loader2, ExternalLink, Download, Mail } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 
 const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "";
@@ -71,8 +71,6 @@ export default function GeneratedPageView({
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [activeTab, setActiveTab] = useState<"preview" | "raw-text" | "html" | "schema" | "related">("preview");
-  const [showCmsInstructions, setShowCmsInstructions] = useState(false);
-  const [activeCms, setActiveCms] = useState<"wordpress" | "wix" | "squarespace" | "webflow">("wordpress");
   // Related pages state
   const [relatedLoading, setRelatedLoading] = useState(false);
   const [relatedItems, setRelatedItems] = useState<RelatedPageItem[] | null>(null);
@@ -617,81 +615,6 @@ Let me know if you have any questions!`
           </button>
         </div>
 
-        {/* CMS instructions toggle */}
-        <div className="border-t border-border">
-          <button
-            onClick={() => setShowCmsInstructions(v => !v)}
-            className="w-full flex items-center justify-between px-5 py-3 text-sm text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <span>How do I add this to my site?</span>
-            {showCmsInstructions ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-          </button>
-
-          {showCmsInstructions && (
-            <div className="px-5 pb-5 space-y-4">
-              {/* CMS tabs */}
-              <div className="flex gap-1 bg-muted/40 rounded-lg p-1">
-                {(["wordpress", "wix", "squarespace", "webflow"] as const).map(cms => (
-                  <button
-                    key={cms}
-                    onClick={() => setActiveCms(cms)}
-                    className={`flex-1 py-1.5 text-xs font-medium rounded-md capitalize transition-colors ${
-                      activeCms === cms
-                        ? "bg-card text-foreground shadow-sm"
-                        : "text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    {cms === "squarespace" ? "Squarespace" : cms.charAt(0).toUpperCase() + cms.slice(1)}
-                  </button>
-                ))}
-              </div>
-
-              {activeCms === "wordpress" && (
-                <ol className="space-y-3 text-sm text-foreground">
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">1</span><span>In your WordPress dashboard, go to <strong>Pages → Add New Page</strong>.</span></li>
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">2</span><span>Click the <strong>"+"</strong> button in the editor, search for <strong>Custom HTML</strong>, and add that block.</span></li>
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">3</span><span>Click <strong>"Copy HTML code"</strong> above and paste it into the Custom HTML block.</span></li>
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">4</span><span><strong>For the schema markup</strong> (helps Google): copy the code from the <strong>JSON-LD Schema</strong> tab. In Yoast SEO or RankMath, find the Schema settings for this page and paste it there.</span></li>
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">5</span><span>Set the page URL (slug) to something like <strong>/services/{keyword.replace(/\s+/g, "-").toLowerCase()}</strong>, then click <strong>Publish</strong>.</span></li>
-                </ol>
-              )}
-
-              {activeCms === "wix" && (
-                <ol className="space-y-3 text-sm text-foreground">
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">1</span><span>In the Wix Editor, click <strong>Add (+) → Embed Code → Embed HTML</strong>.</span></li>
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">2</span><span>Click <strong>"Copy HTML code"</strong> above and paste it into the embed box.</span></li>
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">3</span><span>Alternatively, click <strong>"Copy formatted text"</strong> and paste directly into a Wix <strong>Text</strong> element — the headings and paragraphs will paste with their formatting.</span></li>
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">4</span><span><strong>For the schema markup</strong>: in Wix, go to <strong>SEO → Advanced SEO → Structured Data Markup</strong> and paste the code from the JSON-LD Schema tab.</span></li>
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">5</span><span>Publish the page.</span></li>
-                </ol>
-              )}
-
-              {activeCms === "squarespace" && (
-                <ol className="space-y-3 text-sm text-foreground">
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">1</span><span>In Squarespace, go to <strong>Pages</strong> and add a new <strong>Blank Page</strong>.</span></li>
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">2</span><span>Click <strong>Edit</strong>, then add a <strong>Code Block</strong> (click + → More → Code).</span></li>
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">3</span><span>Click <strong>"Copy HTML code"</strong> above and paste it into the code block. Make sure <strong>"Display Source"</strong> is turned off.</span></li>
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">4</span><span><strong>For the schema markup</strong>: go to the page's <strong>Settings → Advanced → Page Header Code Injection</strong> and paste the code from the JSON-LD Schema tab.</span></li>
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">5</span><span>Save and publish.</span></li>
-                </ol>
-              )}
-
-              {activeCms === "webflow" && (
-                <ol className="space-y-3 text-sm text-foreground">
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">1</span><span>In Webflow Designer, add a new page or open an existing one.</span></li>
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">2</span><span>From the Components panel, drag an <strong>Embed</strong> element onto the page.</span></li>
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">3</span><span>Click <strong>"Copy HTML code"</strong> above and paste it into the embed editor, then click Save &amp; Close.</span></li>
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">4</span><span><strong>For the schema markup</strong>: go to <strong>Page Settings → Custom Code → Head Code</strong> and paste the code from the JSON-LD Schema tab.</span></li>
-                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">5</span><span>Publish your site.</span></li>
-                </ol>
-              )}
-
-              <p className="text-xs text-muted-foreground pt-1">
-                Not sure? Use <strong>"Email my developer"</strong> above — it writes the email for you. Just download the HTML file and attach it.
-              </p>
-            </div>
-          )}
-        </div>
       </div>
 
       {/* Save + navigation */}
