@@ -78,6 +78,8 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
   const [creatingPhase, setCreatingPhase] = useState<"serp" | "generating">("serp");
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const bulkCancelledRef = useRef(false);
 
   const [savedPages, setSavedPages] = useState<SavedPage[]>([]);
   const [loadingSaved, setLoadingSaved] = useState(false);
@@ -222,11 +224,21 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     await supabase.from("token_usage").insert({ ...record, business_id: selectedBusinessId, keyword });
   };
 
-  const runAnalysisFor = async (kw: string, loc: string, locCode: number | null): Promise<AnalysisResult> => {
+  const cancelOperation = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    bulkCancelledRef.current = true;
+    if (elapsedRef.current) { clearInterval(elapsedRef.current); elapsedRef.current = null; }
+    setCheckState({ status: "idle" });
+    setElapsedSeconds(0);
+  };
+
+  const runAnalysisFor = async (kw: string, loc: string, locCode: number | null, signal?: AbortSignal): Promise<AnalysisResult> => {
     const response = await fetch(`${NLP_SERVICE_URL}/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
       body: JSON.stringify({ keyword: kw.trim(), location: loc.trim(), location_code: locCode }),
+      signal,
     });
     if (!response.ok) {
       const d = await response.json().catch(() => ({}));
@@ -261,6 +273,9 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
       return;
     }
 
+    abortRef.current = new AbortController();
+    const signal = abortRef.current.signal;
+
     setError("");
     setCheckState({ status: "scanning" });
     setRelatedPages(null);
@@ -274,6 +289,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
           method: "POST",
           headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
           body: JSON.stringify({ website_url: b.website, keyword: keyword.trim(), location: location.trim() }),
+          signal,
         }),
         // Fire related-pages in background; results stored separately
         fetch(`${NLP_SERVICE_URL}/related-pages`, {
@@ -287,6 +303,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
             address: b.address,
             website: b.website,
           }),
+          signal,
         }).then(r => r.json()).then(d => {
           setRelatedPages(d.items ?? []);
           setRelatedLoading(false);
@@ -303,6 +320,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         foundPage = { ...scanData.page, isBlogPost: scanData.is_blog_post === true };
       }
     } catch (e: any) {
+      if (e.name === "AbortError") return;
       setError(e.message || "Site scan failed");
       setCheckState({ status: "idle" });
       setRelatedLoading(false);
@@ -321,11 +339,15 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
   const runScoreForPage = async (pageToScore: { url: string; title: string; h1?: string; isBlogPost?: boolean }) => {
     const b = businesses.find(b => b.id === selectedBusinessId);
     if (!b) return;
+
+    abortRef.current = new AbortController();
+    const signal = abortRef.current.signal;
+
     setCheckState({ status: "scoring", page: pageToScore });
     setError("");
     try {
       const [serpData, scoreRes] = await Promise.all([
-        runAnalysis(),
+        runAnalysisFor(keyword, location, locationCode, signal),
         fetch(`${NLP_SERVICE_URL}/score-page`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
@@ -337,6 +359,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
             gbp_category: b.gbp_category,
             address: b.address,
           }),
+          signal,
         }),
       ]);
 
@@ -360,12 +383,16 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         setCheckState({ status: "idle" });
       }
     } catch (e: any) {
+      if (e.name === "AbortError") return;
       setError(e.message || "Scoring failed");
       setCheckState({ status: "idle" });
     }
   };
 
   const handleCreateNewPage = async (kwOverride?: string) => {
+    abortRef.current = new AbortController();
+    const signal = abortRef.current.signal;
+
     setCheckState({ status: "creating" });
     setCreatingPhase("serp");
     setElapsedSeconds(0);
@@ -373,7 +400,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     elapsedRef.current = setInterval(() => setElapsedSeconds(s => s + 1), 1000);
     const kw = kwOverride ?? keyword;
     try {
-      const serpData = await runAnalysisFor(kw, location, locationCode);
+      const serpData = await runAnalysisFor(kw, location, locationCode, signal);
       await saveAnalysisToSupabase(serpData);
 
       const b = businesses.find(b => b.id === selectedBusinessId)!;
@@ -393,6 +420,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
           detected_icp: b.detected_icp,
           serp_analysis: serpData,
         }),
+        signal,
       });
       if (!genRes.ok) {
         const d = await genRes.json().catch(() => ({}));
@@ -402,20 +430,21 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
       await saveTokenUsage(genData.token_usage);
       setView({ kind: "generated", mode: "generate", contentHtml: genData.content_html, schemaJson: genData.schema_json, pageTitle: genData.page_title ?? "", tokenUsage: genData.token_usage, costBreakdown: genData.cost_breakdown ?? {} });
     } catch (e: any) {
+      if (e.name === "AbortError") return;
       setError(e.message || "Something went wrong");
       setCheckState({ status: "not_found" });
     } finally {
       setLoadingLabel("");
-      if (elapsedRef.current) clearInterval(elapsedRef.current);
+      if (elapsedRef.current) { clearInterval(elapsedRef.current); elapsedRef.current = null; }
     }
   };
 
   // Creates + auto-saves a page for the given keyword without navigating away
-  const createAndSavePage = async (kw: string): Promise<boolean> => {
+  const createAndSavePage = async (kw: string, signal?: AbortSignal): Promise<boolean> => {
     const b = businesses.find(b => b.id === selectedBusinessId);
     if (!b) return false;
     try {
-      const serpData = await runAnalysisFor(kw, location, locationCode);
+      const serpData = await runAnalysisFor(kw, location, locationCode, signal);
       const genRes = await fetch(`${NLP_SERVICE_URL}/generate-page`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
@@ -431,6 +460,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
           detected_icp: b.detected_icp,
           serp_analysis: serpData,
         }),
+        signal,
       });
       if (!genRes.ok) return false;
       const genData = await genRes.json();
@@ -456,12 +486,15 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
   const handleBulkCreate = async () => {
     const queue = Array.from(selectedForCreate);
     if (!queue.length) return;
+    abortRef.current = new AbortController();
+    bulkCancelledRef.current = false;
     setBulkCreating(true);
     setBulkDone(0);
     let done = 0;
     for (let i = 0; i < queue.length; i++) {
+      if (bulkCancelledRef.current) break;
       setBulkProgress({ current: i + 1, total: queue.length, currentKw: queue[i] });
-      const ok = await createAndSavePage(queue[i]);
+      const ok = await createAndSavePage(queue[i], abortRef.current?.signal);
       if (ok) done++;
     }
     setBulkCreating(false);
@@ -469,6 +502,12 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     setBulkDone(done);
     setSelectedForCreate(new Set());
     fetchSavedPages();
+  };
+
+  const cancelBulk = () => {
+    bulkCancelledRef.current = true;
+    abortRef.current?.abort();
+    abortRef.current = null;
   };
 
   const handleScoreManualUrl = async () => {
@@ -618,13 +657,18 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
           </div>
         )}
         {selectedForCreate.size > 0 && (
-          <div className="px-4 py-3 border-t border-border bg-muted/20">
+          <div className="px-4 py-3 border-t border-border bg-muted/20 space-y-2">
             <Button className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold"
               onClick={handleBulkCreate} disabled={bulkCreating}>
               {bulkCreating && bulkProgress
                 ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Creating {bulkProgress.currentKw} ({bulkProgress.current}/{bulkProgress.total})…</>
                 : <><Sparkles className="w-4 h-4 mr-2" />Create {selectedForCreate.size} Selected Page{selectedForCreate.size > 1 ? "s" : ""}</>}
             </Button>
+            {bulkCreating && (
+              <button onClick={cancelBulk} className="w-full text-xs text-muted-foreground hover:text-destructive transition-colors text-center py-0.5">
+                Cancel
+              </button>
+            )}
           </div>
         )}
         {bulkDone > 0 && !bulkCreating && (
@@ -810,9 +854,12 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
 
         {/* Scanning state */}
         {checkState.status === "scanning" && (
-          <div className="flex items-center gap-3 px-4 py-3 bg-muted/30 rounded-lg text-sm text-muted-foreground">
-            <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-            <span>Scanning <span className="font-medium text-foreground">{selectedBusiness?.website}</span> for "{keyword}" pages…</span>
+          <div className="px-4 py-3 bg-muted/30 rounded-lg space-y-2">
+            <div className="flex items-center gap-3 text-sm text-muted-foreground">
+              <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+              <span>Scanning <span className="font-medium text-foreground">{selectedBusiness?.website}</span> for "{keyword}" pages…</span>
+            </div>
+            <button onClick={cancelOperation} className="text-xs text-muted-foreground hover:text-destructive transition-colors">Cancel</button>
           </div>
         )}
 
@@ -863,9 +910,12 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
                 <span>⚠️ This appears to be a blog post, not a service page. Consider creating a dedicated service page for this keyword.</span>
               </div>
             )}
-            <div className="flex items-center gap-3 px-4 py-3 bg-muted/30 rounded-lg text-sm text-muted-foreground">
-              <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-              <span>Fetching competitor data and scoring this page…</span>
+            <div className="px-4 py-3 bg-muted/30 rounded-lg space-y-2">
+              <div className="flex items-center gap-3 text-sm text-muted-foreground">
+                <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                <span>Fetching competitor data and scoring this page… <span className="opacity-60 text-xs">(usually 20–40s)</span></span>
+              </div>
+              <button onClick={cancelOperation} className="text-xs text-muted-foreground hover:text-destructive transition-colors">Cancel</button>
             </div>
           </div>
         )}
@@ -959,28 +1009,22 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
         {/* Creating state — step tracker */}
         {checkState.status === "creating" && (() => {
           const serpDone = creatingPhase === "generating";
-          // Step estimates in seconds: SERP fetch ~5s, scraping ~40s, Claude ~30s
-          const STEP_ESTIMATES = [5, 40, 30];
-          const TOTAL_EST = STEP_ESTIMATES.reduce((a, b) => a + b, 0);
           const steps = [
             {
               label: "Fetching top Google results",
               detail: "DataForSEO organic SERP",
-              est: STEP_ESTIMATES[0],
               done: serpDone,
               active: !serpDone,
             },
             {
               label: "Scraping & analysing competitor pages",
               detail: "Up to 20 pages — TF-IDF, quadgrams, entities",
-              est: STEP_ESTIMATES[1],
               done: serpDone,
               active: !serpDone,
             },
             {
               label: "Generating page with Claude",
               detail: "13-section structure + JSON-LD schema",
-              est: STEP_ESTIMATES[2],
               done: false,
               active: creatingPhase === "generating",
             },
@@ -988,17 +1032,11 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
           const mins = Math.floor(elapsedSeconds / 60);
           const secs = elapsedSeconds % 60;
           const elapsed = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
-          const remaining = Math.max(0, TOTAL_EST - elapsedSeconds);
-          const remMins = Math.floor(remaining / 60);
-          const remSecs = remaining % 60;
-          const remLabel = remaining <= 0 ? "almost done…"
-            : remMins > 0 ? `~${remMins}m ${remSecs}s remaining`
-            : `~${remSecs}s remaining`;
           return (
             <div className="px-4 py-4 bg-muted/30 rounded-lg space-y-3">
               <div className="flex items-center justify-between text-xs text-muted-foreground">
-                <span className="font-medium">Building your page…</span>
-                <span>{elapsed} · {remLabel}</span>
+                <span className="font-medium">Building your page… <span className="tabular-nums">{elapsed}</span></span>
+                <span className="opacity-70">Usually 60–120 seconds</span>
               </div>
               <div className="space-y-2">
                 {steps.map((step, i) => (
@@ -1015,14 +1053,9 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
                       )}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-baseline justify-between gap-2">
-                        <p className={`text-sm ${step.active ? "text-foreground font-medium" : step.done ? "text-muted-foreground line-through" : "text-muted-foreground"}`}>
-                          {step.label}
-                        </p>
-                        {!step.done && (
-                          <span className="text-xs text-muted-foreground shrink-0">~{step.est}s</span>
-                        )}
-                      </div>
+                      <p className={`text-sm ${step.active ? "text-foreground font-medium" : step.done ? "text-muted-foreground line-through" : "text-muted-foreground"}`}>
+                        {step.label}
+                      </p>
                       {step.active && (
                         <p className="text-xs text-muted-foreground mt-0.5">{step.detail}</p>
                       )}
@@ -1030,6 +1063,12 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
                   </div>
                 ))}
               </div>
+              <button
+                onClick={cancelOperation}
+                className="text-xs text-muted-foreground hover:text-destructive transition-colors mt-1"
+              >
+                Cancel
+              </button>
             </div>
           );
         })()}

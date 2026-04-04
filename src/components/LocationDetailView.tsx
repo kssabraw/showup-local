@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, RefreshCw, CheckCircle2, AlertCircle, Sparkles, Plus, Trash2, X } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
@@ -73,6 +73,7 @@ const LocationDetailView = ({
   const [editingBrandVoice, setEditingBrandVoice] = useState(false);
   const [brandVoiceDraft, setBrandVoiceDraft] = useState<any>(null);
   const [savingBrandVoice, setSavingBrandVoice] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     fetchBusiness();
@@ -149,7 +150,15 @@ const LocationDetailView = ({
     }
   };
 
+  const cancelAnalysis = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setRescanning(false);
+    setScanningBrandVoice(false);
+  };
+
   const runAnalysis = async (b: BusinessProfile) => {
+    abortRef.current = new AbortController();
     setRescanning(true);
 
     let website = b.website;
@@ -174,6 +183,7 @@ const LocationDetailView = ({
           gbp_category: b.gbp_category,
           gbp_categories: b.gbp_categories || [],
         }),
+        signal: abortRef.current.signal,
       });
 
       if (!response.ok) {
@@ -194,7 +204,8 @@ const LocationDetailView = ({
 
       if (error) throw error;
       await fetchBusiness();
-    } catch (err) {
+    } catch (err: any) {
+      if (err.name === "AbortError") return;
       console.error("Analysis error:", err);
       await supabase
         .from("business_profiles")
@@ -276,6 +287,7 @@ const LocationDetailView = ({
   };
 
   const scanBrandVoice = async (b: BusinessProfile) => {
+    abortRef.current = new AbortController();
     let website = b.website;
     if (!website) {
       website = await fetchWebsiteFromGBP(b);
@@ -291,6 +303,7 @@ const LocationDetailView = ({
           business_name: b.business_name,
           gbp_category: b.gbp_category || "",
         }),
+        signal: abortRef.current.signal,
       });
       if (!response.ok) {
         const errBody = await response.json().catch(() => ({}));
@@ -312,7 +325,8 @@ const LocationDetailView = ({
         .eq("id", b.id);
       if (error) throw error;
       await fetchBusiness();
-    } catch (err) {
+    } catch (err: any) {
+      if (err.name === "AbortError") return;
       console.error("Brand voice scan error:", err);
       toast({
         title: "Brand voice scan failed",
@@ -533,14 +547,19 @@ const LocationDetailView = ({
                   </button>
                 )}
                 {analysisStatus !== "running" && !editingIcp && (
-                  <button
-                    onClick={() => runAnalysis(business)}
-                    disabled={rescanning}
-                    className="flex items-center gap-1.5 text-xs font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    {rescanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                    {rescanning ? "Scanning..." : icp ? "Re-run" : (business.website ? "Scan Website" : "Detect from Category")}
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => runAnalysis(business)}
+                      disabled={rescanning}
+                      className="flex items-center gap-1.5 text-xs font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {rescanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                      {rescanning ? "Scanning..." : icp ? "Re-run" : (business.website ? "Scan Website" : "Detect from Category")}
+                    </button>
+                    {rescanning && (
+                      <button onClick={cancelAnalysis} className="text-xs text-muted-foreground hover:text-destructive transition-colors">Cancel</button>
+                    )}
+                  </div>
                 )}
                 {editingIcp && (
                   <div className="flex items-center gap-3">
@@ -927,14 +946,19 @@ const LocationDetailView = ({
                     </button>
                   )}
                   {!editingBrandVoice && (
-                    <button
-                      onClick={() => scanBrandVoice(business)}
-                      disabled={scanningBrandVoice}
-                      className="flex items-center gap-1.5 text-xs font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      {scanningBrandVoice ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                      {scanningBrandVoice ? "Scanning..." : bv ? "Re-scan" : (business.website ? "Scan Website" : "Generate from Category")}
-                    </button>
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => scanBrandVoice(business)}
+                        disabled={scanningBrandVoice}
+                        className="flex items-center gap-1.5 text-xs font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {scanningBrandVoice ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                        {scanningBrandVoice ? "Scanning..." : bv ? "Re-scan" : (business.website ? "Scan Website" : "Generate from Category")}
+                      </button>
+                      {scanningBrandVoice && (
+                        <button onClick={cancelAnalysis} className="text-xs text-muted-foreground hover:text-destructive transition-colors">Cancel</button>
+                      )}
+                    </div>
                   )}
                   {editingBrandVoice && (
                     <div className="flex items-center gap-3">
