@@ -104,6 +104,7 @@ export const nlp = {
     body: {
       keyword: string;
       location: string;
+      location_code?: number | null;
       page_url: string;
       business_name: string;
       gbp_category: string;

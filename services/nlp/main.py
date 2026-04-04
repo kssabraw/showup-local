@@ -586,29 +586,29 @@ async def get_google_entities(
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
-@app.post('/analyze', response_model=AnalysisResponse, dependencies=[Depends(verify_api_key)])
-@limiter.limit("10/minute")
-async def analyze(request: Request, body: AnalysisRequest):
+async def _run_serp_analysis(
+    keyword: str,
+    location: str,
+    location_code: Optional[int] = None,
+    urls: Optional[List[str]] = None,
+) -> AnalysisResponse:
     """
-    Full pipeline:
-      1. DataForSEO  — fetch top organic URLs for keyword + location
-      2. ScrapeOwl   — fetch raw HTML for each URL concurrently
-      3. NLP         — related keywords, quadgrams, Google entity analysis
-
-    Pass optional `urls` to skip the DataForSEO SERP step (testing / override).
+    Shared SERP analysis pipeline used by both /analyze and /score-page.
+    Returns an AnalysisResponse with related keywords, quadgrams, zone_targets,
+    competitor headings, and cost data (google_entities deferred to /generate-page).
     """
     # Step 1: get URLs
-    if body.urls:
-        urls = body.urls
-        logger.info(f"Using {len(urls)} manually provided URLs")
+    if urls:
+        serp_urls = urls
+        logger.info(f"Using {len(serp_urls)} manually provided URLs")
     else:
         async with httpx.AsyncClient() as client:
-            urls = await fetch_serp_urls(body.keyword, body.location, client, body.location_code)
-        if not urls:
+            serp_urls = await fetch_serp_urls(keyword, location, client, location_code)
+        if not serp_urls:
             raise HTTPException(status_code=502, detail="DataForSEO returned no usable URLs")
 
     # Step 2: scrape
-    pages = await scrape_urls(urls)
+    pages = await scrape_urls(serp_urls)
     if len(pages) < 2:
         raise HTTPException(
             status_code=502,
@@ -620,7 +620,7 @@ async def analyze(request: Request, body: AnalysisRequest):
     h2_per_page: List[List[str]] = []
     h3_per_page: List[List[str]] = []
     scraped_urls: List[str] = []
-    for url, html in zip(urls, pages):
+    for url, html in zip(serp_urls, pages):
         zones = extract_zones(html)
         for z in ZONES + ["paragraphs"]:
             zone_buckets[z].append(zones[z])
@@ -630,12 +630,12 @@ async def analyze(request: Request, body: AnalysisRequest):
 
     # Step 4: NLP analysis
     related = ZoneKeywords(
-        title=get_related_keywords_for_zone(zone_buckets["title"], body.keyword),
-        h1=get_related_keywords_for_zone(zone_buckets["h1"], body.keyword),
-        h2_h3=get_related_keywords_for_zone(zone_buckets["h2_h3"], body.keyword),
-        body=get_related_keywords_for_zone(zone_buckets["body"], body.keyword),
+        title=get_related_keywords_for_zone(zone_buckets["title"], keyword),
+        h1=get_related_keywords_for_zone(zone_buckets["h1"], keyword),
+        h2_h3=get_related_keywords_for_zone(zone_buckets["h2_h3"], keyword),
+        body=get_related_keywords_for_zone(zone_buckets["body"], keyword),
     )
-    quadgrams = get_top_quadgrams(zone_buckets["paragraphs"], body.keyword)
+    quadgrams = get_top_quadgrams(zone_buckets["paragraphs"], keyword)
     # Google NLP is deferred to /generate-page (only paid when user actually generates content)
     zone_targets = compute_zone_targets(zone_buckets, related, [])
 
@@ -643,8 +643,8 @@ async def analyze(request: Request, body: AnalysisRequest):
     total_pages = len(scraped_urls)
     competitor_headings: List[dict] = []
     for tag_type, per_page in (("h2", h2_per_page), ("h3", h3_per_page)):
-        canonical: Dict[str, str] = {}   # lowercase -> first-seen original
-        page_count: Dict[str, int] = {}  # lowercase -> pages containing it
+        canonical: Dict[str, str] = {}
+        page_count: Dict[str, int] = {}
         for page_headings in per_page:
             seen_this_page: set = set()
             for h in page_headings:
@@ -665,7 +665,6 @@ async def analyze(request: Request, body: AnalysisRequest):
                 "page_pct": round(count / total_pages, 2),
             })
 
-    # Estimate API costs for this analysis run (Google NLP deferred to /generate-page)
     scrapeowl_cost = round(len(scraped_urls) * COST_SCRAPEOWL_PER_PAGE, 6)
     analysis_cost = {
         "dataforseo": round(COST_DATAFORSEO_PER_ANALYSIS, 6),
@@ -675,16 +674,30 @@ async def analyze(request: Request, body: AnalysisRequest):
     }
 
     return AnalysisResponse(
-        keyword=body.keyword,
-        location=body.location,
+        keyword=keyword,
+        location=location,
         serp_urls=scraped_urls,
         related_keywords=related,
         top_quadgrams=quadgrams,
-        google_entities=[],  # fetched lazily in /generate-page to avoid cost on exploratory analyses
+        google_entities=[],
         zone_targets=zone_targets,
         competitor_headings=competitor_headings,
         analysis_cost=analysis_cost,
     )
+
+
+@app.post('/analyze', response_model=AnalysisResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+async def analyze(request: Request, body: AnalysisRequest):
+    """
+    Full pipeline:
+      1. DataForSEO  — fetch top organic URLs for keyword + location
+      2. ScrapeOwl   — fetch raw HTML for each URL concurrently
+      3. NLP         — related keywords, quadgrams, Google entity analysis
+
+    Pass optional `urls` to skip the DataForSEO SERP step (testing / override).
+    """
+    return await _run_serp_analysis(body.keyword, body.location, body.location_code, body.urls)
 
 
 @app.get('/health', dependencies=[Depends(verify_api_key)])
@@ -2638,6 +2651,7 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
 class ScorePageRequest(BaseModel):
     keyword: str
     location: str
+    location_code: Optional[int] = None  # DataForSEO numeric location code
     page_url: Optional[str] = None
     page_content: Optional[str] = None  # if omitted, fetched from page_url
     business_name: str
@@ -2651,6 +2665,8 @@ class ScorePageResponse(BaseModel):
     engine_scores: dict
     deficiencies: List[dict]
     token_usage: dict
+    serp_analysis: Optional[dict] = None   # populated when analysis was run inline
+    analysis_cost: Optional[dict] = None   # cost of the inline SERP analysis
 
 
 @app.post('/score-page', response_model=ScorePageResponse, dependencies=[Depends(verify_api_key)])
@@ -2661,6 +2677,17 @@ async def score_page(request: Request, body: ScorePageRequest):
 
     import anthropic as _anthropic
     client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+    # ── Run SERP analysis inline if not provided ───────────────────────────────
+    # Scoring against competitors requires SERP data. If the caller doesn't pass
+    # serp_analysis (e.g. user hits Score directly without a prior analysis run),
+    # we run the full pipeline here and return it so the frontend can cache it.
+    inline_serp: Optional[AnalysisResponse] = None
+    serp_analysis_dict: Optional[dict] = body.serp_analysis
+    if not serp_analysis_dict:
+        logger.info(f"score-page: no serp_analysis provided — running inline SERP analysis for '{body.keyword}'")
+        inline_serp = await _run_serp_analysis(body.keyword, body.location, body.location_code)
+        serp_analysis_dict = inline_serp.model_dump()
 
     from bs4 import BeautifulSoup as _BS
     page_html = body.page_content
@@ -2678,7 +2705,7 @@ async def score_page(request: Request, body: ScorePageRequest):
         raise HTTPException(status_code=422, detail="Either page_content or page_url is required")
     page_text = _BS(page_html, "html.parser").get_text(separator="\n", strip=True)[:8000]
     city = body.location.split(",")[0].strip()
-    serp_ctx = _serp_context(body.serp_analysis)
+    serp_ctx = _serp_context(serp_analysis_dict)
 
     user_prompt = _build_score_prompt(body.business_name, body.gbp_category, body.keyword, city, body.address, serp_ctx, page_text)
 
@@ -2703,6 +2730,8 @@ async def score_page(request: Request, body: ScorePageRequest):
         engine_scores=scores,
         deficiencies=_build_deficiencies(scores),
         token_usage=token_rec,
+        serp_analysis=serp_analysis_dict if inline_serp else None,
+        analysis_cost=inline_serp.analysis_cost if inline_serp else None,
     )
 
 

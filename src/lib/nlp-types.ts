@@ -141,6 +141,8 @@ export interface ScoreResult {
     recommendations: string[];
   }>;
   token_usage: TokenUsage;
+  serp_analysis?: AnalysisResult;   // present when analysis was run inline by /score-page
+  analysis_cost?: Record<string, number>;
 }
 
 // ── Related pages ─────────────────────────────────────────────────────────────

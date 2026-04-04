@@ -18,6 +18,7 @@ interface GeneratedResult {
 interface Props {
   keyword: string;
   location: string;
+  locationCode?: number | null;
   pageUrl: string;
   pageTitle: string;
   businessId: string;
@@ -27,6 +28,7 @@ interface Props {
   phone?: string;
   differentiators?: unknown[];
   serp_analysis?: AnalysisResult;
+  onSerpAnalysis?: (analysis: AnalysisResult) => void;  // called when scoring ran analysis inline
   initialScoreResult?: ScoreResult;
   onBack: () => void;
   onGenerated: (result: GeneratedResult, mode: "reoptimize") => void;
@@ -63,9 +65,9 @@ function StatusIcon({ score }: { score: number }) {
 }
 
 export default function PageScoreView({
-  keyword, location, pageUrl, pageTitle, businessId, businessName,
-  gbpCategory, address, phone, differentiators, serp_analysis, initialScoreResult,
-  onBack, onGenerated, onCreateNew, relatedPagePanel,
+  keyword, location, locationCode, pageUrl, pageTitle, businessId, businessName,
+  gbpCategory, address, phone, differentiators, serp_analysis, onSerpAnalysis,
+  initialScoreResult, onBack, onGenerated, onCreateNew, relatedPagePanel,
 }: Props) {
   const [scoreResult, setScoreResult] = useState<ScoreResult | null>(initialScoreResult ?? null);
   const [scoring, setScoring] = useState(false);
@@ -95,11 +97,25 @@ export default function PageScoreView({
     setError("");
     try {
       const data = await nlp.scorePage(
-        { keyword, location, page_url: pageUrl, business_name: businessName, gbp_category: gbpCategory, address, serp_analysis },
+        {
+          keyword,
+          location,
+          location_code: locationCode ?? undefined,
+          page_url: pageUrl,
+          business_name: businessName,
+          gbp_category: gbpCategory,
+          address,
+          serp_analysis,
+        },
         abortRef.current.signal,
       );
       setScoreResult(data);
       await saveTokenUsage(data.token_usage);
+      // If scoring ran SERP analysis inline, bubble it up so the parent can
+      // cache it in Supabase and pass it back for future operations.
+      if (data.serp_analysis && onSerpAnalysis) {
+        onSerpAnalysis(data.serp_analysis);
+      }
     } catch (e: any) {
       if ((e as Error).name === "AbortError") return;
       setError((e as Error).message || "Scoring failed");
@@ -182,11 +198,13 @@ export default function PageScoreView({
             onClick={runScore}
             disabled={scoring}
           >
-            {scoring ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Scoring page…</> : "Score This Page"}
+            {scoring
+              ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{serp_analysis ? "Scoring page…" : "Analyzing competitors…"}</>
+              : "Score This Page"}
           </Button>
           {scoring && (
             <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
-              <span className="opacity-70">Usually 20–40 seconds</span>
+              <span className="opacity-70">{serp_analysis ? "Usually 20–40 seconds" : "Usually 60–90 seconds (includes competitor analysis)"}</span>
               <button onClick={cancelOperation} className="hover:text-destructive transition-colors">Cancel</button>
             </div>
           )}

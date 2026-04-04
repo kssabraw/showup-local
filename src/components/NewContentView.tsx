@@ -40,7 +40,7 @@ import type { ScoreResult, TokenUsage, CostBreakdown } from "@/lib/nlp-types";
 
 type ViewState =
   | { kind: "form" }
-  | { kind: "score"; pageMatch: { url: string; title: string; h1?: string }; serpAnalysis: AnalysisResult; initialScoreResult: ScoreResult }
+  | { kind: "score"; pageMatch: { url: string; title: string; h1?: string }; serpAnalysis?: AnalysisResult; initialScoreResult?: ScoreResult }
   | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; tokenUsage: Partial<TokenUsage>; costBreakdown: Partial<CostBreakdown>; isNew?: boolean }
   | { kind: "analysis"; result: AnalysisResult };
 
@@ -631,6 +631,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
       <PageScoreView
         keyword={keyword}
         location={location}
+        locationCode={locationCode}
         pageUrl={view.pageMatch.url}
         pageTitle={view.pageMatch.title}
         businessId={selectedBusinessId}
@@ -640,6 +641,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         phone={selectedBusiness?.phone || undefined}
         differentiators={selectedBusiness?.differentiators}
         serp_analysis={view.serpAnalysis}
+        onSerpAnalysis={saveAnalysisToSupabase}
         initialScoreResult={view.initialScoreResult}
         onBack={() => setView({ kind: "form" })}
         onGenerated={(result, mode) =>
