@@ -1800,12 +1800,181 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
 # ══════════════════════════════════════════════════════════════════════════════
 
 GENERATION_MODEL = "claude-sonnet-4-6"
+SCORE_MODEL = "claude-haiku-4-5-20251001"  # Structured JSON grading — Haiku is sufficient
 
-# Pricing per million tokens
+# Pricing per million tokens (cached input tokens billed at ~10% of normal input rate)
 _MODEL_PRICING: Dict[str, Dict[str, float]] = {
     "claude-sonnet-4-6":          {"input": 3.00,  "output": 15.00},
     "claude-haiku-4-5-20251001":  {"input": 0.80,  "output":  4.00},
 }
+
+# ── Cached system prompts ────────────────────────────────────────────────────
+# These are sent as system messages with cache_control so Anthropic caches the
+# large static instruction blocks. Cache TTL is 5 minutes, refreshed on each hit.
+# Cost on cache hit: ~10% of normal input token price.
+
+_GEN_SYSTEM_PROMPT = """You are an expert local SEO content writer. Generate a complete, publish-ready local service page following the exact structure below.
+
+OUTPUT FORMAT
+Return valid HTML only. No markdown. No explanations outside the HTML. Structure:
+<title>[SEE TITLE FORMULA BELOW]</title>
+<article>
+  [13 sections as specified below]
+</article>
+Then on a NEW LINE after </article>, output the JSON-LD schema block starting with <script type="application/ld+json"> (3 schema blocks in one script tag).
+
+TITLE TAG FORMULA (follow exactly — do not deviate):
+<title>[Power Word]! [Exact Match Keyword] | [Brand Name] | [Justification using entities] | [Additional persuasion + entities]</title>
+- Power Word: a single urgent/emotional word (e.g. Trusted, Fast, Expert, Certified, Local, Licensed)
+- Exact Match Keyword: the primary keyword verbatim
+- Brand Name: the business name
+- Justification: a short phrase using 1–2 Google entities that validates the claim (e.g. "Serving Anaheim Hills & Orange County")
+- Additional persuasion: a benefit or proof point that includes 1–2 more entities (e.g. "Same-Day Response, No Overtime Fees")
+- Total title length: 60–70 characters ideal, 80 max
+
+MANDATORY 13-SECTION STRUCTURE
+
+Section 1 — Intro / Direct Answer Block (100–150 words)
+<section id="intro">
+  <h1>[Exact Match Keyword] + [1–2 entities that reinforce location or service scope]</h1>
+  H1 FORMULA: Write the primary keyword verbatim, then append relevant entities naturally (e.g. "Emergency Plumber Anaheim — Serving Anaheim Hills, Yorba Linda & Orange County")
+  <p>[Brand] provides [service] to [city] — [primary differentiator stated in first sentence]. [2–3 sentences: service confirmation, availability, phone CTA.] [Close with direct service claim + city.]</p>
+</section>
+
+Section 2 — USP / Value Proposition (150–200 words)
+<section id="usp">
+  <h2>[Single sentence combining: exact match keyword + persuasion/outcome + 1–2 entities]</h2>
+  FIRST H2 FORMULA: Must be a complete sentence (not a fragment) that includes the primary keyword, a persuasive outcome or differentiator, and 1–2 entities. (e.g. "When Anaheim Homeowners Need an Emergency Plumber Fast, [Brand] Delivers Same-Day Repairs Across Orange County")
+  [Min 3 differentiators with mechanisms. One contrast statement. One proof signal.]
+</section>
+
+Section 3 — Special Offers (omit this section if no offer data provided)
+<section id="offers">...</section>
+
+Section 4 — CTA Block Primary (50–75 words)
+<section id="cta-primary">
+  <h2>[Action-oriented H2]</h2>
+  [Differentiated CTA — not "Contact us today". Include phone.]
+</section>
+
+Section 5 — Features and Benefits (150–200 words)
+<section id="features">
+  <h2>[Benefit-focused H2]</h2>
+  <ul>[Min 4 feature/benefit pairs — outcome-first, ICP pain points addressed]</ul>
+</section>
+
+Section 6 — Main Service Body (800–1400 words)
+<section id="services">
+  Use the COMPETITOR H2/H3 HEADINGS from the SERP data above as your structural baseline.
+  Cover every topic competitors cover, then add H2/H3 sections for topics competitors DON'T cover
+  that would more fully answer the user's implied query — this is called INFORMATION GAIN and
+  is critical for outranking competitors.
+
+  Structure rules:
+  - You may use MULTIPLE H2s within this section if the content warrants separate major topics
+  - Each H2 should represent a distinct major topic or service category
+  - Use H3s under each H2 for sub-services, use cases, or scenarios
+  - Every heading: include service/city naturally where it fits (not forced)
+  - Open with a primary service description paragraph (answer-first)
+  - Each H3: 2–4 sentences covering description, real-world scenario, differentiator, geo reference
+  - Naturally weave in competitor entities and phrases from SERP data throughout
+  - Do NOT copy competitor headings verbatim — use them to understand topic coverage, then write
+    headings that are more specific, benefit-oriented, or locally relevant
+</section>
+
+Section 7 — Testimonials (include only if reviews provided above; omit if none)
+<section id="testimonials">
+  <h2>[Social proof H2]</h2>
+  [Verbatim reviews only — first name + last initial, stars, date, full text]
+</section>
+
+Section 8 — CTA Block Secondary (50–75 words — different angle from Section 4)
+<section id="cta-secondary">...</section>
+
+Section 9 — Getting Started (150–200 words)
+<section id="getting-started">
+  <h2>[Process-focused H2]</h2>
+  <ol>[3–5 steps, plain language, close with CTA]</ol>
+</section>
+
+Section 10 — Geographic / Local SEO Section (200–300 words)
+<section id="local">
+  <h2>[City + service in heading]</h2>
+  [City + min 3 neighborhoods in sentence context (not just a list) + min 1 landmark + min 2 streets + zip codes (min 3). Use only real, verifiable geographic details. If neighborhood/landmark/street/zip data is not provided in the business data, include only what you are certain is accurate for the target city. Do not invent or guess street names, zip codes, or landmarks. Coverage + response time.]
+</section>
+
+Section 11 — CTA Block Tertiary (50–75 words — urgency-forward)
+<section id="cta-tertiary">...</section>
+
+Section 12 — FAQ (min 6, max 10 entries — 40–80 words each)
+<section id="faq">
+  <h2>Frequently Asked Questions</h2>
+  [Must cover: availability, response time, coverage area, emergency service. Answer-first. Geographic + availability signal in each proximity FAQ.]
+</section>
+
+Section 13 — Schema (delivered AFTER </article> as a separate <script> block)
+Generate 3 schema blocks as a single JSON-LD array inside one <script type="application/ld+json"> tag:
+1. LocalBusiness (subtype from category: Plumber/HVACBusiness/Electrician etc.)
+2. Service
+3. FAQPage (auto-extracted from Section 12)
+
+HARD RULES — NEVER:
+- Start with "Welcome to [Brand]"
+- Use "We are a [city] [service] company" as first sentence
+- Write "Contact us today" as standalone CTA
+- Use generic headings ("About Us", "Our Services", "Why Choose Us")
+- Use "near me" literally in body content
+- Include placeholder text like [Insert here]
+- Fabricate reviews
+- Use vague differentiators ("trusted", "professional", "high quality") without a mechanism
+- Invent or guess phone numbers, addresses, hours, zip codes, street names, or landmarks not explicitly provided in the business data"""
+
+_REOPT_SYSTEM_PROMPT = """You are an expert local SEO content writer. Fix the SEO deficiencies in the page provided by updating its text content only.
+
+STRICT RULES — follow exactly:
+1. TEXT ONLY: Only change text content (words between HTML tags). You may also update SEO-relevant attributes: alt, title, meta[content], og:title, og:description, aria-label, and JSON-LD schema text values.
+2. PRESERVE EVERYTHING ELSE: Do not change any element types, CSS classes, IDs, data-* attributes, href, src, or any non-content attributes. Do not add, remove, or reorder any HTML elements.
+3. Fix every deficiency listed through word choices, phrasing, and copy — not by adding new HTML sections.
+4. Naturally incorporate competitor entities and phrases from SERP data where missing.
+5. Do not fabricate reviews or placeholder text. Do not use "near me" literally in body copy.
+
+Return your response in EXACTLY this format (do not deviate):
+
+<<<NOTES>>>
+List each HTML/CSS structural change that would further improve SEO but that you could NOT make because it requires adding/moving/removing elements or changing classes. Be specific (e.g. "Add an FAQ section with schema markup", "H1 tag is missing — the page title is wrapped in a <div> instead"). If none, write "None."
+<<<HTML>>>
+[Complete page HTML with ONLY text content and SEO attributes changed]"""
+
+_SCORE_SYSTEM_PROMPT = """You are an expert local SEO analyst. Score the provided page against all 7 engines below.
+
+SCORING CRITERIA — score each engine 0–100:
+
+1. organic_ranking (weight 20%): keyword in title + H1 + opening ¶; service/transactional tone (not blog); CTA + phone visible; clear service offering.
+
+2. gbp_maps (weight 25%): exact city name present; service matches GBP category; brand+service+city entity triplet; NAP signals consistent; multiple service mentions.
+
+3. entity_establishment (weight 15%): brand+service+city co-occurrence in ≥3 sections; sub-services mentioned; descriptive anchor text signals; topical depth.
+
+4. icp_alignment (weight 10%): detect ICP from keyword modifier (emergency→urgent tone; commercial→B2B tone; general→professional/reliable); CTA matches ICP; pain points addressed.
+
+5. aeo_llm_retrieval (weight 10%): answer-first formatting (direct claim before explanation); FAQ with ≥4 entries; each section ≤300 words; Q&A heading structure; specific operational details (not generic filler).
+
+6. geographic_legitimacy (weight 10%): city in title+H1+opening ¶; ≥2 neighborhood references in sentence context; ≥1 landmark reference; ≥3 zip codes in visible content; geo signals in ≥3 page sections.
+
+7. nearme_intent (weight 10%): phone above fold; availability language in opening block; response time stated explicitly; ≥2 neighborhood+service+availability blocks; ≥1 street reference; ≥2 proximity FAQs (availability/response/coverage/emergency).
+
+Return ONLY valid JSON — no markdown, no explanation:
+{
+  "organic_ranking":       {"score": 0, "issues": [], "recommendations": []},
+  "gbp_maps":              {"score": 0, "issues": [], "recommendations": []},
+  "entity_establishment":  {"score": 0, "issues": [], "recommendations": []},
+  "icp_alignment":         {"score": 0, "icp_detected": "", "issues": [], "recommendations": []},
+  "aeo_llm_retrieval":     {"score": 0, "issues": [], "recommendations": []},
+  "geographic_legitimacy": {"score": 0, "issues": [], "recommendations": []},
+  "nearme_intent":         {"score": 0, "issues": [], "recommendations": []}
+}
+
+Be specific — reference actual content found (or missing) in the page."""
 
 def _calc_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     p = _MODEL_PRICING.get(model, {"input": 3.00, "output": 15.00})
@@ -1922,9 +2091,9 @@ def _build_score_prompt(
     serp_ctx: str,
     page_text: str,
 ) -> str:
-    return f"""You are an expert local SEO analyst. Score this page against all 7 engines below.
-
-CONTEXT
+    """Returns the dynamic user-message portion of the scoring prompt.
+    The static system instructions are in _SCORE_SYSTEM_PROMPT (cached separately)."""
+    return f"""CONTEXT
 Business: {business_name}
 Category: {gbp_category}
 Keyword: {keyword}
@@ -1933,36 +2102,7 @@ Address: {address or "Not provided"}
 {serp_ctx}
 
 PAGE CONTENT (first 8,000 chars):
-{page_text}
-
-SCORING CRITERIA — score each engine 0–100:
-
-1. organic_ranking (weight 20%): keyword in title + H1 + opening ¶; service/transactional tone (not blog); CTA + phone visible; clear service offering.
-
-2. gbp_maps (weight 25%): exact city name present; service matches GBP category; brand+service+city entity triplet; NAP signals consistent; multiple service mentions.
-
-3. entity_establishment (weight 15%): brand+service+city co-occurrence in ≥3 sections; sub-services mentioned; descriptive anchor text signals; topical depth.
-
-4. icp_alignment (weight 10%): detect ICP from keyword modifier (emergency→urgent tone; commercial→B2B tone; general→professional/reliable); CTA matches ICP; pain points addressed.
-
-5. aeo_llm_retrieval (weight 10%): answer-first formatting (direct claim before explanation); FAQ with ≥4 entries; each section ≤300 words; Q&A heading structure; specific operational details (not generic filler).
-
-6. geographic_legitimacy (weight 10%): city in title+H1+opening ¶; ≥2 neighborhood references in sentence context; ≥1 landmark reference; ≥3 zip codes in visible content; geo signals in ≥3 page sections.
-
-7. nearme_intent (weight 10%): phone above fold; availability language in opening block; response time stated explicitly; ≥2 neighborhood+service+availability blocks; ≥1 street reference; ≥2 proximity FAQs (availability/response/coverage/emergency).
-
-Return ONLY valid JSON — no markdown, no explanation:
-{{
-  "organic_ranking":       {{"score": 0, "issues": [], "recommendations": []}},
-  "gbp_maps":              {{"score": 0, "issues": [], "recommendations": []}},
-  "entity_establishment":  {{"score": 0, "issues": [], "recommendations": []}},
-  "icp_alignment":         {{"score": 0, "icp_detected": "", "issues": [], "recommendations": []}},
-  "aeo_llm_retrieval":     {{"score": 0, "issues": [], "recommendations": []}},
-  "geographic_legitimacy": {{"score": 0, "issues": [], "recommendations": []}},
-  "nearme_intent":         {{"score": 0, "issues": [], "recommendations": []}}
-}}
-
-Be specific — reference actual content found (or missing) in the page."""
+{page_text}"""
 
 
 async def _derive_related_keywords(keyword: str, location: str, haiku_client) -> tuple:
@@ -2103,11 +2243,12 @@ async def _score_page_for_related(
         page_html = _resp.text
     page_text = _BS2(page_html, "html.parser").get_text(separator="\n", strip=True)[:8000]
     city = location.split(",")[0].strip()
-    prompt = _build_score_prompt(business_name, gbp_category, keyword, city, address, "", page_text)
+    user_prompt = _build_score_prompt(business_name, gbp_category, keyword, city, address, "", page_text)
     msg = await haiku_client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}],
+        system=[{"type": "text", "text": _SCORE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+        messages=[{"role": "user", "content": user_prompt}],
     )
     token_rec = _token_record(
         "related-pages/score", "claude-haiku-4-5-20251001",
@@ -2543,19 +2684,20 @@ async def score_page(request: Request, body: ScorePageRequest):
     city = body.location.split(",")[0].strip()
     serp_ctx = _serp_context(body.serp_analysis)
 
-    prompt = _build_score_prompt(body.business_name, body.gbp_category, body.keyword, city, body.address, serp_ctx, page_text)
+    user_prompt = _build_score_prompt(body.business_name, body.gbp_category, body.keyword, city, body.address, serp_ctx, page_text)
 
     try:
         msg = await client.messages.create(
-            model=GENERATION_MODEL,
-            max_tokens=4000,
-            messages=[{"role": "user", "content": prompt}],
+            model=SCORE_MODEL,
+            max_tokens=2000,
+            system=[{"type": "text", "text": _SCORE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user_prompt}],
         )
     except Exception as e:
         logger.exception("Claude scoring error")
         raise HTTPException(status_code=502, detail="Scoring service temporarily unavailable")
 
-    token_rec = _token_record("score-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
+    token_rec = _token_record("score-page", SCORE_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
     scores = _parse_claude_json(msg.content[0].text)
     composite, status = _composite_from_scores(scores)
 
@@ -2674,9 +2816,7 @@ async def generate_page(request: Request, body: GeneratePageRequest):
                     lines.append(f"    Trust signals: {'; '.join(pain[:2])}")
             icp_text = "\n".join(lines)
 
-    prompt = f"""You are an expert local SEO content writer. Generate a complete, publish-ready local service page following the exact structure below.
-
-BUSINESS DATA
+    user_prompt = f"""BUSINESS DATA
 Name: {body.business_name}
 Category: {body.gbp_category}
 Address: {body.address}
@@ -2692,127 +2832,14 @@ ICP: {icp}
 {icp_text}
 {diff_text}
 {reviews_text}
-{serp_ctx}
-
-OUTPUT FORMAT
-Return valid HTML only. No markdown. No explanations outside the HTML. Structure:
-<title>[SEE TITLE FORMULA BELOW]</title>
-<article>
-  [13 sections as specified below]
-</article>
-Then on a NEW LINE after </article>, output the JSON-LD schema block starting with <script type="application/ld+json"> (3 schema blocks in one script tag).
-
-TITLE TAG FORMULA (follow exactly — do not deviate):
-<title>[Power Word]! [Exact Match Keyword] | [Brand Name] | [Justification using entities] | [Additional persuasion + entities]</title>
-- Power Word: a single urgent/emotional word (e.g. Trusted, Fast, Expert, Certified, Local, Licensed)
-- Exact Match Keyword: the primary keyword verbatim
-- Brand Name: the business name
-- Justification: a short phrase using 1–2 Google entities that validates the claim (e.g. "Serving Anaheim Hills & Orange County")
-- Additional persuasion: a benefit or proof point that includes 1–2 more entities (e.g. "Same-Day Response, No Overtime Fees")
-- Total title length: 60–70 characters ideal, 80 max
-
-MANDATORY 13-SECTION STRUCTURE
-
-Section 1 — Intro / Direct Answer Block (100–150 words)
-<section id="intro">
-  <h1>[Exact Match Keyword] + [1–2 entities that reinforce location or service scope]</h1>
-  H1 FORMULA: Write the primary keyword verbatim, then append relevant entities naturally (e.g. "Emergency Plumber Anaheim — Serving Anaheim Hills, Yorba Linda & Orange County")
-  <p>[Brand] provides [service] to [city] — [primary differentiator stated in first sentence]. [2–3 sentences: service confirmation, availability, phone CTA.] [Close with direct service claim + city.]</p>
-</section>
-
-Section 2 — USP / Value Proposition (150–200 words)
-<section id="usp">
-  <h2>[Single sentence combining: exact match keyword + persuasion/outcome + 1–2 entities]</h2>
-  FIRST H2 FORMULA: Must be a complete sentence (not a fragment) that includes the primary keyword, a persuasive outcome or differentiator, and 1–2 entities. (e.g. "When Anaheim Homeowners Need an Emergency Plumber Fast, [Brand] Delivers Same-Day Repairs Across Orange County")
-  [Min 3 differentiators with mechanisms. One contrast statement. One proof signal.]
-</section>
-
-Section 3 — Special Offers (omit this section if no offer data provided)
-<section id="offers">...</section>
-
-Section 4 — CTA Block Primary (50–75 words)
-<section id="cta-primary">
-  <h2>[Action-oriented H2]</h2>
-  [Differentiated CTA — not "Contact us today". Include phone.]
-</section>
-
-Section 5 — Features and Benefits (150–200 words)
-<section id="features">
-  <h2>[Benefit-focused H2]</h2>
-  <ul>[Min 4 feature/benefit pairs — outcome-first, ICP pain points addressed]</ul>
-</section>
-
-Section 6 — Main Service Body (800–1400 words)
-<section id="services">
-  Use the COMPETITOR H2/H3 HEADINGS from the SERP data above as your structural baseline.
-  Cover every topic competitors cover, then add H2/H3 sections for topics competitors DON'T cover
-  that would more fully answer the user's implied query — this is called INFORMATION GAIN and
-  is critical for outranking competitors.
-
-  Structure rules:
-  - You may use MULTIPLE H2s within this section if the content warrants separate major topics
-  - Each H2 should represent a distinct major topic or service category
-  - Use H3s under each H2 for sub-services, use cases, or scenarios
-  - Every heading: include service/city naturally where it fits (not forced)
-  - Open with a primary service description paragraph (answer-first)
-  - Each H3: 2–4 sentences covering description, real-world scenario, differentiator, geo reference
-  - Naturally weave in competitor entities and phrases from SERP data throughout
-  - Do NOT copy competitor headings verbatim — use them to understand topic coverage, then write
-    headings that are more specific, benefit-oriented, or locally relevant
-</section>
-
-Section 7 — Testimonials (include only if reviews provided above; omit if none)
-<section id="testimonials">
-  <h2>[Social proof H2]</h2>
-  [Verbatim reviews only — first name + last initial, stars, date, full text]
-</section>
-
-Section 8 — CTA Block Secondary (50–75 words — different angle from Section 4)
-<section id="cta-secondary">...</section>
-
-Section 9 — Getting Started (150–200 words)
-<section id="getting-started">
-  <h2>[Process-focused H2]</h2>
-  <ol>[3–5 steps, plain language, close with CTA]</ol>
-</section>
-
-Section 10 — Geographic / Local SEO Section (200–300 words)
-<section id="local">
-  <h2>[City + service in heading]</h2>
-  [City + min 3 neighborhoods in sentence context (not just a list) + min 1 landmark + min 2 streets + zip codes (min 3). Use only real, verifiable geographic details. If neighborhood/landmark/street/zip data is not provided in the business data above, include only what you are certain is accurate for {city}. Do not invent or guess street names, zip codes, or landmarks. Coverage + response time.]
-</section>
-
-Section 11 — CTA Block Tertiary (50–75 words — urgency-forward)
-<section id="cta-tertiary">...</section>
-
-Section 12 — FAQ (min 6, max 10 entries — 40–80 words each)
-<section id="faq">
-  <h2>Frequently Asked Questions</h2>
-  [Must cover: availability, response time, coverage area, emergency service. Answer-first. Geographic + availability signal in each proximity FAQ.]
-</section>
-
-Section 13 — Schema (delivered AFTER </article> as a separate <script> block)
-Generate 3 schema blocks as a single JSON-LD array inside one <script type="application/ld+json"> tag:
-1. LocalBusiness (subtype from category: Plumber/HVACBusiness/Electrician etc.)
-2. Service
-3. FAQPage (auto-extracted from Section 12)
-
-HARD RULES — NEVER:
-- Start with "Welcome to [Brand]"
-- Use "We are a [city] [service] company" as first sentence
-- Write "Contact us today" as standalone CTA
-- Use generic headings ("About Us", "Our Services", "Why Choose Us")
-- Use "near me" literally in body content
-- Include placeholder text like [Insert here]
-- Fabricate reviews
-- Use vague differentiators ("trusted", "professional", "high quality") without a mechanism
-- Invent or guess phone numbers, addresses, hours, zip codes, street names, or landmarks not explicitly provided in the business data above"""
+{serp_ctx}"""
 
     try:
         msg = await client.messages.create(
             model=GENERATION_MODEL,
-            max_tokens=8000,
-            messages=[{"role": "user", "content": prompt}],
+            max_tokens=6000,
+            system=[{"type": "text", "text": _GEN_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user_prompt}],
         )
     except Exception as e:
         logger.exception("Claude generation error")
@@ -2921,9 +2948,7 @@ async def reoptimize_page(request: Request, body: ReoptimizePageRequest):
         for d in body.deficiencies
     )
 
-    prompt = f"""You are an expert local SEO content writer. Fix the SEO deficiencies in the page below by updating its text content only.
-
-BUSINESS: {body.business_name} | CATEGORY: {body.gbp_category}
+    user_prompt = f"""BUSINESS: {body.business_name} | CATEGORY: {body.gbp_category}
 KEYWORD: {body.keyword} | CITY: {city}
 PHONE: {body.phone or "[PHONE]"}
 ADDRESS: {body.address or "Not provided"}
@@ -2933,27 +2958,14 @@ DEFICIENCIES TO FIX:
 {deficiency_text}
 
 EXISTING PAGE:
-{existing_html[:12000]}
-
-STRICT RULES — follow exactly:
-1. TEXT ONLY: Only change text content (words between HTML tags). You may also update SEO-relevant attributes: alt, title, meta[content], og:title, og:description, aria-label, and JSON-LD schema text values.
-2. PRESERVE EVERYTHING ELSE: Do not change any element types, CSS classes, IDs, data-* attributes, href, src, or any non-content attributes. Do not add, remove, or reorder any HTML elements.
-3. Fix every deficiency listed above through word choices, phrasing, and copy — not by adding new HTML sections.
-4. Naturally incorporate competitor entities and phrases from SERP data where missing.
-5. Do not fabricate reviews or placeholder text. Do not use "near me" literally in body copy.
-
-Return your response in EXACTLY this format (do not deviate):
-
-<<<NOTES>>>
-List each HTML/CSS structural change that would further improve SEO but that you could NOT make because it requires adding/moving/removing elements or changing classes. Be specific (e.g. "Add an FAQ section with schema markup", "H1 tag is missing — the page title is wrapped in a <div> instead"). If none, write "None."
-<<<HTML>>>
-[Complete page HTML with ONLY text content and SEO attributes changed]"""
+{existing_html[:12000]}"""
 
     try:
         msg = await client.messages.create(
             model=GENERATION_MODEL,
-            max_tokens=8000,
-            messages=[{"role": "user", "content": prompt}],
+            max_tokens=6000,
+            system=[{"type": "text", "text": _REOPT_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user_prompt}],
         )
     except Exception as e:
         logger.exception("Claude reoptimize error")
