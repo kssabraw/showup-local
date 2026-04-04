@@ -77,6 +77,7 @@ export function useCreatePressRelease() {
       keyword: string;
       location: string;
       page_title: string;
+      content_html: string;
     }) => {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");
@@ -126,8 +127,7 @@ export function useApprovePressRelease() {
 export function useRequestChanges() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ id, feedback }: { id: string; feedback: string }) => {
-      // Fetch current generation_count first
+    mutationFn: async ({ id, feedback, new_content_html }: { id: string; feedback: string; new_content_html: string }) => {
       const { data: current, error: fetchErr } = await supabase
         .from("press_releases" as any)
         .select("generation_count, business_id")
@@ -142,7 +142,7 @@ export function useRequestChanges() {
           status: "pending_user_approval",
           user_feedback: feedback,
           generation_count: pr.generation_count + 1,
-          content_html: null, // cleared until regenerated
+          content_html: new_content_html,
           updated_at: new Date().toISOString(),
         })
         .eq("id", id)

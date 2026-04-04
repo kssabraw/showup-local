@@ -247,6 +247,32 @@ export const nlp = {
     differentiators: unknown[];
     analysis_status: string;
   }>("/analyze-business", body, signal),
+
+  generatePressRelease: (
+    body: {
+      business_name: string;
+      website: string;
+      gbp_place_id?: string | null;
+      address?: string | null;
+      gbp_category: string;
+      keyword: string;
+      location: string;
+      page_content: string;
+      related_keywords?: string[];
+      entities?: string[];
+      quadgrams?: string[];
+      spokesperson: string;
+      contact_email: string;
+      page_url?: string;
+      additional_links?: { url: string; anchor_text: string }[];
+    },
+    signal?: AbortSignal,
+  ) => nlpPost<{
+    content_html: string;
+    word_count: number;
+    gbp_embed_html: string | null;
+    token_usage: Record<string, unknown>;
+  }>("/generate-press-release", body, signal),
 };
 
 /** Purchase a credit top-up pack. Returns a Stripe Checkout URL once Stripe is configured. */

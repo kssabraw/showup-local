@@ -3792,3 +3792,169 @@ async def check_rankability(request: Request, body: RankabilityRequest):
         match_count=match_count,
         total_results=len(local_pack_items),
     )
+
+
+# ── /generate-press-release ───────────────────────────────────────────────────
+
+_PRESS_RELEASE_SYSTEM_PROMPT = """You are an SEO press release journalist specialising in local service businesses. You write detailed, neutral, journalistic press releases that are optimised for search engines.
+
+MANDATORY RULES:
+1. Body word count: 650–800 words. After writing, count the words in the body (everything between the title and the About section). If under 650, add extra paragraphs until the minimum is met.
+2. Write in strict 3rd-person neutral tone. Never promotional.
+3. Forbidden words: "top-notch", "look no further", "you", "yours". No questions anywhere.
+4. No hyperlinks or anchor text in the press release body — links are handled separately.
+5. Write a dedicated section (with an <h2>) for each related keyword provided.
+6. Weave in as many of the provided quadgrams and entities as possible while maintaining readability.
+7. Feature the main keyword in the title and 2–3 times in the body.
+8. The ONLY allowable CTA is the contact line — no other calls to action.
+
+TITLE FORMAT: "[main keyword] (provided by|now provided by|offered by|now offered by|proudly offered by|is delighted to offer|expanded by) [business name]"
+Readability is the priority — fix grammar as needed (e.g. "Bronx Car Accident Legal Services Now Offered By Kerner Law Group" not "Bronx Car Accident Attorney Now Offered By Kerner Law Group").
+
+FIRST PARAGRAPH: Must contain an RDF triple sentence that directly states the business name, the service, and the location. Example: "ABC Plumbing offers emergency plumbing services in Chicago." Focus on grammatical correctness and readability.
+
+QUOTE: Include one positive quote attributed to the spokesperson.
+
+OUTPUT FORMAT: Return clean HTML only — no markdown, no code fences, no explanation.
+Use this exact structure:
+<h1>Title</h1>
+<p>First paragraph with RDF triple...</p>
+[body paragraphs and h2 sections]
+<blockquote><p>"Quote text." — Spokesperson Name, Business Name</p></blockquote>
+<p>For more information, please contact SPOKESPERSON_NAME at PAGE_URL</p>
+<h2>About BUSINESS_NAME</h2>
+<p>About paragraph...</p>
+<hr>
+<p><strong>Reminder:</strong> Place your additional links in the body above. ADDITIONAL_LINKS_LIST Include your GBP embed iframe: GBP_EMBED_CODE</p>
+<p><strong>Main keyword:</strong> MAIN_KEYWORD</p>
+<p><strong>Related keywords used:</strong> RELATED_KEYWORDS_LIST</p>"""
+
+
+class AdditionalLink(BaseModel):
+    url: str
+    anchor_text: str
+
+
+class PressReleaseGenerationRequest(BaseModel):
+    # Business info
+    business_name: str
+    website: str
+    gbp_place_id: Optional[str] = None
+    address: Optional[str] = None
+    gbp_category: str
+    # Content
+    keyword: str
+    location: str
+    page_content: str        # plain text of the generated page
+    # SEO signals from keyword analysis
+    related_keywords: List[str] = []   # top terms
+    entities: List[str] = []           # Google entity names
+    quadgrams: List[str] = []          # top quadgram phrases
+    # User-supplied inputs
+    spokesperson: str
+    contact_email: str
+    page_url: Optional[str] = None     # defaults to website
+    additional_links: List[AdditionalLink] = []
+
+
+class PressReleaseGenerationResponse(BaseModel):
+    content_html: str
+    word_count: int
+    gbp_embed_html: Optional[str]
+    token_usage: dict
+
+
+@app.post('/generate-press-release', response_model=PressReleaseGenerationResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("5/minute")
+async def generate_press_release(request: Request, body: PressReleaseGenerationRequest):
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+
+    import anthropic as _anthropic
+    client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+    city = body.location.split(",")[0].strip()
+    page_url = (body.page_url or body.website or "").strip()
+    page_text = body.page_content[:5000]
+
+    # Build related keywords block (cap at 5 for the spec requirement)
+    related_kw = body.related_keywords[:8]
+    entities_list = body.entities[:15]
+    quadgrams_list = body.quadgrams[:15]
+
+    # Additional links block
+    add_links_text = ""
+    if body.additional_links:
+        add_links_text = "Additional links to place (use branded anchor text as shown):\n" + \
+            "\n".join(f"  - Anchor: \"{l.anchor_text}\" → URL: {l.url}" for l in body.additional_links)
+
+    # GBP embed
+    gbp_embed_html: Optional[str] = None
+    if body.gbp_place_id:
+        gbp_embed_html = (
+            f'<iframe src="https://maps.google.com/maps?q=place_id:{body.gbp_place_id}&output=embed" '
+            f'width="600" height="450" style="border:0;" allowfullscreen loading="lazy" '
+            f'referrerpolicy="no-referrer-when-downgrade"></iframe>'
+        )
+
+    user_prompt = f"""BUSINESS DATA
+Name: {body.business_name}
+Category: {body.gbp_category}
+Location: {city}
+Address: {body.address or ""}
+Website: {body.website}
+Spokesperson: {body.spokesperson}
+Contact email: {body.contact_email}
+Page URL (use in CTA): {page_url}
+
+MAIN KEYWORD: {body.keyword}
+
+RELATED KEYWORDS (write a section for each, feature each at least once):
+{chr(10).join(f"  - {kw}" for kw in related_kw)}
+
+ENTITIES (weave as many as possible):
+{chr(10).join(f"  - {e}" for e in entities_list)}
+
+QUADGRAMS (weave as many as possible):
+{chr(10).join(f"  - {q}" for q in quadgrams_list)}
+
+PAGE CONTENT (use as factual source material — do not fabricate):
+{page_text}
+
+{add_links_text}
+
+Write the press release now. Remember: minimum 650 words in the body. Check your word count before finishing."""
+
+    try:
+        msg = await client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4000,
+            system=[{"type": "text", "text": _PRESS_RELEASE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+    except Exception:
+        logger.exception("Press release generation error")
+        raise HTTPException(status_code=502, detail="Press release generation temporarily unavailable")
+
+    content_html = msg.content[0].text.strip()
+
+    # Strip accidental markdown fences
+    if content_html.startswith("```"):
+        content_html = re.sub(r'^```(?:html)?\s*', '', content_html)
+        content_html = re.sub(r'\s*```$', '', content_html.strip())
+
+    # Rough word count on plain text
+    import html as _html
+    plain = re.sub(r'<[^>]+>', ' ', content_html)
+    plain = _html.unescape(plain)
+    word_count = len(plain.split())
+
+    token_rec = _token_record("generate-press-release", "claude-sonnet-4-6",
+                              msg.usage.input_tokens, msg.usage.output_tokens)
+
+    return PressReleaseGenerationResponse(
+        content_html=content_html,
+        word_count=word_count,
+        gbp_embed_html=gbp_embed_html,
+        token_usage=token_rec,
+    )

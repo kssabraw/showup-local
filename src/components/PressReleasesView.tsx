@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Loader2, FileText, CheckCircle, Clock, Send, RotateCcw, Download, ChevronLeft } from "lucide-react";
+import { Loader2, FileText, CheckCircle, RotateCcw, Download, Send } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { nlp } from "@/lib/nlp-client";
 import { useBusinessProfiles } from "@/hooks/useBusinessProfiles";
 import { useGeneratedPages } from "@/hooks/useGeneratedPages";
 import {
@@ -11,8 +13,10 @@ import {
   useRequestChanges,
   type PressRelease,
 } from "@/hooks/usePressReleases";
+import PressReleaseFormModal, { type PressReleaseFormValues } from "@/components/PressReleaseFormModal";
+import DOMPurify from "dompurify";
 
-// ── Status helpers ─────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 const STATUS_LABEL: Record<PressRelease["status"], string> = {
   pending_user_approval: "Awaiting Your Approval",
@@ -36,17 +40,51 @@ function StatusBadge({ status }: { status: PressRelease["status"] }) {
   );
 }
 
-// ── Review sub-view ────────────────────────────────────────────────────────────
+/** Flatten related_keywords JSON (all zones) into a deduplicated array of term strings. */
+function extractRelatedKeywords(rk: unknown): string[] {
+  if (!rk || typeof rk !== "object") return [];
+  const zones = Object.values(rk as Record<string, unknown[]>);
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  for (const zone of zones) {
+    if (!Array.isArray(zone)) continue;
+    for (const item of zone) {
+      const t = (item as { term?: string }).term;
+      if (t && !seen.has(t)) { seen.add(t); terms.push(t); }
+    }
+  }
+  // Sort by score desc
+  const scored = zones.flat().filter(Boolean) as { term: string; score: number }[];
+  const byTerm: Record<string, number> = {};
+  for (const s of scored) if (s.term) byTerm[s.term] = Math.max(byTerm[s.term] ?? 0, s.score ?? 0);
+  return terms.sort((a, b) => (byTerm[b] ?? 0) - (byTerm[a] ?? 0)).slice(0, 8);
+}
+
+function extractQuadgrams(tq: unknown): string[] {
+  if (!Array.isArray(tq)) return [];
+  return (tq as { phrase?: string }[]).map((q) => q.phrase ?? "").filter(Boolean).slice(0, 15);
+}
+
+function extractEntities(ge: unknown): string[] {
+  if (!Array.isArray(ge)) return [];
+  return (ge as { name?: string }[]).map((e) => e.name ?? "").filter(Boolean).slice(0, 15);
+}
+
+// ── Review sub-view ───────────────────────────────────────────────────────────
 
 function PressReleaseReview({
   pr,
+  business,
   onBack,
 }: {
   pr: PressRelease;
+  business: { website?: string | null; gbp_place_id?: string | null; gbp_category: string; address?: string | null; business_name: string } | undefined;
   onBack: () => void;
 }) {
   const [feedback, setFeedback] = useState("");
   const [showFeedback, setShowFeedback] = useState(false);
+  const [showFormModal, setShowFormModal] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
 
   const approve = useApprovePressRelease();
   const requestChanges = useRequestChanges();
@@ -57,12 +95,46 @@ function PressReleaseReview({
     onBack();
   };
 
-  const handleRequestChanges = async () => {
+  const handleRegenerateSubmit = async (values: PressReleaseFormValues) => {
     if (!feedback.trim()) return;
-    await requestChanges.mutateAsync({ id: pr.id, feedback: feedback.trim() });
-    setFeedback("");
-    setShowFeedback(false);
-    onBack();
+    setRegenerating(true);
+    try {
+      // Fetch analysis data for this keyword/location
+      const { data: analysis } = await supabase
+        .from("keyword_analyses")
+        .select("related_keywords, top_quadgrams, google_entities")
+        .eq("business_id", pr.business_id)
+        .eq("keyword", pr.keyword)
+        .eq("location", pr.location)
+        .maybeSingle();
+
+      const result = await nlp.generatePressRelease({
+        business_name: business?.business_name ?? "",
+        website: business?.website ?? "",
+        gbp_place_id: business?.gbp_place_id,
+        address: business?.address,
+        gbp_category: business?.gbp_category ?? "",
+        keyword: pr.keyword,
+        location: pr.location,
+        page_content: "",  // no page content on regeneration — use feedback
+        related_keywords: extractRelatedKeywords(analysis?.related_keywords),
+        entities: extractEntities(analysis?.google_entities),
+        quadgrams: extractQuadgrams(analysis?.top_quadgrams),
+        ...values,
+      });
+
+      await requestChanges.mutateAsync({
+        id: pr.id,
+        feedback: feedback.trim(),
+        new_content_html: result.content_html,
+      });
+
+      setFeedback("");
+      setShowFeedback(false);
+    } finally {
+      setRegenerating(false);
+      setShowFormModal(false);
+    }
   };
 
   return (
@@ -80,23 +152,22 @@ function PressReleaseReview({
         </div>
       </div>
 
-      {/* Content area */}
+      {/* Content */}
       <div className="bg-card border border-border rounded-xl overflow-hidden">
         <div className="px-6 py-4 border-b border-border flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-foreground">Press Release Content</h2>
+          <h2 className="text-sm font-semibold text-foreground">Press Release</h2>
           <span className="text-xs text-muted-foreground">Generation #{pr.generation_count}</span>
         </div>
         <div className="px-6 py-5">
           {pr.content_html ? (
             <div
               className="prose prose-sm max-w-none text-foreground"
-              dangerouslySetInnerHTML={{ __html: pr.content_html }}
+              dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(pr.content_html) }}
             />
           ) : (
             <div className="flex flex-col items-center justify-center py-12 gap-3 text-muted-foreground">
               <Loader2 className="w-6 h-6 animate-spin" />
-              <p className="text-sm">Press release is being generated…</p>
-              <p className="text-xs opacity-60">This usually takes 30–60 seconds</p>
+              <p className="text-sm">Generating press release…</p>
             </div>
           )}
         </div>
@@ -105,7 +176,7 @@ function PressReleaseReview({
       {/* Previous feedback */}
       {pr.user_feedback && (
         <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl px-5 py-4">
-          <p className="text-xs font-semibold text-amber-600 mb-1">Your previous feedback</p>
+          <p className="text-xs font-semibold text-amber-600 mb-1">Previous feedback</p>
           <p className="text-sm text-foreground">{pr.user_feedback}</p>
         </div>
       )}
@@ -121,9 +192,7 @@ function PressReleaseReview({
               <div key={report.id} className="px-6 py-3 flex items-center justify-between">
                 <div>
                   <p className="text-sm font-medium text-foreground">{report.pdf_filename}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {new Date(report.uploaded_at).toLocaleDateString()}
-                  </p>
+                  <p className="text-xs text-muted-foreground">{new Date(report.uploaded_at).toLocaleDateString()}</p>
                 </div>
                 <a
                   href={report.pdf_url}
@@ -139,11 +208,11 @@ function PressReleaseReview({
         </div>
       )}
 
-      {/* Actions — only when awaiting approval and content is ready */}
+      {/* Actions */}
       {pr.status === "pending_user_approval" && pr.content_html && (
         <div className="bg-card border border-border rounded-xl p-6 space-y-3">
           <p className="text-sm text-muted-foreground">
-            Review the press release above. If it looks good, approve it and we'll syndicate it across news outlets. If you'd like changes, tell us what to improve.
+            Review the press release above. Approve to submit for syndication, or request changes with feedback.
           </p>
 
           {!showFeedback ? (
@@ -157,11 +226,7 @@ function PressReleaseReview({
                   ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Submitting…</>
                   : <><CheckCircle className="w-4 h-4 mr-2" /> Approve & Submit</>}
               </Button>
-              <Button
-                variant="outline"
-                className="flex-1 font-semibold py-5"
-                onClick={() => setShowFeedback(true)}
-              >
+              <Button variant="outline" className="flex-1 font-semibold py-5" onClick={() => setShowFeedback(true)}>
                 <RotateCcw className="w-4 h-4 mr-2" /> Request Changes
               </Button>
             </div>
@@ -170,31 +235,37 @@ function PressReleaseReview({
               <textarea
                 className="w-full bg-background border border-border rounded-lg px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-accent/50 resize-none"
                 rows={4}
-                placeholder="Describe what you'd like changed — e.g. 'Focus more on our emergency response time' or 'Remove the pricing mention in paragraph 2'"
+                placeholder="Describe what to improve — e.g. 'Focus more on the 24/7 availability' or 'Remove the pricing mention in paragraph 2'"
                 value={feedback}
                 onChange={(e) => setFeedback(e.target.value)}
               />
               <div className="flex gap-3">
                 <Button
                   className="flex-1 bg-accent text-accent-foreground hover:opacity-90 font-semibold py-5"
-                  onClick={handleRequestChanges}
-                  disabled={!feedback.trim() || requestChanges.isPending}
+                  onClick={() => setShowFormModal(true)}
+                  disabled={!feedback.trim() || regenerating}
                 >
-                  {requestChanges.isPending
-                    ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Submitting…</>
-                    : "Submit Feedback"}
+                  {regenerating
+                    ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Regenerating…</>
+                    : "Regenerate with Feedback"}
                 </Button>
-                <Button
-                  variant="outline"
-                  className="font-semibold py-5"
-                  onClick={() => { setShowFeedback(false); setFeedback(""); }}
-                >
+                <Button variant="outline" className="font-semibold py-5" onClick={() => { setShowFeedback(false); setFeedback(""); }}>
                   Cancel
                 </Button>
               </div>
             </div>
           )}
         </div>
+      )}
+
+      {/* Re-gen form modal */}
+      {showFormModal && (
+        <PressReleaseFormModal
+          defaultPageUrl={business?.website ?? ""}
+          pageTitle={pr.page_title || pr.keyword}
+          onSubmit={handleRegenerateSubmit}
+          onClose={() => setShowFormModal(false)}
+        />
       )}
     </div>
   );
@@ -206,7 +277,7 @@ export default function PressReleasesView() {
   const [selectedBusinessId, setSelectedBusinessId] = useState<string | null>(null);
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
   const [reviewingPR, setReviewingPR] = useState<PressRelease | null>(null);
-  const [generating, setGenerating] = useState(false);
+  const [showFormModal, setShowFormModal] = useState(false);
 
   const { data: businesses = [], isLoading: businessesLoading } = useBusinessProfiles();
   const { data: pages = [], isLoading: pagesLoading } = useGeneratedPages(selectedBusinessId);
@@ -217,187 +288,213 @@ export default function PressReleasesView() {
   const selectedPage = pages.find((p) => p.id === selectedPageId);
 
   // Auto-select if only one business
-  if (!selectedBusinessId && businesses.length === 1) {
+  if (!selectedBusinessId && businesses.length === 1 && !businessesLoading) {
     setSelectedBusinessId(businesses[0].id);
   }
 
-  const handleGenerate = async () => {
-    if (!selectedPageId || !selectedBusinessId || !selectedPage) return;
-    setGenerating(true);
-    try {
-      const pr = await createPR.mutateAsync({
-        business_id: selectedBusinessId,
-        generated_page_id: selectedPageId,
-        keyword: selectedPage.keyword,
-        location: selectedPage.location,
-        page_title: selectedPage.page_title ?? selectedPage.keyword,
-      });
-      setSelectedPageId(null);
-      setReviewingPR(pr);
-    } finally {
-      setGenerating(false);
-    }
+  const handleGenerate = async (values: PressReleaseFormValues) => {
+    if (!selectedPageId || !selectedBusinessId || !selectedPage || !selectedBusiness) return;
+
+    // Fetch analysis data for this page
+    const { data: analysis } = await supabase
+      .from("keyword_analyses")
+      .select("related_keywords, top_quadgrams, google_entities")
+      .eq("business_id", selectedBusinessId)
+      .eq("keyword", selectedPage.keyword)
+      .eq("location", selectedPage.location)
+      .maybeSingle();
+
+    // Fetch page content for context
+    const { data: pageData } = await supabase
+      .from("generated_pages")
+      .select("content_html")
+      .eq("id", selectedPageId)
+      .single();
+
+    const pageText = pageData?.content_html
+      ? new DOMParser().parseFromString(pageData.content_html, "text/html").body.innerText.slice(0, 5000)
+      : "";
+
+    const result = await nlp.generatePressRelease({
+      business_name: selectedBusiness.business_name,
+      website: selectedBusiness.website ?? "",
+      gbp_place_id: selectedBusiness.gbp_place_id,
+      address: selectedBusiness.address,
+      gbp_category: selectedBusiness.gbp_category,
+      keyword: selectedPage.keyword,
+      location: selectedPage.location,
+      page_content: pageText,
+      related_keywords: extractRelatedKeywords(analysis?.related_keywords),
+      entities: extractEntities(analysis?.google_entities),
+      quadgrams: extractQuadgrams(analysis?.top_quadgrams),
+      ...values,
+    });
+
+    const pr = await createPR.mutateAsync({
+      business_id: selectedBusinessId,
+      generated_page_id: selectedPageId,
+      keyword: selectedPage.keyword,
+      location: selectedPage.location,
+      page_title: selectedPage.page_title ?? selectedPage.keyword,
+      content_html: result.content_html,
+    });
+
+    setSelectedPageId(null);
+    setShowFormModal(false);
+    setReviewingPR(pr);
   };
 
   if (reviewingPR) {
-    // Sync with latest data from hook
     const latest = pressReleases.find((pr) => pr.id === reviewingPR.id) ?? reviewingPR;
     return (
       <PressReleaseReview
         pr={latest}
+        business={selectedBusiness}
         onBack={() => setReviewingPR(null)}
       />
     );
   }
 
   return (
-    <div className="max-w-3xl space-y-6">
-      <div>
-        <h1 className="text-2xl font-display font-bold text-foreground">Press Releases</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Generate a press release from any page and we'll syndicate it across news outlets.
-        </p>
-      </div>
-
-      {/* Business selector */}
-      {businesses.length > 1 && (
-        <div className="bg-card border border-border rounded-xl px-5 py-4">
-          <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide block mb-2">
-            Business
-          </label>
-          <select
-            className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-accent/50"
-            value={selectedBusinessId ?? ""}
-            onChange={(e) => { setSelectedBusinessId(e.target.value || null); setSelectedPageId(null); }}
-          >
-            <option value="">Select a business…</option>
-            {businesses.map((b) => (
-              <option key={b.id} value={b.id}>{b.business_name}</option>
-            ))}
-          </select>
+    <>
+      <div className="max-w-3xl space-y-6">
+        <div>
+          <h1 className="text-2xl font-display font-bold text-foreground">Press Releases</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            Generate a press release from any page and we'll syndicate it across news outlets.
+          </p>
         </div>
-      )}
 
-      {businessesLoading && (
-        <div className="flex items-center justify-center py-12 text-muted-foreground gap-2">
-          <Loader2 className="w-4 h-4 animate-spin" />
-          <span className="text-sm">Loading…</span>
-        </div>
-      )}
-
-      {selectedBusinessId && (
-        <>
-          {/* Generate new press release */}
-          <div className="bg-card border border-border rounded-xl overflow-hidden">
-            <div className="px-6 py-4 border-b border-border">
-              <h2 className="text-sm font-semibold text-foreground">Generate New Press Release</h2>
-              <p className="text-xs text-muted-foreground mt-0.5">Select a page to generate a press release for</p>
-            </div>
-
-            {pagesLoading ? (
-              <div className="flex items-center justify-center py-8 text-muted-foreground gap-2">
-                <Loader2 className="w-4 h-4 animate-spin" />
-                <span className="text-sm">Loading pages…</span>
-              </div>
-            ) : pages.length === 0 ? (
-              <div className="px-6 py-8 text-center text-muted-foreground">
-                <FileText className="w-8 h-8 mx-auto mb-2 opacity-30" />
-                <p className="text-sm">No generated pages yet for {selectedBusiness?.business_name}.</p>
-                <p className="text-xs mt-1">Generate a page from the Content tab first.</p>
-              </div>
-            ) : (
-              <div className="divide-y divide-border">
-                {pages.map((page) => (
-                  <label
-                    key={page.id}
-                    className="flex items-center gap-4 px-6 py-3 hover:bg-muted/30 transition-colors cursor-pointer"
-                  >
-                    <input
-                      type="checkbox"
-                      className="accent-accent w-4 h-4 shrink-0"
-                      checked={selectedPageId === page.id}
-                      onChange={() => setSelectedPageId(selectedPageId === page.id ? null : page.id)}
-                    />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-foreground truncate">
-                        {page.page_title || page.keyword}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {page.keyword} · {page.location.split(",")[0]} · {new Date(page.created_at).toLocaleDateString()}
-                      </p>
-                    </div>
-                    {page.composite_score != null && (
-                      <span className={`text-xs font-semibold shrink-0 ${
-                        page.composite_score >= 80 ? "text-green-500"
-                        : page.composite_score >= 60 ? "text-amber-500"
-                        : "text-red-500"
-                      }`}>
-                        {page.composite_score}/100
-                      </span>
-                    )}
-                  </label>
-                ))}
-              </div>
-            )}
-
-            {selectedPageId && (
-              <div className="px-6 py-4 border-t border-border bg-muted/20">
-                <Button
-                  className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-5"
-                  onClick={handleGenerate}
-                  disabled={generating}
-                >
-                  {generating
-                    ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Generating Press Release…</>
-                    : <><Send className="w-4 h-4 mr-2" /> Generate Press Release</>}
-                </Button>
-                <p className="text-xs text-muted-foreground text-center mt-2">
-                  Press release syndication is a paid add-on — pricing shown at confirmation.
-                </p>
-              </div>
-            )}
+        {/* Business selector */}
+        {businesses.length > 1 && (
+          <div className="bg-card border border-border rounded-xl px-5 py-4">
+            <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide block mb-2">Business</label>
+            <select
+              className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-accent/50"
+              value={selectedBusinessId ?? ""}
+              onChange={(e) => { setSelectedBusinessId(e.target.value || null); setSelectedPageId(null); }}
+            >
+              <option value="">Select a business…</option>
+              {businesses.map((b) => (
+                <option key={b.id} value={b.id}>{b.business_name}</option>
+              ))}
+            </select>
           </div>
+        )}
 
-          {/* Existing press releases */}
-          {(prsLoading || pressReleases.length > 0) && (
+        {businessesLoading && (
+          <div className="flex items-center justify-center py-12 text-muted-foreground gap-2">
+            <Loader2 className="w-4 h-4 animate-spin" /><span className="text-sm">Loading…</span>
+          </div>
+        )}
+
+        {selectedBusinessId && (
+          <>
+            {/* Generate new */}
             <div className="bg-card border border-border rounded-xl overflow-hidden">
               <div className="px-6 py-4 border-b border-border">
-                <h2 className="text-sm font-semibold text-foreground">Your Press Releases</h2>
+                <h2 className="text-sm font-semibold text-foreground">Generate New Press Release</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">Select a page to generate a press release for</p>
               </div>
 
-              {prsLoading ? (
+              {pagesLoading ? (
                 <div className="flex items-center justify-center py-8 text-muted-foreground gap-2">
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span className="text-sm">Loading…</span>
+                  <Loader2 className="w-4 h-4 animate-spin" /><span className="text-sm">Loading pages…</span>
+                </div>
+              ) : pages.length === 0 ? (
+                <div className="px-6 py-8 text-center text-muted-foreground">
+                  <FileText className="w-8 h-8 mx-auto mb-2 opacity-30" />
+                  <p className="text-sm">No generated pages yet for {selectedBusiness?.business_name}.</p>
+                  <p className="text-xs mt-1">Generate a page from the Content tab first.</p>
                 </div>
               ) : (
                 <div className="divide-y divide-border">
-                  {pressReleases.map((pr) => (
-                    <div key={pr.id} className="px-6 py-4 flex items-center gap-4">
+                  {pages.map((page) => (
+                    <label key={page.id} className="flex items-center gap-4 px-6 py-3 hover:bg-muted/30 transition-colors cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="accent-accent w-4 h-4 shrink-0"
+                        checked={selectedPageId === page.id}
+                        onChange={() => setSelectedPageId(selectedPageId === page.id ? null : page.id)}
+                      />
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-foreground truncate">
-                          {pr.page_title || pr.keyword}
-                        </p>
-                        <p className="text-xs text-muted-foreground mt-0.5">
-                          {pr.keyword} · {pr.location.split(",")[0]} · {new Date(pr.created_at).toLocaleDateString()}
+                        <p className="text-sm font-medium text-foreground truncate">{page.page_title || page.keyword}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {page.keyword} · {page.location.split(",")[0]} · {new Date(page.created_at).toLocaleDateString()}
                         </p>
                       </div>
-                      <StatusBadge status={pr.status} />
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setReviewingPR(pr)}
-                      >
-                        {pr.status === "pending_user_approval" ? "Review" : "View"}
-                      </Button>
-                    </div>
+                      {page.composite_score != null && (
+                        <span className={`text-xs font-semibold shrink-0 ${
+                          page.composite_score >= 80 ? "text-green-500"
+                          : page.composite_score >= 60 ? "text-amber-500"
+                          : "text-red-500"
+                        }`}>
+                          {page.composite_score}/100
+                        </span>
+                      )}
+                    </label>
                   ))}
                 </div>
               )}
+
+              {selectedPageId && (
+                <div className="px-6 py-4 border-t border-border bg-muted/20">
+                  <Button
+                    className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-5"
+                    onClick={() => setShowFormModal(true)}
+                  >
+                    <Send className="w-4 h-4 mr-2" /> Generate Press Release
+                  </Button>
+                  <p className="text-xs text-muted-foreground text-center mt-2">
+                    Press release syndication is a paid add-on — pricing shown at confirmation.
+                  </p>
+                </div>
+              )}
             </div>
-          )}
-        </>
+
+            {/* Existing press releases */}
+            {(prsLoading || pressReleases.length > 0) && (
+              <div className="bg-card border border-border rounded-xl overflow-hidden">
+                <div className="px-6 py-4 border-b border-border">
+                  <h2 className="text-sm font-semibold text-foreground">Your Press Releases</h2>
+                </div>
+                {prsLoading ? (
+                  <div className="flex items-center justify-center py-8 text-muted-foreground gap-2">
+                    <Loader2 className="w-4 h-4 animate-spin" /><span className="text-sm">Loading…</span>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-border">
+                    {pressReleases.map((pr) => (
+                      <div key={pr.id} className="px-6 py-4 flex items-center gap-4">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-foreground truncate">{pr.page_title || pr.keyword}</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            {pr.keyword} · {pr.location.split(",")[0]} · {new Date(pr.created_at).toLocaleDateString()}
+                          </p>
+                        </div>
+                        <StatusBadge status={pr.status} />
+                        <Button variant="outline" size="sm" onClick={() => setReviewingPR(pr)}>
+                          {pr.status === "pending_user_approval" ? "Review" : "View"}
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Form modal */}
+      {showFormModal && selectedPage && (
+        <PressReleaseFormModal
+          defaultPageUrl={selectedBusiness?.website ?? ""}
+          pageTitle={selectedPage.page_title ?? selectedPage.keyword}
+          onSubmit={handleGenerate}
+          onClose={() => setShowFormModal(false)}
+        />
       )}
-    </div>
+    </>
   );
 }
