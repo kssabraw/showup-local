@@ -226,7 +226,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         has_map_pack: false, competitors: [], ranking_categories: [],
         category_match: "none", distance_ok: true,
         keyword_in_competitor_names: 0, competitor_name_examples: [],
-        in_maps_results: false, is_sab: false, sab_pack_mismatch: false,
+        in_maps_results: false, maps_position: undefined, is_sab: false, sab_pack_mismatch: false,
         physical_competitors_in_pack: 0,
         message: "Could not retrieve map pack data.", match_count: 0, total_results: 0,
       });
@@ -1163,7 +1163,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                     <p className="text-amber-600">⚠ {rankability.keyword_in_competitor_names} competitor(s) have keyword in name: {rankability.competitor_name_examples.join(", ")}</p>
                   )}
                   {rankability.in_maps_results && (
-                    <p className="text-green-700">✓ Business appears in Google Maps results</p>
+                    <p className="text-green-700">✓ Business appears at position {rankability.maps_position} in Google Maps top 10</p>
                   )}
                   {rankability.category_match === "none" && (
                     <p className="text-red-600">✗ GBP category mismatch — pack uses different categories</p>

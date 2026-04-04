@@ -3490,8 +3490,9 @@ class RankabilityResponse(BaseModel):
     keyword_in_competitor_names: int = 0  # count of 3-pack with keyword in name
     competitor_name_examples: List[str] = []
 
-    # Organic presence
+    # Google Maps top-10 presence
     in_maps_results: bool = False
+    maps_position: Optional[int] = None  # 1–10 if found, None otherwise
 
     # SAB vs physical pack
     is_sab: bool = False
@@ -3502,6 +3503,47 @@ class RankabilityResponse(BaseModel):
     message: str = ""
     match_count: int = 0
     total_results: int = 0
+
+
+DATAFORSEO_MAPS_ENDPOINT = "https://api.dataforseo.com/v3/serp/google/maps/live/regular"
+
+
+async def _fetch_maps_top10(
+    keyword: str,
+    loc_field: dict,
+    business_name: str,
+    credentials: str,
+) -> tuple[bool, int]:
+    """
+    Query DataForSEO Google Maps endpoint for top-10 results and check if
+    business_name appears. Returns (found, position) — position 0 if not found.
+    """
+    payload = [{
+        "keyword": keyword,
+        **loc_field,
+        "language_name": "English",
+        "depth": 10,
+    }]
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(
+                DATAFORSEO_MAPS_ENDPOINT,
+                headers={"Authorization": f"Basic {credentials}", "Content-Type": "application/json"},
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        for task in (data.get("tasks") or []):
+            for result in (task.get("result") or []):
+                for item in (result.get("items") or []):
+                    if item.get("type") == "maps_search":
+                        name = item.get("title", "")
+                        pos = item.get("rank_absolute") or item.get("rank_group") or 0
+                        if _keyword_in_name(business_name, name):
+                            return True, int(pos)
+    except Exception as e:
+        logger.warning(f"Maps top-10 check failed for '{keyword}': {e}")
+    return False, 0
 
 
 @app.post('/check-rankability', response_model=RankabilityResponse, dependencies=[Depends(verify_api_key)])
@@ -3515,8 +3557,8 @@ async def check_rankability(request: Request, body: RankabilityRequest):
     ).decode()
     loc_field = {"location_code": body.location_code} if body.location_code else {"location_name": body.location}
 
-    # Single DataForSEO SERP call — returns both organic + local_pack items
-    payload = [{
+    # Run SERP (organic + local_pack) and Google Maps top-10 in parallel
+    serp_payload = [{
         "keyword": body.keyword,
         **loc_field,
         "language_name": "English",
@@ -3524,19 +3566,31 @@ async def check_rankability(request: Request, body: RankabilityRequest):
         "se_domain": "google.com",
     }]
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            DATAFORSEO_ENDPOINT,
-            headers={"Authorization": f"Basic {credentials}", "Content-Type": "application/json"},
-            json=payload,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    async def _fetch_serp() -> dict:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                DATAFORSEO_ENDPOINT,
+                headers={"Authorization": f"Basic {credentials}", "Content-Type": "application/json"},
+                json=serp_payload,
+            )
+            resp.raise_for_status()
+            return resp.json()
 
-    # Parse items
+    maps_task = _fetch_maps_top10(body.keyword, loc_field, body.business_name or "", credentials) \
+        if body.business_name else None
+
+    if maps_task:
+        serp_data, (in_maps_results, maps_position) = await asyncio.gather(
+            _fetch_serp(), maps_task
+        )
+    else:
+        serp_data = await _fetch_serp()
+        in_maps_results, maps_position = False, 0
+
+    # Parse SERP items
     organic_items: List[dict] = []
     local_pack_items: List[dict] = []
-    for task in (data.get("tasks") or []):
+    for task in (serp_data.get("tasks") or []):
         for result in (task.get("result") or []):
             for item in (result.get("items") or []):
                 t = item.get("type", "")
@@ -3544,16 +3598,6 @@ async def check_rankability(request: Request, body: RankabilityRequest):
                     organic_items.append(item)
                 elif t == "local_pack":
                     local_pack_items.append(item)
-
-    # ── Business in Google Maps results ───────────────────────────────────────
-    # Check if the client's business name appears in any local_pack item returned
-    # by DataForSEO (typically the 3-pack; "More places" would need a Maps query).
-    in_maps_results = False
-    if body.business_name:
-        for item in local_pack_items:
-            if _keyword_in_name(body.business_name, item.get("title", "")):
-                in_maps_results = True
-                break
 
     # ── Local pack analysis ────────────────────────────────────────────────────
     has_map_pack = len(local_pack_items) > 0
@@ -3688,6 +3732,7 @@ async def check_rankability(request: Request, body: RankabilityRequest):
         keyword_in_competitor_names=keyword_name_count,
         competitor_name_examples=competitor_name_examples,
         in_maps_results=in_maps_results,
+        maps_position=maps_position if in_maps_results else None,
         is_sab=is_sab,
         sab_pack_mismatch=score_data.get("sab_pack_mismatch", False),
         physical_competitors_in_pack=physical_competitor_count,

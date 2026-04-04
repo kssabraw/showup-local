@@ -197,8 +197,9 @@ export interface RankabilityResult {
   keyword_in_competitor_names: number;
   competitor_name_examples: string[];
 
-  // Google Maps presence
+  // Google Maps presence (top-10 via dedicated Maps endpoint)
   in_maps_results: boolean;
+  maps_position?: number;  // 1–10 if found
 
   // SAB vs physical pack
   is_sab: boolean;
