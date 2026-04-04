@@ -1115,7 +1115,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             },
             {
               label: "Scraping & analysing competitor pages",
-              detail: "Up to 20 pages — TF-IDF, quadgrams, entities",
+              detail: "Reading competitor pages to find patterns and topics",
               done: generateProgress >= 65,
               active: generateProgress >= 15 && generateProgress < 65,
             },

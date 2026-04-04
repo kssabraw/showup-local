@@ -54,13 +54,13 @@ interface Props {
 }
 
 const ENGINE_LABELS: Record<string, string> = {
-  organic_ranking: "Organic Ranking",
-  gbp_maps: "GBP / Maps Relevance",
-  entity_establishment: "Entity Establishment",
-  icp_alignment: "ICP Alignment",
-  aeo_llm_retrieval: "AEO / LLM Retrieval",
-  geographic_legitimacy: "Geographic Legitimacy",
-  nearme_intent: "Hyperlocal / Near-Me",
+  organic_ranking: "Search Ranking",
+  gbp_maps: "Google Maps Relevance",
+  entity_establishment: "Brand Authority",
+  icp_alignment: "Customer Match",
+  aeo_llm_retrieval: "AI Search Visibility",
+  geographic_legitimacy: "Local Relevance",
+  nearme_intent: "Near Me Searches",
 };
 
 function statusColor(score: number) {

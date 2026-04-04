@@ -54,6 +54,16 @@ const ZONE_LABELS: Record<string, string> = {
   body: "Body",
 };
 
+const ENTITY_FRIENDLY_LABELS: Record<string, string> = {
+  LOCATION: "Place",
+  ORGANIZATION: "Company",
+  PERSON: "Person",
+  CONSUMER_GOOD: "Product",
+  EVENT: "Event",
+  OTHER: "Topic",
+  UNKNOWN: "Topic",
+};
+
 const ENTITY_TYPE_COLORS: Record<string, string> = {
   LOCATION: "bg-blue-500/10 text-blue-600",
   ORGANIZATION: "bg-purple-500/10 text-purple-600",
@@ -97,9 +107,6 @@ function KeywordZoneTable({ keywords, zone }: { keywords: RelatedKeyword[]; zone
               <span className="text-sm text-foreground font-medium">{kw.term}</span>
               <div className="flex items-center gap-3">
                 <SpreadBadge pct={kw.page_spread_pct} />
-                <span className="text-xs text-muted-foreground w-12 text-right">
-                  {(kw.score * 100).toFixed(1)}%
-                </span>
               </div>
             </div>
           ))}
@@ -528,7 +535,7 @@ function YourSiteTab({
   );
 }
 
-const TABS = ["Related Keywords", "Quadgrams", "Entities", "Sources", "Your Site"] as const;
+const TABS = ["Related Keywords", "Key Phrases", "Topics Google Sees", "Sources", "Your Site"] as const;
 type Tab = typeof TABS[number];
 
 const AnalysisResultsView = ({
@@ -574,8 +581,8 @@ const AnalysisResultsView = ({
       <div className="grid grid-cols-4 gap-4">
         {[
           { label: "Related Keywords", value: totalRelated },
-          { label: "Quadgrams", value: result.top_quadgrams.length },
-          { label: "Key Entities", value: result.google_entities.length },
+          { label: "Key Phrases", value: result.top_quadgrams.length },
+          { label: "Topics", value: result.google_entities.length },
           { label: "Existing Pages", value: existingPages.length },
         ].map(({ label, value }) => (
           <div key={label} className="bg-card border border-border rounded-xl p-4 text-center">
@@ -606,8 +613,7 @@ const AnalysisResultsView = ({
       {activeTab === "Related Keywords" && (
         <div className="space-y-3">
           <p className="text-xs text-muted-foreground">
-            Terms competitors use in each HTML zone, filtered to those appearing on ≥49% of competitor pages.
-            Score = topical closeness to your keyword.
+            Words and phrases used by the top-ranking competitor pages. Include these naturally in your content.
           </p>
           {(["title", "h1", "h2_h3", "body"] as const).map((zone) => (
             <KeywordZoneTable
@@ -624,11 +630,10 @@ const AnalysisResultsView = ({
         </div>
       )}
 
-      {activeTab === "Quadgrams" && (
+      {activeTab === "Key Phrases" && (
         <div className="space-y-3">
           <p className="text-xs text-muted-foreground">
-            4-word phrases from competitor paragraph text, filtered to those appearing on ≥49% of pages
-            and semantically related to your keyword.
+            Phrases that appear repeatedly across the top-ranking competitor pages. Weaving these into your content signals relevance to Google.
           </p>
           {result.top_quadgrams.length === 0 ? (
             <p className="text-sm text-muted-foreground text-center py-8">
@@ -639,12 +644,7 @@ const AnalysisResultsView = ({
               {result.top_quadgrams.map((q, i) => (
                 <div key={i} className="flex items-center justify-between px-4 py-3 hover:bg-muted/20 transition-colors">
                   <span className="text-sm text-foreground font-medium">"{q.phrase}"</span>
-                  <div className="flex items-center gap-3">
-                    <SpreadBadge pct={q.page_spread_pct} />
-                    <span className="text-xs text-muted-foreground w-16 text-right">
-                      sim {(q.similarity_score * 100).toFixed(1)}%
-                    </span>
-                  </div>
+                  <SpreadBadge pct={q.page_spread_pct} />
                 </div>
               ))}
             </div>
@@ -652,15 +652,14 @@ const AnalysisResultsView = ({
         </div>
       )}
 
-      {activeTab === "Entities" && (
+      {activeTab === "Topics Google Sees" && (
         <div className="space-y-3">
           <p className="text-xs text-muted-foreground">
-            Entities Google's NLP API considers highly central (salience ≥ 0.40) to competitor pages.
-            Recommended mentions = average times competitors reference this entity.
+            Topics Google considers central to competitor pages. Mentioning these helps Google understand what your page is about.
           </p>
           {result.google_entities.length === 0 ? (
             <p className="text-sm text-muted-foreground text-center py-8">
-              No high-salience entities found. Check that GOOGLE_NLP_API_KEY is set in Railway.
+              No key topics found across competitor pages.
             </p>
           ) : (
             <div className="border border-border rounded-lg overflow-hidden divide-y divide-border">
@@ -672,7 +671,7 @@ const AnalysisResultsView = ({
                         ENTITY_TYPE_COLORS[e.entity_type] || ENTITY_TYPE_COLORS.OTHER
                       }`}
                     >
-                      {e.entity_type}
+                      {ENTITY_FRIENDLY_LABELS[e.entity_type] || e.entity_type}
                     </span>
                     <span className="text-sm text-foreground font-medium">{e.name}</span>
                   </div>
@@ -680,9 +679,6 @@ const AnalysisResultsView = ({
                     <SpreadBadge pct={e.page_spread_pct} />
                     <span className="text-xs text-muted-foreground">
                       mention {e.recommended_mentions}×
-                    </span>
-                    <span className="text-xs text-muted-foreground w-16 text-right">
-                      sal {(e.mean_salience * 100).toFixed(1)}%
                     </span>
                   </div>
                 </div>
