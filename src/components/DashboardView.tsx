@@ -1,31 +1,12 @@
-import { useEffect, useState } from "react";
 import { FileText, MapPin, TrendingUp, Plus, ArrowRight } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
+import { useDashboardStats } from "@/hooks/useDashboardStats";
 
 interface Props {
   onNavigate: (item: string) => void;
 }
 
-interface Stats {
-  locations: number;
-  totalContent: number;
-}
-
 const DashboardView = ({ onNavigate }: Props) => {
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const load = async () => {
-      const [{ count: locations }, { count: totalContent }] = await Promise.all([
-        supabase.from("business_profiles").select("id", { count: "exact", head: true }),
-        supabase.from("generated_pages").select("id", { count: "exact", head: true }),
-      ]);
-      setStats({ locations: locations ?? 0, totalContent: totalContent ?? 0 });
-      setLoading(false);
-    };
-    load();
-  }, []);
+  const { data: stats, isLoading: loading } = useDashboardStats();
 
   const isEmpty = !loading && stats?.locations === 0;
 
@@ -77,7 +58,23 @@ const DashboardView = ({ onNavigate }: Props) => {
                 <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Avg. SEO Score</span>
                 <TrendingUp className="w-4 h-4 text-accent" />
               </div>
-              <p className="text-2xl font-display font-bold text-muted-foreground">—</p>
+              {stats?.avgScore != null ? (
+                <div className="flex items-end gap-2">
+                  <p className={`text-2xl font-display font-bold ${
+                    stats.avgScore >= 80 ? "text-green-500" :
+                    stats.avgScore >= 60 ? "text-amber-500" :
+                    "text-red-500"
+                  }`}>
+                    {stats.avgScore}
+                  </p>
+                  <p className="text-sm text-muted-foreground mb-0.5">/ 100</p>
+                </div>
+              ) : (
+                <div>
+                  <p className="text-2xl font-display font-bold text-muted-foreground">—</p>
+                  <p className="text-xs text-muted-foreground mt-1">Score pages to see your average</p>
+                </div>
+              )}
             </div>
           </>
         )}

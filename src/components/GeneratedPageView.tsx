@@ -2,9 +2,12 @@ import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Copy, Check, Save, Loader2, ExternalLink } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { nlp } from "@/lib/nlp-client";
+import { StepIndicator } from "@/components/StepIndicator";
+import { useInvalidateSavedPages } from "@/hooks/useSavedPages";
+import type { RelatedPageItem } from "@/lib/nlp-types";
 
-const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "";
-const API_KEY = import.meta.env.VITE_NLP_API_KEY ?? "";
+import type { TokenUsage, CostBreakdown } from "@/lib/nlp-types";
 
 interface Props {
   keyword: string;
@@ -14,8 +17,8 @@ interface Props {
   schemaJson: string;
   pageTitle: string;
   htmlCssNotes?: string[];
-  tokenUsage: Record<string, any>;
-  costBreakdown?: Record<string, any>;
+  tokenUsage: Partial<TokenUsage>;
+  costBreakdown?: Partial<CostBreakdown>;
   businessId: string;
   businessName: string;
   website?: string;
@@ -24,18 +27,6 @@ interface Props {
   onBack: () => void;
   onNewPage: () => void;
   onRelatedAction?: (action: { mode: "reoptimize" | "new"; keyword: string; existingUrl?: string }) => void;
-}
-
-interface RelatedPageItem {
-  keyword: string;
-  group: "parents" | "siblings" | "children";
-  status: "found" | "missing";
-  url?: string;
-  page_title?: string;
-  composite_score?: number;
-  composite_status?: string;
-  engine_scores?: Record<string, any>;
-  deficiencies?: Array<{ engine: string; issue: string; fix: string }>;
 }
 
 type RelatedSelection = Record<string, "reoptimize" | "new" | null>;
@@ -63,6 +54,8 @@ export default function GeneratedPageView({
   businessId, businessName, website, gbpCategory, address,
   onBack, onNewPage, onRelatedAction,
 }: Props) {
+  const invalidateSavedPages = useInvalidateSavedPages();
+  const [bannerDismissed, setBannerDismissed] = useState(false);
   const [copiedHtml, setCopiedHtml] = useState(false);
   const [copiedSchema, setCopiedSchema] = useState(false);
   const [copiedRichText, setCopiedRichText] = useState(false);
@@ -126,8 +119,9 @@ export default function GeneratedPageView({
       });
       if (error) throw error;
       setSaved(true);
+      invalidateSavedPages(); // refresh saved pages list + dashboard stats
     } catch (e: any) {
-      setSaveError(e.message || "Save failed");
+      setSaveError((e as Error).message || "Save failed");
     } finally {
       setSaving(false);
     }
@@ -138,29 +132,17 @@ export default function GeneratedPageView({
     setRelatedError("");
     setRelatedItems(null);
     try {
-      const resp = await fetch(`${NLP_SERVICE_URL}/related-pages`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(API_KEY ? { "X-API-Key": API_KEY } : {}),
-        },
-        body: JSON.stringify({
-          keyword,
-          location,
-          business_name: businessName,
-          gbp_category: gbpCategory,
-          address,
-          website: website || null,
-        }),
+      const data = await nlp.relatedPages({
+        keyword,
+        location,
+        business_name: businessName,
+        gbp_category: gbpCategory,
+        address,
+        website: website || null,
       });
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-        throw new Error(err.detail || "Request failed");
-      }
-      const data = await resp.json();
       setRelatedItems(data.items ?? []);
     } catch (e: any) {
-      setRelatedError(e.message || "Failed to load related pages");
+      setRelatedError((e as Error).message || "Failed to load related pages");
     } finally {
       setRelatedLoading(false);
     }

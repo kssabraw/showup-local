@@ -1,13 +1,18 @@
 import { useState, useEffect, useRef } from "react";
-import { MapPin, Sparkles, ChevronDown, Building2, Loader2, FileSearch, FilePlus, PhoneCall, FileText, Trash2, CheckCircle2, PlusCircle } from "lucide-react";
+import { Sparkles, ChevronDown, Building2, Loader2, FileSearch, FilePlus, PhoneCall, CheckCircle2, PlusCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import AnalysisResultsView from "@/components/AnalysisResultsView";
 import PageScoreView from "@/components/PageScoreView";
 import GeneratedPageView from "@/components/GeneratedPageView";
-
-const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
-const NLP_API_KEY = import.meta.env.VITE_NLP_API_KEY ?? "";
+import { LocationAutocomplete } from "@/components/LocationAutocomplete";
+import { SavedPagesList } from "@/components/SavedPagesList";
+import { StepIndicator } from "@/components/StepIndicator";
+import { useBusinessProfiles } from "@/hooks/useBusinessProfiles";
+import { useInvalidateSavedPages } from "@/hooks/useSavedPages";
+import { nlp, nlpStream } from "@/lib/nlp-client";
+import type { AnalysisResult } from "@/lib/nlp-types";
+import type { SavedPage } from "@/hooks/useSavedPages";
 
 interface BusinessProfile {
   id: string;
@@ -16,21 +21,10 @@ interface BusinessProfile {
   gbp_category: string;
   website: string | null;
   phone?: string | null;
-  differentiators?: any[];
-  existing_pages: any[];
-  brand_voice?: any;
-  detected_icp?: any;
-}
-
-interface AnalysisResult {
-  keyword: string;
-  location: string;
-  serp_urls: string[];
-  related_keywords: { title: any[]; h1: any[]; h2_h3: any[]; body: any[] };
-  top_quadgrams: any[];
-  google_entities: any[];
-  zone_targets: Record<string, { target: number }>;
-  competitor_headings: any[];
+  differentiators?: unknown[];
+  existing_pages: unknown[];
+  brand_voice?: unknown;
+  detected_icp?: unknown;
 }
 
 type CheckState =
@@ -42,66 +36,56 @@ type CheckState =
   | { status: "not_found" }
   | { status: "creating" };
 
+import type { ScoreResult, TokenUsage, CostBreakdown } from "@/lib/nlp-types";
+
 type ViewState =
   | { kind: "form" }
-  | { kind: "score"; pageMatch: { url: string; title: string; h1?: string }; serpAnalysis: AnalysisResult; initialScoreResult: any }
-  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; tokenUsage: any; costBreakdown: any }
+  | { kind: "score"; pageMatch: { url: string; title: string; h1?: string }; serpAnalysis: AnalysisResult; initialScoreResult: ScoreResult }
+  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; tokenUsage: Partial<TokenUsage>; costBreakdown: Partial<CostBreakdown>; isNew?: boolean }
   | { kind: "analysis"; result: AnalysisResult };
 
-interface SavedPage {
-  id: string;
-  business_id: string;
-  keyword: string;
-  location: string;
-  mode: string;
-  page_title: string | null;
-  content_html: string;
-  schema_json: string | null;
-  created_at: string;
-}
+// ANALYSIS_CACHE_MAX_AGE_DAYS — cached keyword analyses older than this are ignored
+const ANALYSIS_CACHE_MAX_AGE_DAYS = 7;
 
-const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: { onBack: () => void; defaultLocation?: string; defaultKeyword?: string }) => {
-  const [businesses, setBusinesses] = useState<BusinessProfile[]>([]);
+const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialLocation, initialBusinessId, isOnboarding = false }: { onBack: () => void; defaultLocation?: string; initialKeyword?: string; initialLocation?: string; initialBusinessId?: string; isOnboarding?: boolean }) => {
+  const { data: businesses = [], isLoading: loadingBusinesses } = useBusinessProfiles();
+  const invalidateSavedPages = useInvalidateSavedPages();
+
   const [selectedBusinessId, setSelectedBusinessId] = useState("");
-  const [keyword, setKeyword] = useState(defaultKeyword);
-  const [location, setLocation] = useState(defaultLocation);
+  const [keyword, setKeyword] = useState(initialKeyword ?? "");
+  const [location, setLocation] = useState(initialLocation ?? defaultLocation);
   const [locationCode, setLocationCode] = useState<number | null>(null);
-  const [locationInput, setLocationInput] = useState(defaultLocation);
-  const [locationSuggestions, setLocationSuggestions] = useState<{ name: string; code: number }[]>([]);
-  const [showSuggestions, setShowSuggestions] = useState(false);
-  const [locationLoading, setLocationLoading] = useState(false);
-  const [loadingBusinesses, setLoadingBusinesses] = useState(true);
+  const [locationInput, setLocationInput] = useState(initialLocation ?? defaultLocation);
   const [loadingLabel, setLoadingLabel] = useState("");
   const [error, setError] = useState("");
   const [checkState, setCheckState] = useState<CheckState>({ status: "idle" });
   const [view, setView] = useState<ViewState>({ kind: "form" });
-  const [creatingPhase, setCreatingPhase] = useState<"serp" | "generating">("serp");
+  const [generateProgress, setGenerateProgress] = useState(0);
+  const [generateStep, setGenerateStep] = useState("");
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const bulkCancelledRef = useRef(false);
 
-  const [savedPages, setSavedPages] = useState<SavedPage[]>([]);
-  const [loadingSaved, setLoadingSaved] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-
-  const [relatedPages, setRelatedPages] = useState<any[] | null>(null);
+  const [relatedPages, setRelatedPages] = useState<Array<{ keyword: string; group: string; status: string; url?: string; composite_score?: number }> | null>(null);
+  const [rankability, setRankability] = useState<{ verdict: string; message: string; match_count: number; total_results: number; ranking_categories: { category: string; count: number }[] } | null>(null);
+  const [rankabilityLoading, setRankabilityLoading] = useState(false);
   const [relatedLoading, setRelatedLoading] = useState(false);
   const [selectedForCreate, setSelectedForCreate] = useState<Set<string>>(new Set());
   const [bulkCreating, setBulkCreating] = useState(false);
   const [bulkProgress, setBulkProgress] = useState<{ current: number; total: number; currentKw: string } | null>(null);
   const [bulkDone, setBulkDone] = useState(0);
   const [manualUrl, setManualUrl] = useState("");
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
-  const locationDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const locationContainerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => { fetchBusinesses(); fetchSavedPages(); }, []);
-
+  // Auto-select first business on initial load (or onboarding-specified business)
   useEffect(() => {
-    if (view.kind === "form") fetchSavedPages();
-  }, [view.kind]);
+    if (businesses.length === 0 || selectedBusinessId) return;
+    if (initialBusinessId && businesses.some(b => b.id === initialBusinessId)) {
+      setSelectedBusinessId(initialBusinessId);
+    } else {
+      setSelectedBusinessId(businesses[0].id);
+    }
+  }, [businesses, initialBusinessId, selectedBusinessId]);
 
   useEffect(() => {
     if (selectedBusinessId) {
@@ -127,84 +111,6 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
     setError("");
   }, [keyword, location, selectedBusinessId]);
 
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (locationContainerRef.current && !locationContainerRef.current.contains(e.target as Node)) {
-        setShowSuggestions(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
-
-  const handleLocationInput = (value: string) => {
-    setLocationInput(value);
-    setLocation("");
-    setLocationCode(null);
-    setShowSuggestions(true);
-    if (locationDebounce.current) clearTimeout(locationDebounce.current);
-    if (value.length < 2) { setLocationSuggestions([]); return; }
-    locationDebounce.current = setTimeout(async () => {
-      setLocationLoading(true);
-      try {
-        const { data } = await supabase
-          .from("location")
-          .select("location_name, location_code")
-          .ilike("location_name", `%${value}%`)
-          .limit(8);
-        setLocationSuggestions((data || []).map((r: any) => ({ name: r.location_name, code: r.location_code })));
-      } finally {
-        setLocationLoading(false);
-      }
-    }, 200);
-  };
-
-  const selectLocation = (loc: { name: string; code: number }) => {
-    setLocation(loc.name);
-    setLocationCode(loc.code);
-    setLocationInput(loc.name);
-    setLocationSuggestions([]);
-    setShowSuggestions(false);
-  };
-
-  const fetchBusinesses = async () => {
-    try {
-      const { data, error } = await supabase
-        .from("business_profiles")
-        .select("id, business_name, address, gbp_category, website, phone, differentiators, existing_pages, brand_voice, detected_icp")
-        .order("created_at", { ascending: false });
-      if (error) throw error;
-      setBusinesses(data || []);
-      if (data && data.length > 0) setSelectedBusinessId(data[0].id);
-    } catch (err) {
-      console.error("Error fetching businesses:", err);
-    } finally {
-      setLoadingBusinesses(false);
-    }
-  };
-
-  const fetchSavedPages = async () => {
-    setLoadingSaved(true);
-    try {
-      const { data } = await supabase
-        .from("generated_pages")
-        .select("id, business_id, keyword, location, mode, page_title, content_html, schema_json, created_at")
-        .order("created_at", { ascending: false })
-        .limit(50);
-      setSavedPages(data || []);
-    } finally {
-      setLoadingSaved(false);
-    }
-  };
-
-  const deleteSavedPage = async (id: string) => {
-    setConfirmDeleteId(null);
-    setDeletingId(id);
-    await supabase.from("generated_pages").delete().eq("id", id);
-    setSavedPages(prev => prev.filter(p => p.id !== id));
-    setDeletingId(null);
-  };
-
   const openSavedPage = (page: SavedPage) => {
     setKeyword(page.keyword);
     setLocation(page.location);
@@ -219,10 +125,11 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
       pageTitle: page.page_title ?? "",
       tokenUsage: {},
       costBreakdown: {},
+      isNew: false,
     });
   };
 
-  const saveTokenUsage = async (record: any) => {
+  const saveTokenUsage = async (record: Partial<import("@/lib/nlp-types").TokenUsage>) => {
     await supabase.from("token_usage").insert({ ...record, business_id: selectedBusinessId, keyword });
   };
 
@@ -235,18 +142,41 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
     setElapsedSeconds(0);
   };
 
+  /**
+   * Run keyword analysis — checks Supabase cache first.
+   * If a cached result exists and is less than ANALYSIS_CACHE_MAX_AGE_DAYS old, returns it without
+   * calling the NLP service (saving DataForSEO + ScrapeOwl credits).
+   */
   const runAnalysisFor = async (kw: string, loc: string, locCode: number | null, signal?: AbortSignal): Promise<AnalysisResult> => {
-    const response = await fetch(`${NLP_SERVICE_URL}/analyze`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-      body: JSON.stringify({ keyword: kw.trim(), location: loc.trim(), location_code: locCode }),
-      signal,
-    });
-    if (!response.ok) {
-      const d = await response.json().catch(() => ({}));
-      throw new Error(d.detail || `Analysis error: ${response.status}`);
+    // Check cache
+    if (selectedBusinessId) {
+      const { data: cached } = await supabase
+        .from("keyword_analyses")
+        .select("*")
+        .eq("business_id", selectedBusinessId)
+        .eq("keyword", kw.trim())
+        .eq("location", loc.trim())
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (cached) {
+        const ageMs = Date.now() - new Date(cached.updated_at).getTime();
+        const ageDays = ageMs / (1000 * 60 * 60 * 24);
+        if (ageDays < ANALYSIS_CACHE_MAX_AGE_DAYS) {
+          return {
+            keyword: cached.keyword,
+            location: cached.location,
+            serp_urls: (cached.serp_urls as string[]) ?? [],
+            related_keywords: (cached.related_keywords as AnalysisResult["related_keywords"]) ?? { title: [], h1: [], h2_h3: [], body: [] },
+            top_quadgrams: (cached.top_quadgrams as AnalysisResult["top_quadgrams"]) ?? [],
+            google_entities: (cached.google_entities as AnalysisResult["google_entities"]) ?? [],
+            zone_targets: (cached.zone_targets as AnalysisResult["zone_targets"]) ?? {},
+            competitor_headings: (cached.competitor_headings as AnalysisResult["competitor_headings"]) ?? [],
+          };
+        }
+      }
     }
-    return response.json();
+    return nlp.analyze({ keyword: kw.trim(), location: loc.trim(), location_code: locCode }, signal);
   };
 
   const runAnalysis = () => runAnalysisFor(keyword, location, locationCode);
@@ -268,6 +198,25 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
     );
   };
 
+  const handleCheckRankability = async () => {
+    const b = businesses.find(b => b.id === selectedBusinessId);
+    if (!b || !keyword.trim() || !location) return;
+    setRankabilityLoading(true);
+    setRankability(null);
+    try {
+      const data = await nlp.checkRankability({
+        keyword: keyword.trim(),
+        location: location.trim(),
+        gbp_category: b.gbp_category,
+      });
+      setRankability(data);
+    } catch {
+      setRankability({ verdict: "unknown", message: "Could not retrieve map pack data.", match_count: 0, total_results: 0, ranking_categories: [] });
+    } finally {
+      setRankabilityLoading(false);
+    }
+  };
+
   const handleCheckSite = async () => {
     const b = businesses.find(b => b.id === selectedBusinessId);
     if (!b?.website) {
@@ -284,46 +233,31 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
     setRelatedLoading(true);
 
     // Step 1: Scan site for existing page + fetch related pages in parallel
-    let foundPage: { url: string; title: string; h1?: string } | null = null;
+    let foundPage: { url: string; title: string; h1?: string; isBlogPost?: boolean } | null = null;
     try {
-      const [scanRes] = await Promise.all([
-        fetch(`${NLP_SERVICE_URL}/find-page-for-keyword`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-          body: JSON.stringify({ website_url: b.website, keyword: keyword.trim(), location: location.trim() }),
+      const [scanData] = await Promise.all([
+        nlp.findPageForKeyword(
+          { website_url: b.website!, keyword: keyword.trim(), location: location.trim() },
           signal,
-        }),
+        ),
         // Fire related-pages in background; results stored separately
-        fetch(`${NLP_SERVICE_URL}/related-pages`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-          body: JSON.stringify({
-            keyword: keyword.trim(),
-            location: location.trim(),
-            business_name: b.business_name,
-            gbp_category: b.gbp_category,
-            address: b.address,
-            website: b.website,
-          }),
-          signal,
-        }).then(r => r.json()).then(d => {
-          setRelatedPages(d.items ?? []);
-          setRelatedLoading(false);
-        }).catch(() => {
-          setRelatedLoading(false);
-        }),
+        nlp.relatedPages({
+          keyword: keyword.trim(),
+          location: location.trim(),
+          business_name: b.business_name,
+          gbp_category: b.gbp_category,
+          address: b.address,
+          website: b.website,
+        }, signal)
+          .then(d => { setRelatedPages(d.items ?? []); setRelatedLoading(false); })
+          .catch(() => { setRelatedLoading(false); }),
       ]);
-      if (!scanRes.ok) {
-        const d = await scanRes.json().catch(() => ({}));
-        throw new Error(d.detail || `Site scan error: ${scanRes.status}`);
-      }
-      const scanData = await scanRes.json();
-      if (scanData.found && scanData.page) {
+      if (scanData && scanData.found && scanData.page) {
         foundPage = { ...scanData.page, isBlogPost: scanData.is_blog_post === true };
       }
     } catch (e: any) {
-      if (e.name === "AbortError") return;
-      setError(e.message || "Site scan failed");
+      if ((e as Error).name === "AbortError") return;
+      setError((e as Error).message || "Site scan failed");
       setCheckState({ status: "idle" });
       setRelatedLoading(false);
       return;
@@ -348,28 +282,17 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
     setCheckState({ status: "scoring", page: pageToScore });
     setError("");
     try {
-      const [serpData, scoreRes] = await Promise.all([
+      const [serpData, scoreData] = await Promise.all([
         runAnalysisFor(keyword, location, locationCode, signal),
-        fetch(`${NLP_SERVICE_URL}/score-page`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-          body: JSON.stringify({
-            keyword: keyword.trim(),
-            location: location.trim(),
-            page_url: pageToScore.url,
-            business_name: b.business_name,
-            gbp_category: b.gbp_category,
-            address: b.address,
-          }),
-          signal,
-        }),
+        nlp.scorePage({
+          keyword: keyword.trim(),
+          location: location.trim(),
+          page_url: pageToScore.url,
+          business_name: b.business_name,
+          gbp_category: b.gbp_category,
+          address: b.address,
+        }, signal),
       ]);
-
-      if (!scoreRes.ok) {
-        const d = await scoreRes.json().catch(() => ({}));
-        throw new Error(d.detail || `Scoring error: ${scoreRes.status}`);
-      }
-      const scoreData = await scoreRes.json();
       await saveTokenUsage(scoreData.token_usage);
       await saveAnalysisToSupabase(serpData);
 
@@ -396,21 +319,17 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
     const signal = abortRef.current.signal;
 
     setCheckState({ status: "creating" });
-    setCreatingPhase("serp");
+    setGenerateProgress(0);
+    setGenerateStep("Starting…");
     setElapsedSeconds(0);
     setError("");
     elapsedRef.current = setInterval(() => setElapsedSeconds(s => s + 1), 1000);
     const kw = kwOverride ?? keyword;
+    const b = businesses.find(b => b.id === selectedBusinessId)!;
     try {
-      const serpData = await runAnalysisFor(kw, location, locationCode, signal);
-      await saveAnalysisToSupabase(serpData);
-
-      const b = businesses.find(b => b.id === selectedBusinessId)!;
-      setCreatingPhase("generating");
-      const genRes = await fetch(`${NLP_SERVICE_URL}/generate-page`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-        body: JSON.stringify({
+      const stream = nlpStream<import("@/lib/nlp-types").GeneratePageResult>(
+        "/generate-page",
+        {
           keyword: kw.trim(),
           location: location.trim(),
           business_name: b.business_name,
@@ -420,20 +339,48 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
           differentiators: b.differentiators,
           brand_voice: b.brand_voice,
           detected_icp: b.detected_icp,
-          serp_analysis: serpData,
-        }),
+        },
         signal,
-      });
-      if (!genRes.ok) {
-        const d = await genRes.json().catch(() => ({}));
-        throw new Error(d.detail || `Generation error: ${genRes.status}`);
+      );
+      for await (const evt of stream) {
+        if (evt.progress !== undefined) setGenerateProgress(evt.progress);
+        if (evt.message) setGenerateStep(evt.message);
+        if ("step" in evt && evt.step === "error") throw new Error(evt.message || "Generation failed");
+        if ("step" in evt && evt.step === "done" && evt.result) {
+          const genData = evt.result;
+          await saveTokenUsage(genData.token_usage);
+          if (genData.serp_analysis) {
+            await supabase.from("keyword_analyses").upsert(
+              {
+                business_id: selectedBusinessId,
+                keyword: kw.trim(),
+                location: location.trim(),
+                serp_urls: genData.serp_analysis.serp_urls ?? [],
+                related_keywords: genData.serp_analysis.related_keywords,
+                top_quadgrams: genData.serp_analysis.top_quadgrams,
+                google_entities: genData.serp_analysis.google_entities,
+                zone_targets: genData.serp_analysis.zone_targets ?? {},
+                competitor_headings: genData.serp_analysis.competitor_headings ?? [],
+              },
+              { onConflict: "business_id,keyword,location" },
+            );
+          }
+          setView({
+            kind: "generated",
+            mode: "generate",
+            contentHtml: genData.content_html,
+            schemaJson: genData.schema_json,
+            pageTitle: genData.page_title ?? "",
+            tokenUsage: genData.token_usage,
+            costBreakdown: genData.cost_breakdown ?? {},
+            isNew: true,
+          });
+          return;
+        }
       }
-      const genData = await genRes.json();
-      await saveTokenUsage(genData.token_usage);
-      setView({ kind: "generated", mode: "generate", contentHtml: genData.content_html, schemaJson: genData.schema_json, pageTitle: genData.page_title ?? "", tokenUsage: genData.token_usage, costBreakdown: genData.cost_breakdown ?? {} });
     } catch (e: any) {
-      if (e.name === "AbortError") return;
-      setError(e.message || "Something went wrong");
+      if ((e as Error).name === "AbortError") return;
+      setError((e as Error).message || "Something went wrong");
       setCheckState({ status: "not_found" });
     } finally {
       setLoadingLabel("");
@@ -441,16 +388,14 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
     }
   };
 
-  // Creates + auto-saves a page for the given keyword without navigating away
+  // Creates + auto-saves a page for the given keyword without navigating away (bulk flow)
   const createAndSavePage = async (kw: string, signal?: AbortSignal): Promise<boolean> => {
     const b = businesses.find(b => b.id === selectedBusinessId);
     if (!b) return false;
     try {
-      const serpData = await runAnalysisFor(kw, location, locationCode, signal);
-      const genRes = await fetch(`${NLP_SERVICE_URL}/generate-page`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-        body: JSON.stringify({
+      const stream = nlpStream<import("@/lib/nlp-types").GeneratePageResult>(
+        "/generate-page",
+        {
           keyword: kw.trim(),
           location: location.trim(),
           business_name: b.business_name,
@@ -460,26 +405,34 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
           differentiators: b.differentiators,
           brand_voice: b.brand_voice,
           detected_icp: b.detected_icp,
-          serp_analysis: serpData,
-        }),
-        signal,
-      });
-      if (!genRes.ok) return false;
-      const genData = await genRes.json();
-      await supabase.from("generated_pages").upsert(
-        {
-          business_id: selectedBusinessId,
-          keyword: kw.trim(),
-          location: location.trim(),
-          mode: "generate",
-          page_title: genData.page_title ?? kw,
-          content_html: genData.content_html,
-          schema_json: genData.schema_json ?? null,
         },
-        { onConflict: "business_id,keyword,location" }
+        signal,
       );
-      await supabase.from("token_usage").insert({ ...genData.token_usage, business_id: selectedBusinessId, keyword: kw });
-      return true;
+      for await (const evt of stream) {
+        if ("step" in evt && evt.step === "error") return false;
+        if ("step" in evt && evt.step === "done" && evt.result) {
+          const genData = evt.result;
+          await supabase.from("generated_pages").upsert(
+            {
+              business_id: selectedBusinessId,
+              keyword: kw.trim(),
+              location: location.trim(),
+              mode: "generate",
+              page_title: genData.page_title ?? kw,
+              content_html: genData.content_html,
+              schema_json: genData.schema_json ?? null,
+            },
+            { onConflict: "business_id,keyword,location" },
+          );
+          await supabase.from("token_usage").insert({
+            ...genData.token_usage,
+            business_id: selectedBusinessId,
+            keyword: kw,
+          });
+          return true;
+        }
+      }
+      return false;
     } catch {
       return false;
     }
@@ -503,7 +456,7 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
     setBulkProgress(null);
     setBulkDone(done);
     setSelectedForCreate(new Set());
-    fetchSavedPages();
+    invalidateSavedPages();
   };
 
   const cancelBulk = () => {
@@ -546,27 +499,17 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
 
     setCheckState({ status: "scoring", page: { url: existingUrl, title: existingUrl } });
     try {
-      const [serpData, scoreRes] = await Promise.all([
+      const [serpData, scoreData] = await Promise.all([
         runAnalysisFor(relKw, location, locationCode),
-        fetch(`${NLP_SERVICE_URL}/score-page`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-          body: JSON.stringify({
-            keyword: relKw.trim(),
-            location: location.trim(),
-            page_url: existingUrl,
-            business_name: b.business_name,
-            gbp_category: b.gbp_category,
-            address: b.address,
-          }),
+        nlp.scorePage({
+          keyword: relKw.trim(),
+          location: location.trim(),
+          page_url: existingUrl,
+          business_name: b.business_name,
+          gbp_category: b.gbp_category,
+          address: b.address,
         }),
       ]);
-
-      if (!scoreRes.ok) {
-        const d = await scoreRes.json().catch(() => ({}));
-        throw new Error(d.detail || `Scoring error: ${scoreRes.status}`);
-      }
-      const scoreData = await scoreRes.json();
       await saveTokenUsage(scoreData.token_usage);
       await saveAnalysisToSupabase(serpData);
 
@@ -578,7 +521,7 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
       });
       setCheckState({ status: "idle" });
     } catch (e: any) {
-      setError(e.message || "Failed to load page score");
+      setError((e as Error).message || "Failed to load page score");
       setCheckState({ status: "idle" });
     }
   };
@@ -700,7 +643,7 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
         initialScoreResult={view.initialScoreResult}
         onBack={() => setView({ kind: "form" })}
         onGenerated={(result, mode) =>
-          setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "", htmlCssNotes: result.html_css_notes, tokenUsage: result.token_usage, costBreakdown: result.cost_breakdown ?? {} })
+          setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "", htmlCssNotes: result.html_css_notes, tokenUsage: result.token_usage, costBreakdown: result.cost_breakdown ?? {}, isNew: true })
         }
         onCreateNew={handleCreateNewPage}
         relatedPagePanel={relatedPagePanel}
@@ -714,6 +657,8 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
         keyword={keyword}
         location={location}
         mode={view.mode}
+        isNew={view.isNew}
+        isOnboarding={isOnboarding}
         contentHtml={view.contentHtml}
         schemaJson={view.schemaJson}
         pageTitle={view.pageTitle}
@@ -753,10 +698,24 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
         <button onClick={onBack} className="text-sm text-muted-foreground hover:text-foreground mb-2 transition-colors">
           ← Back to Dashboard
         </button>
-        <h1 className="text-2xl font-display font-bold text-foreground">Content</h1>
-        <p className="text-muted-foreground text-sm mt-1">
-          Generate optimized local SEO pages for your business.
-        </p>
+        {isOnboarding ? (
+          <>
+            <StepIndicator current={2} />
+            <h1 className="text-2xl font-display font-bold text-foreground mt-4">
+              What service do you want to rank for?
+            </h1>
+            <p className="text-muted-foreground text-sm mt-1">
+              Your business is saved. Enter a service keyword below and we'll build your first page.
+            </p>
+          </>
+        ) : (
+          <>
+            <h1 className="text-2xl font-display font-bold text-foreground">Content</h1>
+            <p className="text-muted-foreground text-sm mt-1">
+              Generate optimized local SEO pages for your business.
+            </p>
+          </>
+        )}
       </div>
 
       <div className="bg-card rounded-xl border border-border p-6 space-y-5">
@@ -796,7 +755,7 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
           <input
             type="text"
             value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
+            onChange={(e) => { setKeyword(e.target.value); setRankability(null); }}
             disabled={isChecking}
             placeholder="e.g. emergency plumber"
             className="w-full bg-background border border-input rounded-lg px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60"
@@ -804,52 +763,26 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
         </div>
 
         {/* Area / Location input */}
-        <div className="space-y-2" ref={locationContainerRef}>
-          <label className="text-sm font-medium text-foreground">Area</label>
-          <div className="relative">
-            <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground z-10" />
-            <input
-              type="text"
-              value={locationInput}
-              onChange={(e) => handleLocationInput(e.target.value)}
-              onFocus={() => { if (locationSuggestions.length > 0) setShowSuggestions(true); }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && locationSuggestions.length > 0) {
-                  selectLocation(locationSuggestions[0]);
-                }
-              }}
-              disabled={isChecking}
-              placeholder="Search locations…"
-              className={`w-full bg-background border rounded-lg pl-9 pr-8 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60 ${location ? "border-green-500" : "border-input"}`}
-            />
-            {location && !isChecking && (
-              <button
-                type="button"
-                onMouseDown={() => { setLocation(""); setLocationCode(null); setLocationInput(""); setLocationSuggestions([]); }}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-              >×</button>
-            )}
-            {locationLoading && !location && (
-              <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground animate-spin" />
-            )}
-            {showSuggestions && locationSuggestions.length > 0 && (
-              <ul className="absolute z-50 w-full mt-1 bg-popover border border-border rounded-lg shadow-lg max-h-56 overflow-y-auto">
-                {locationSuggestions.map((loc) => (
-                  <li
-                    key={loc.code}
-                    onMouseDown={() => selectLocation(loc)}
-                    className="px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground cursor-pointer"
-                  >
-                    {loc.name}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-          {locationInput && !location && (
-            <p className="text-xs text-amber-500">Select a location from the dropdown to continue</p>
-          )}
-        </div>
+        <LocationAutocomplete
+          value={location}
+          inputValue={locationInput}
+          onSelect={(loc) => {
+            setLocation(loc.name);
+            setLocationCode(loc.code);
+            setLocationInput(loc.name);
+          }}
+          onInputChange={(raw) => {
+            setLocationInput(raw);
+            setLocation("");
+            setLocationCode(null);
+          }}
+          onClear={() => {
+            setLocation("");
+            setLocationCode(null);
+            setLocationInput("");
+          }}
+          disabled={isChecking}
+        />
 
         {/* Error */}
         {error && (
@@ -1018,25 +951,24 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
 
         {/* Creating state — step tracker */}
         {checkState.status === "creating" && (() => {
-          const serpDone = creatingPhase === "generating";
           const steps = [
             {
               label: "Fetching top Google results",
               detail: "DataForSEO organic SERP",
-              done: serpDone,
-              active: !serpDone,
+              done: generateProgress >= 40,
+              active: generateProgress < 40,
             },
             {
               label: "Scraping & analysing competitor pages",
-              detail: "Up to 20 pages — TF-IDF, quadgrams, entities",
-              done: serpDone,
-              active: !serpDone,
+              detail: "Reading competitor pages to find patterns and topics",
+              done: generateProgress >= 65,
+              active: generateProgress >= 15 && generateProgress < 65,
             },
             {
               label: "Generating page with Claude",
               detail: "13-section structure + JSON-LD schema",
-              done: false,
-              active: creatingPhase === "generating",
+              done: generateProgress >= 100,
+              active: generateProgress >= 65,
             },
           ];
           const mins = Math.floor(elapsedSeconds / 60);
@@ -1063,9 +995,11 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
                       )}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className={`text-sm ${step.active ? "text-foreground font-medium" : step.done ? "text-muted-foreground line-through" : "text-muted-foreground"}`}>
-                        {step.label}
-                      </p>
+                      <div className="flex items-baseline justify-between gap-2">
+                        <p className={`text-sm ${step.active ? "text-foreground font-medium" : step.done ? "text-muted-foreground line-through" : "text-muted-foreground"}`}>
+                          {step.label}
+                        </p>
+                      </div>
                       {step.active && (
                         <p className="text-xs text-muted-foreground mt-0.5">{step.detail}</p>
                       )}
@@ -1073,6 +1007,13 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
                   </div>
                 ))}
               </div>
+              <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-accent rounded-full transition-all duration-500"
+                  style={{ width: `${generateProgress}%` }}
+                />
+              </div>
+              {generateStep && <p className="text-xs text-muted-foreground text-center">{generateStep}</p>}
               <button
                 onClick={cancelOperation}
                 className="text-xs text-muted-foreground hover:text-destructive transition-colors mt-1"
@@ -1086,101 +1027,53 @@ const NewContentView = ({ onBack, defaultLocation = "", defaultKeyword = "" }: {
         {/* Idle — show Check My Site button */}
         {checkState.status === "idle" && (
           <div className="space-y-2">
-            <Button
-              className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
-              onClick={handleCheckSite}
-              disabled={!canCheck}
-            >
-              <FileSearch className="w-4 h-4 mr-2" /> Check My Site
-            </Button>
-            {!canCheck && (
-              <p className="text-xs text-muted-foreground text-center">
-                {businesses.length === 0
-                  ? "Add a business in Locations first"
-                  : !keyword.trim()
-                  ? "Enter a service to continue"
-                  : !location
-                  ? "Select a location from the list to continue"
-                  : "Select a business to continue"}
-              </p>
+            {/* Rankability result banner */}
+            {rankability && (
+              <div className={`px-3 py-2.5 rounded-lg text-xs border space-y-1.5 ${
+                rankability.verdict === "match" ? "bg-green-500/10 border-green-500/20 text-green-700" :
+                rankability.verdict === "partial" ? "bg-amber-500/10 border-amber-500/20 text-amber-700" :
+                "bg-red-500/10 border-red-500/20 text-red-700"
+              }`}>
+                <p className="font-medium">{
+                  rankability.verdict === "match" ? "✓ Strong map pack rankability" :
+                  rankability.verdict === "partial" ? "⚠ Partial category match" :
+                  rankability.verdict === "mismatch" ? "✗ Category mismatch — unlikely to rank in Maps" :
+                  "Map pack data unavailable"
+                }</p>
+                <p className="opacity-90">{rankability.message}</p>
+                {rankability.ranking_categories.length > 0 && (
+                  <p className="opacity-75">
+                    Map pack categories: {rankability.ranking_categories.slice(0, 4).map(c => `${c.category} (${c.count})`).join(", ")}
+                  </p>
+                )}
+              </div>
             )}
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                className="flex-none text-xs h-9 px-3"
+                onClick={handleCheckRankability}
+                disabled={!canCheck || rankabilityLoading}
+              >
+                {rankabilityLoading ? <><Loader2 className="w-3 h-3 mr-1.5 animate-spin" />Checking…</> : "Check Map Pack"}
+              </Button>
+              <Button
+                className="flex-1 bg-accent text-accent-foreground hover:opacity-90 font-semibold"
+                onClick={handleCheckSite}
+                disabled={!canCheck}
+              >
+                <FileSearch className="w-4 h-4 mr-2" /> Check My Site
+              </Button>
+            </div>
           </div>
         )}
       </div>
 
       {/* ── Saved Pages ── */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-base font-semibold text-foreground flex items-center gap-2">
-            <FileText className="w-4 h-4 text-muted-foreground" /> Saved Pages
-          </h2>
-          {savedPages.length > 0 && (
-            <span className="text-xs text-muted-foreground">{savedPages.length} page{savedPages.length !== 1 ? "s" : ""}</span>
-          )}
-        </div>
-
-        {loadingSaved && (
-          <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
-            <Loader2 className="w-4 h-4 animate-spin" /> Loading saved pages…
-          </div>
-        )}
-
-        {!loadingSaved && savedPages.length === 0 && (
-          <p className="text-sm text-muted-foreground py-4 text-center">
-            No saved pages yet. Generate a page and click Save to store it here.
-          </p>
-        )}
-
-        {!loadingSaved && savedPages.length > 0 && (
-          <div className="rounded-xl border border-border overflow-hidden divide-y divide-border">
-            {savedPages.map(page => {
-              const biz = businesses.find(b => b.id === page.business_id);
-              const date = new Date(page.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-              return (
-                <div key={page.id} className="bg-card px-4 py-3 flex items-center gap-3">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-foreground truncate">
-                      {page.page_title || page.keyword}
-                    </p>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      {page.keyword} · {page.location.split(",")[0]}
-                      {biz && <> · <span className="text-foreground/70">{biz.business_name}</span></>}
-                      <span className="ml-2">{date}</span>
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="text-xs h-7 px-3"
-                      onClick={() => openSavedPage(page)}
-                    >
-                      View
-                    </Button>
-                    {confirmDeleteId === page.id ? (
-                      <div className="flex items-center gap-2 text-xs">
-                        <span className="text-muted-foreground">Delete?</span>
-                        <button onClick={() => deleteSavedPage(page.id)} className="text-destructive font-medium hover:underline">Yes</button>
-                        <button onClick={() => setConfirmDeleteId(null)} className="text-muted-foreground hover:text-foreground">No</button>
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => setConfirmDeleteId(page.id)}
-                        disabled={deletingId === page.id}
-                        className="text-muted-foreground hover:text-destructive transition-colors p-1 rounded"
-                      >
-                        {deletingId === page.id
-                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          : <Trash2 className="w-3.5 h-3.5" />}
-                      </button>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
+      <SavedPagesList
+        businesses={businesses}
+        onOpen={openSavedPage}
+      />
     </div>
   );
 };

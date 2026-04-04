@@ -2,18 +2,17 @@ import { useState, useEffect } from "react";
 import AppSidebar from "@/components/AppSidebar";
 import DashboardView from "@/components/DashboardView";
 import NewContentView from "@/components/NewContentView";
+import PlanningView from "@/components/PlanningView";
 import BusinessSearchView, { type BusinessDetails } from "@/components/BusinessSearchView";
 import LocationsView from "@/components/LocationsView";
 import LocationDetailView from "@/components/LocationDetailView";
-import PlanningView from "@/components/PlanningView";
 import LoginView from "@/components/LoginView";
+import SettingsView from "@/components/SettingsView";
 import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
+import { nlp } from "@/lib/nlp-client";
 import type { Session } from "@supabase/supabase-js";
-
-const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
-const NLP_API_KEY = import.meta.env.VITE_NLP_API_KEY ?? "";
 
 const Index = () => {
   const { toast } = useToast();
@@ -23,6 +22,7 @@ const Index = () => {
   const [selectedLocationId, setSelectedLocationId] = useState<string | null>(null);
   const [planningKeyword, setPlanningKeyword] = useState("");
   const [planningLocation, setPlanningLocation] = useState("");
+  const [onboardingBusinessId, setOnboardingBusinessId] = useState<string | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -79,9 +79,9 @@ const Index = () => {
         .eq("gbp_place_id", business.place_id)
         .single();
       if (saved?.id) {
-        setSelectedLocationId(saved.id);
+        setOnboardingBusinessId(saved.id);
       }
-      setActiveItem("locations");
+      setActiveItem("content");
 
       // Trigger background analysis if the business has a website
       if (business.website) {
@@ -99,7 +99,6 @@ const Index = () => {
 
   const triggerBusinessAnalysis = async (business: BusinessDetails) => {
     try {
-      // Fetch the saved business ID
       const { data: saved } = await supabase
         .from("business_profiles")
         .select("id")
@@ -107,25 +106,17 @@ const Index = () => {
         .single();
       if (!saved) return;
 
-      // Mark as running
       await supabase
         .from("business_profiles")
         .update({ analysis_status: "running" })
         .eq("id", saved.id);
 
-      const response = await fetch(`${NLP_SERVICE_URL}/analyze-business`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-        body: JSON.stringify({
-          website_url: business.website,
-          business_name: business.name,
-          gbp_category: business.category,
-          gbp_categories: business.categories || [],
-        }),
+      const result = await nlp.analyzeBusiness({
+        website_url: business.website!,
+        business_name: business.name,
+        gbp_category: business.category,
+        gbp_categories: business.categories || [],
       });
-
-      if (!response.ok) throw new Error(`Analysis failed: ${response.status}`);
-      const result = await response.json();
 
       await supabase
         .from("business_profiles")
@@ -186,9 +177,11 @@ const Index = () => {
           )}
           {activeItem === "content" && (
             <NewContentView
-              onBack={() => setActiveItem("dashboard")}
-              defaultKeyword={planningKeyword}
-              defaultLocation={planningLocation}
+              onBack={() => { setOnboardingBusinessId(null); setActiveItem("dashboard"); }}
+              initialKeyword={planningKeyword}
+              initialLocation={planningLocation}
+              initialBusinessId={onboardingBusinessId ?? undefined}
+              isOnboarding={!!onboardingBusinessId}
             />
           )}
           {activeItem === "locations" && !selectedLocationId && (
@@ -213,29 +206,8 @@ const Index = () => {
               }}
             />
           )}
-          {activeItem === "settings" && (
-            <div className="max-w-2xl space-y-6">
-              <div>
-                <h1 className="text-2xl font-display font-bold text-foreground">Settings</h1>
-                <p className="text-muted-foreground text-sm mt-1">Manage your ShowUP workspace.</p>
-              </div>
-              <div className="space-y-3">
-                {[
-                  { label: "API & Integrations", desc: "Connect DataForSEO, ScrapeOwl, and Google NLP credentials." },
-                  { label: "Default Location", desc: "Set a default city/region to pre-fill in content forms." },
-                  { label: "Team & Access", desc: "Invite team members and manage permissions." },
-                  { label: "Billing", desc: "View usage, token costs, and subscription details." },
-                ].map(({ label, desc }) => (
-                  <div key={label} className="bg-card border border-border rounded-xl px-5 py-4 flex items-center justify-between opacity-50 cursor-not-allowed select-none">
-                    <div>
-                      <p className="text-sm font-medium text-foreground">{label}</p>
-                      <p className="text-xs text-muted-foreground mt-0.5">{desc}</p>
-                    </div>
-                    <span className="text-xs text-muted-foreground border border-border rounded-full px-2 py-0.5 shrink-0 ml-4">Coming soon</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+          {activeItem === "settings" && session && (
+            <SettingsView session={session} />
           )}
         </div>
       </main>

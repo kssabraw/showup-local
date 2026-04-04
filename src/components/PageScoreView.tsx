@@ -2,36 +2,17 @@ import { useState, useRef, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader2, CheckCircle, AlertTriangle, XCircle, ChevronDown, ChevronUp } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { nlp, nlpStream } from "@/lib/nlp-client";
+import type { ScoreResult, ReoptimizeResult, AnalysisResult, EngineScore } from "@/lib/nlp-types";
 
-const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
-const NLP_API_KEY = import.meta.env.VITE_NLP_API_KEY ?? "";
-
-interface EngineScore {
-  score: number;
-  icp_detected?: string;
-  issues: string[];
-  recommendations: string[];
-}
-
-interface ScoreResult {
-  composite_score: number;
-  composite_status: string;
-  engine_scores: Record<string, EngineScore>;
-  deficiencies: Array<{
-    engine: string;
-    engine_key: string;
-    score: number;
-    issues: string[];
-    recommendations: string[];
-  }>;
-  token_usage: Record<string, any>;
-}
-
+// Re-export for backward compat with callers that destructure the prop shape
 interface GeneratedResult {
   content_html: string;
   schema_json: string;
-  token_usage: Record<string, any>;
+  token_usage: ReoptimizeResult["token_usage"];
   html_css_notes?: string[];
+  page_title?: string;
+  cost_breakdown?: ReoptimizeResult["cost_breakdown"];
 }
 
 interface Props {
@@ -44,8 +25,8 @@ interface Props {
   gbpCategory: string;
   address: string;
   phone?: string;
-  differentiators?: any[];
-  serp_analysis?: any;
+  differentiators?: unknown[];
+  serp_analysis?: AnalysisResult;
   initialScoreResult?: ScoreResult;
   onBack: () => void;
   onGenerated: (result: GeneratedResult, mode: "reoptimize") => void;
@@ -113,30 +94,15 @@ export default function PageScoreView({
     setScoring(true);
     setError("");
     try {
-      const res = await fetch(`${NLP_SERVICE_URL}/score-page`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-        body: JSON.stringify({
-          keyword,
-          location,
-          page_url: pageUrl,
-          business_name: businessName,
-          gbp_category: gbpCategory,
-          address,
-          serp_analysis,
-        }),
-        signal: abortRef.current.signal,
-      });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        throw new Error(d.detail || `Score error: ${res.status}`);
-      }
-      const data: ScoreResult = await res.json();
+      const data = await nlp.scorePage(
+        { keyword, location, page_url: pageUrl, business_name: businessName, gbp_category: gbpCategory, address, serp_analysis },
+        abortRef.current.signal,
+      );
       setScoreResult(data);
       await saveTokenUsage(data.token_usage);
     } catch (e: any) {
-      if (e.name === "AbortError") return;
-      setError(e.message || "Scoring failed");
+      if ((e as Error).name === "AbortError") return;
+      setError((e as Error).message || "Scoring failed");
     } finally {
       setScoring(false);
     }
@@ -148,10 +114,9 @@ export default function PageScoreView({
     setReoptimizing(true);
     setError("");
     try {
-      const res = await fetch(`${NLP_SERVICE_URL}/reoptimize-page`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-        body: JSON.stringify({
+      const stream = nlpStream<ReoptimizeResult>(
+        "/reoptimize-page",
+        {
           keyword,
           location,
           existing_page_html: "",   // backend will re-fetch from page_url via score-page HTML
@@ -162,19 +127,22 @@ export default function PageScoreView({
           address,
           phone,
           serp_analysis,
-        }),
-        signal: abortRef.current.signal,
-      });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        throw new Error(d.detail || `Reoptimize error: ${res.status}`);
+        },
+        abortRef.current.signal,
+      );
+      for await (const evt of stream) {
+        if (evt.progress !== undefined) setReoptimizeProgress(evt.progress);
+        if (evt.message) setReoptimizeStep(evt.message);
+        if ("step" in evt && evt.step === "error") throw new Error(evt.message || "Reoptimize failed");
+        if ("step" in evt && evt.step === "done" && evt.result) {
+          await saveTokenUsage(evt.result.token_usage);
+          onGenerated(evt.result as GeneratedResult, "reoptimize");
+          return;
+        }
       }
-      const data: GeneratedResult = await res.json();
-      await saveTokenUsage(data.token_usage);
-      onGenerated(data, "reoptimize");
     } catch (e: any) {
-      if (e.name === "AbortError") return;
-      setError(e.message || "Reoptimize failed");
+      if ((e as Error).name === "AbortError") return;
+      setError((e as Error).message || "Reoptimize failed");
     } finally {
       setReoptimizing(false);
     }
