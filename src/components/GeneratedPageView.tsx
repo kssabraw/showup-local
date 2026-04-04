@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { Copy, Check, Save, Loader2, ExternalLink } from "lucide-react";
+import { Copy, Check, Save, Loader2, ExternalLink, Download, Mail, ChevronDown, ChevronUp } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 
 const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "";
@@ -71,6 +71,8 @@ export default function GeneratedPageView({
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [activeTab, setActiveTab] = useState<"preview" | "raw-text" | "html" | "schema" | "related">("preview");
+  const [showCmsInstructions, setShowCmsInstructions] = useState(false);
+  const [activeCms, setActiveCms] = useState<"wordpress" | "wix" | "squarespace" | "webflow">("wordpress");
   // Related pages state
   const [relatedLoading, setRelatedLoading] = useState(false);
   const [relatedItems, setRelatedItems] = useState<RelatedPageItem[] | null>(null);
@@ -109,6 +111,67 @@ export default function GeneratedPageView({
     await navigator.clipboard.writeText(schemaJson);
     setCopiedSchema(true);
     setTimeout(() => setCopiedSchema(false), 2000);
+  };
+
+  const downloadHtml = () => {
+    const schemaTag = schemaJson
+      ? `\n  <script type="application/ld+json">${schemaJson}<\/script>`
+      : "";
+    const fullHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${pageTitle}</title>${schemaTag}
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 860px; margin: 0 auto; padding: 2rem 1.5rem; color: #1a1a1a; line-height: 1.7; }
+    h1 { font-size: 2rem; font-weight: 700; line-height: 1.2; margin-bottom: 1rem; }
+    h2 { font-size: 1.5rem; font-weight: 600; margin-top: 2.5rem; margin-bottom: 0.75rem; }
+    h3 { font-size: 1.2rem; font-weight: 600; margin-top: 1.75rem; margin-bottom: 0.5rem; }
+    p { margin: 0.875rem 0; }
+    ul, ol { margin: 0.875rem 0; padding-left: 1.5rem; }
+    li { margin: 0.4rem 0; }
+    strong { font-weight: 600; }
+    a { color: #2563eb; }
+    @media (max-width: 640px) { body { padding: 1rem; } h1 { font-size: 1.6rem; } }
+  </style>
+</head>
+<body>
+${contentHtml}
+</body>
+</html>`;
+    const blob = new Blob([fullHtml], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${keyword.replace(/\s+/g, "-").toLowerCase()}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const sendToDeveloper = () => {
+    const slug = keyword.replace(/\s+/g, "-").toLowerCase();
+    const city = location.split(",")[0].trim();
+    const subject = encodeURIComponent(`New SEO page to add to the website — ${keyword} in ${city}`);
+    const body = encodeURIComponent(
+`Hi,
+
+I used a tool called ShowUP Local to create a new SEO-optimised page for our website.
+
+Please add this as a new page. A good URL would be something like:
+/services/${slug}
+
+Page title: ${pageTitle}
+Target keyword: ${keyword}
+Location: ${location}
+
+I'm attaching the HTML file — please upload it or paste the content into a new page in our CMS.
+${schemaJson ? "\nThe HTML file also includes JSON-LD schema markup in the <head> which helps Google understand the page. Please make sure that's included too.\n" : ""}
+Let me know if you have any questions!`
+    );
+    window.location.href = `mailto:?subject=${subject}&body=${body}`;
   };
 
   const savePage = async () => {
@@ -297,12 +360,14 @@ export default function GeneratedPageView({
               <span className="text-sm text-foreground">{pageTitle}</span>
             </div>
           )}
-          <div
-            className="bg-card rounded-xl border border-border p-8 prose prose-sm max-w-none
-                       prose-headings:text-foreground prose-p:text-foreground prose-li:text-foreground
-                       prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg"
-            dangerouslySetInnerHTML={{ __html: contentHtml.replace(/<\/p>\s*<p/g, '</p><br><br><p') }}
-          />
+          <div className="rounded-xl border border-border overflow-hidden bg-white">
+            <iframe
+              srcDoc={`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:800px;margin:0 auto;padding:2rem 1.5rem;color:#1a1a1a;line-height:1.75}h1{font-size:1.875rem;font-weight:700;line-height:1.2;margin-bottom:1rem}h2{font-size:1.375rem;font-weight:600;margin-top:2.5rem;margin-bottom:0.75rem}h3{font-size:1.15rem;font-weight:600;margin-top:1.75rem;margin-bottom:0.5rem}p{margin:0.875rem 0}ul,ol{margin:0.875rem 0;padding-left:1.5rem}li{margin:0.4rem 0}strong{font-weight:600}a{color:#2563eb}</style></head><body>${contentHtml}</body></html>`}
+              style={{ width: "100%", height: "680px", border: "none", display: "block" }}
+              sandbox="allow-same-origin"
+              title="Page preview"
+            />
+          </div>
           {/* HTML/CSS improvement notes — reoptimize only */}
           {mode === "reoptimize" && htmlCssNotes && htmlCssNotes.length > 0 && (
             <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-5 space-y-3">
@@ -511,25 +576,138 @@ export default function GeneratedPageView({
         </div>
       )}
 
-      {/* Actions */}
-      <div className="bg-card rounded-xl border border-border p-6 space-y-3">
+      {/* Add to your site */}
+      <div className="bg-card rounded-xl border border-border overflow-hidden">
+        <div className="px-5 py-4 border-b border-border">
+          <p className="text-sm font-semibold text-foreground">Add this page to your website</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Choose how you want to use this content.</p>
+        </div>
+        <div className="p-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <button
+            onClick={sendToDeveloper}
+            className="flex flex-col items-center gap-2 rounded-lg border border-border bg-muted/30 hover:bg-muted/60 px-3 py-4 text-center transition-colors group"
+          >
+            <Mail className="w-5 h-5 text-accent group-hover:scale-105 transition-transform" />
+            <span className="text-xs font-medium text-foreground leading-tight">Email my<br/>developer</span>
+          </button>
+          <button
+            onClick={downloadHtml}
+            className="flex flex-col items-center gap-2 rounded-lg border border-border bg-muted/30 hover:bg-muted/60 px-3 py-4 text-center transition-colors group"
+          >
+            <Download className="w-5 h-5 text-accent group-hover:scale-105 transition-transform" />
+            <span className="text-xs font-medium text-foreground leading-tight">Download<br/>HTML file</span>
+          </button>
+          <button
+            onClick={copyRichText}
+            className="flex flex-col items-center gap-2 rounded-lg border border-border bg-muted/30 hover:bg-muted/60 px-3 py-4 text-center transition-colors group"
+          >
+            {copiedRichText
+              ? <Check className="w-5 h-5 text-green-500" />
+              : <Copy className="w-5 h-5 text-accent group-hover:scale-105 transition-transform" />}
+            <span className="text-xs font-medium text-foreground leading-tight">Copy formatted<br/>text</span>
+          </button>
+          <button
+            onClick={copyHtml}
+            className="flex flex-col items-center gap-2 rounded-lg border border-border bg-muted/30 hover:bg-muted/60 px-3 py-4 text-center transition-colors group"
+          >
+            {copiedHtml
+              ? <Check className="w-5 h-5 text-green-500" />
+              : <Copy className="w-5 h-5 text-accent group-hover:scale-105 transition-transform" />}
+            <span className="text-xs font-medium text-foreground leading-tight">Copy<br/>HTML code</span>
+          </button>
+        </div>
+
+        {/* CMS instructions toggle */}
+        <div className="border-t border-border">
+          <button
+            onClick={() => setShowCmsInstructions(v => !v)}
+            className="w-full flex items-center justify-between px-5 py-3 text-sm text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <span>How do I add this to my site?</span>
+            {showCmsInstructions ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </button>
+
+          {showCmsInstructions && (
+            <div className="px-5 pb-5 space-y-4">
+              {/* CMS tabs */}
+              <div className="flex gap-1 bg-muted/40 rounded-lg p-1">
+                {(["wordpress", "wix", "squarespace", "webflow"] as const).map(cms => (
+                  <button
+                    key={cms}
+                    onClick={() => setActiveCms(cms)}
+                    className={`flex-1 py-1.5 text-xs font-medium rounded-md capitalize transition-colors ${
+                      activeCms === cms
+                        ? "bg-card text-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {cms === "squarespace" ? "Squarespace" : cms.charAt(0).toUpperCase() + cms.slice(1)}
+                  </button>
+                ))}
+              </div>
+
+              {activeCms === "wordpress" && (
+                <ol className="space-y-3 text-sm text-foreground">
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">1</span><span>In your WordPress dashboard, go to <strong>Pages → Add New Page</strong>.</span></li>
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">2</span><span>Click the <strong>"+"</strong> button in the editor, search for <strong>Custom HTML</strong>, and add that block.</span></li>
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">3</span><span>Click <strong>"Copy HTML code"</strong> above and paste it into the Custom HTML block.</span></li>
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">4</span><span><strong>For the schema markup</strong> (helps Google): copy the code from the <strong>JSON-LD Schema</strong> tab. In Yoast SEO or RankMath, find the Schema settings for this page and paste it there.</span></li>
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">5</span><span>Set the page URL (slug) to something like <strong>/services/{keyword.replace(/\s+/g, "-").toLowerCase()}</strong>, then click <strong>Publish</strong>.</span></li>
+                </ol>
+              )}
+
+              {activeCms === "wix" && (
+                <ol className="space-y-3 text-sm text-foreground">
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">1</span><span>In the Wix Editor, click <strong>Add (+) → Embed Code → Embed HTML</strong>.</span></li>
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">2</span><span>Click <strong>"Copy HTML code"</strong> above and paste it into the embed box.</span></li>
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">3</span><span>Alternatively, click <strong>"Copy formatted text"</strong> and paste directly into a Wix <strong>Text</strong> element — the headings and paragraphs will paste with their formatting.</span></li>
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">4</span><span><strong>For the schema markup</strong>: in Wix, go to <strong>SEO → Advanced SEO → Structured Data Markup</strong> and paste the code from the JSON-LD Schema tab.</span></li>
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">5</span><span>Publish the page.</span></li>
+                </ol>
+              )}
+
+              {activeCms === "squarespace" && (
+                <ol className="space-y-3 text-sm text-foreground">
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">1</span><span>In Squarespace, go to <strong>Pages</strong> and add a new <strong>Blank Page</strong>.</span></li>
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">2</span><span>Click <strong>Edit</strong>, then add a <strong>Code Block</strong> (click + → More → Code).</span></li>
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">3</span><span>Click <strong>"Copy HTML code"</strong> above and paste it into the code block. Make sure <strong>"Display Source"</strong> is turned off.</span></li>
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">4</span><span><strong>For the schema markup</strong>: go to the page's <strong>Settings → Advanced → Page Header Code Injection</strong> and paste the code from the JSON-LD Schema tab.</span></li>
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">5</span><span>Save and publish.</span></li>
+                </ol>
+              )}
+
+              {activeCms === "webflow" && (
+                <ol className="space-y-3 text-sm text-foreground">
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">1</span><span>In Webflow Designer, add a new page or open an existing one.</span></li>
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">2</span><span>From the Components panel, drag an <strong>Embed</strong> element onto the page.</span></li>
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">3</span><span>Click <strong>"Copy HTML code"</strong> above and paste it into the embed editor, then click Save &amp; Close.</span></li>
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">4</span><span><strong>For the schema markup</strong>: go to <strong>Page Settings → Custom Code → Head Code</strong> and paste the code from the JSON-LD Schema tab.</span></li>
+                  <li className="flex gap-3"><span className="shrink-0 w-5 h-5 rounded-full bg-accent/20 text-accent text-xs flex items-center justify-center font-semibold">5</span><span>Publish your site.</span></li>
+                </ol>
+              )}
+
+              <p className="text-xs text-muted-foreground pt-1">
+                Not sure? Use <strong>"Email my developer"</strong> above — it writes the email for you. Just download the HTML file and attach it.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Save + navigation */}
+      <div className="bg-card rounded-xl border border-border p-5 space-y-3">
         {saveError && (
           <div className="bg-destructive/10 border border-destructive/20 rounded-lg px-4 py-3 text-sm text-destructive">{saveError}</div>
         )}
-        <div className="flex gap-3">
-          <Button
-            className="flex-1 bg-accent text-accent-foreground hover:opacity-90 font-semibold"
-            onClick={savePage}
-            disabled={saving || saved}
-          >
-            {saving ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Saving…</>
-              : saved ? <><Check className="w-4 h-4 mr-2" /> Saved</>
-              : <><Save className="w-4 h-4 mr-2" /> Save Page</>}
-          </Button>
-          <Button variant="outline" onClick={copyHtml} className="flex-1">
-            {copiedHtml ? <><Check className="w-4 h-4 mr-1" /> Copied</> : <><Copy className="w-4 h-4 mr-1" /> Copy HTML</>}
-          </Button>
-        </div>
+        <Button
+          className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold"
+          onClick={savePage}
+          disabled={saving || saved}
+        >
+          {saving ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Saving…</>
+            : saved ? <><Check className="w-4 h-4 mr-2" /> Saved to ShowUP</>
+            : <><Save className="w-4 h-4 mr-2" /> Save Page</>}
+        </Button>
         <button onClick={onNewPage} className="w-full text-sm text-muted-foreground hover:text-foreground transition-colors text-center">
           ← Start new keyword analysis
         </button>
