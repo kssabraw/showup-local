@@ -33,11 +33,23 @@ export class InsufficientCreditsError extends Error {
   }
 }
 
+export class RankabilityLimitError extends Error {
+  readonly limit: number;
+  constructor(limit = 50) {
+    super(`You've used all ${limit} map pack checks for this month. Resets on the 1st.`);
+    this.name = "RankabilityLimitError";
+    this.limit = limit;
+  }
+}
+
 // ── Core helpers ──────────────────────────────────────────────────────────────
 
 function throwIfInsufficientCredits(res: Response, d: Record<string, unknown>) {
   if (res.status === 402) {
     throw new InsufficientCreditsError((d.credits_required as number) ?? 1);
+  }
+  if (res.status === 429 && (d as { code?: string }).code === "RANKABILITY_LIMIT_REACHED") {
+    throw new RankabilityLimitError((d.limit as number) ?? 50);
   }
 }
 

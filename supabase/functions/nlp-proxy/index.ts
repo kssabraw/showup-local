@@ -74,11 +74,12 @@ serve(async (req: Request) => {
     });
   }
 
+  // Service role client — reused for both credit deduction and rankability limit
+  const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
   // ── Credit check + deduction ─────────────────────────────────────────────────
   const creditsRequired = ENDPOINT_CREDITS[endpoint] ?? 0;
   if (creditsRequired > 0) {
-    // Service role client — needed to call SECURITY DEFINER deduct_credits()
-    const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
     const { data: ok, error: deductError } = await adminClient.rpc("deduct_credits", {
       p_user_id:    user.id,
       p_amount:     creditsRequired,
@@ -105,6 +106,36 @@ serve(async (req: Request) => {
           status: 402,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         }
+      );
+    }
+  }
+
+  // ── Rankability monthly cap (50 checks/month, separate from credits) ─────────
+  if (endpoint === "/check-rankability") {
+    const { data: allowed, error: limitError } = await adminClient.rpc(
+      "check_rankability_limit",
+      { p_user_id: user.id },
+    );
+
+    if (limitError) {
+      console.error("Rankability limit check error:", limitError);
+      return new Response(JSON.stringify({ error: "Could not verify usage limit" }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    if (!allowed) {
+      return new Response(
+        JSON.stringify({
+          error: "Monthly map pack check limit reached",
+          code: "RANKABILITY_LIMIT_REACHED",
+          limit: 50,
+        }),
+        {
+          status: 429,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
       );
     }
   }

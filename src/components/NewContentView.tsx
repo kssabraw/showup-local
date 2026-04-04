@@ -11,7 +11,7 @@ import { StepIndicator } from "@/components/StepIndicator";
 import { useBusinessProfiles } from "@/hooks/useBusinessProfiles";
 import { useInvalidateSavedPages } from "@/hooks/useSavedPages";
 import { useCredits, useInvalidateCredits } from "@/hooks/useCredits";
-import { nlp, nlpStream, InsufficientCreditsError } from "@/lib/nlp-client";
+import { nlp, nlpStream, InsufficientCreditsError, RankabilityLimitError } from "@/lib/nlp-client";
 import type { AnalysisResult, RankabilityResult } from "@/lib/nlp-types";
 import type { SavedPage } from "@/hooks/useSavedPages";
 
@@ -220,16 +220,20 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         website: b.website,
       });
       setRankability(data);
-    } catch {
-      setRankability({
-        score: 0, verdict: "unknown", score_breakdown: {},
-        has_map_pack: false, competitors: [], ranking_categories: [],
-        category_match: "none", distance_ok: true,
-        keyword_in_competitor_names: 0, competitor_name_examples: [],
-        in_maps_results: false, maps_position: undefined, is_sab: false, sab_pack_mismatch: false,
-        physical_competitors_in_pack: 0,
-        message: "Could not retrieve map pack data.", match_count: 0, total_results: 0,
-      });
+    } catch (e: any) {
+      if (e instanceof RankabilityLimitError) {
+        setError(e.message);
+      } else {
+        setRankability({
+          score: 0, verdict: "unknown", score_breakdown: {},
+          has_map_pack: false, competitors: [], ranking_categories: [],
+          category_match: "none", distance_ok: true,
+          keyword_in_competitor_names: 0, competitor_name_examples: [],
+          in_maps_results: false, maps_position: undefined, is_sab: false, sab_pack_mismatch: false,
+          physical_competitors_in_pack: 0,
+          message: "Could not retrieve map pack data.", match_count: 0, total_results: 0,
+        });
+      }
     } finally {
       setRankabilityLoading(false);
     }
