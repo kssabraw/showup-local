@@ -2235,42 +2235,77 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             timeout=15.0,
             headers=CRAWL_HEADERS,
         ) as client:
-            # Discover site URLs
-            discovered = await _discover_via_sitemap(url, client)
-            if not discovered:
-                logger.info(f"find-page-for-keyword: no sitemap for {url} — trying nav")
-                discovered = await _discover_via_nav(url, client)
-
             origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
-            all_urls = list(dict.fromkeys(
-                [origin] + [u for u in discovered if _same_domain(u)]
-            ))
-            logger.info(f"find-page-for-keyword: {len(all_urls)} URLs discovered for {url}")
-
             biz_location = (body.location or "").strip()
+            city = biz_location.split(",")[0].strip()
+
+            # ── Run sitemap discovery + site: search in parallel ──────────────────
+            # site: search uses Google's own index — most reliable source.
+            # Sitemap gives additional URLs not yet indexed or filtered by Google.
+            async def _run_site_search() -> dict:
+                """Returns {url: title} from DataForSEO site: search."""
+                if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
+                    return {}
+                try:
+                    site_query = f"site:{base_netloc} {body.keyword} {city}".strip()
+                    logger.info(f"find-page-for-keyword: site-search query: {site_query!r}")
+                    creds = base64.b64encode(
+                        f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
+                    ).decode()
+                    _sr = await client.post(
+                        DATAFORSEO_ENDPOINT,
+                        headers={"Authorization": f"Basic {creds}", "Content-Type": "application/json"},
+                        json=[{"keyword": site_query, "language_name": "English", "depth": 10, "se_domain": "google.com"}],
+                        timeout=30.0,
+                    )
+                    results: dict = {}
+                    if _sr.status_code == 200:
+                        for _task in (_sr.json().get("tasks") or []):
+                            for _result in (_task.get("result") or []):
+                                for _item in (_result.get("items") or []):
+                                    if _item.get("type") == "organic":
+                                        _u = _item.get("url", "")
+                                        if _u and base_netloc in _u:
+                                            results[_u] = _item.get("title", "") or _u
+                    logger.info(f"find-page-for-keyword: site-search found {len(results)} URLs")
+                    return results
+                except Exception as _se:
+                    logger.warning(f"find-page-for-keyword: site-search failed ({_se})")
+                    return {}
+
+            async def _run_sitemap() -> List[str]:
+                discovered = await _discover_via_sitemap(url, client)
+                if not discovered:
+                    discovered = await _discover_via_nav(url, client)
+                return [u for u in discovered if _same_domain(u)]
+
+            # Fire both concurrently
+            sitemap_urls, serp_titles = await asyncio.gather(_run_sitemap(), _run_site_search())
+
+            # Merge: site: results first (Google-confirmed), then sitemap
+            all_urls = list(dict.fromkeys(
+                [origin]
+                + list(serp_titles.keys())         # Google-confirmed pages first
+                + sitemap_urls                      # sitemap pages second
+            ))
+            logger.info(f"find-page-for-keyword: {len(all_urls)} total URLs ({len(serp_titles)} from site-search, {len(sitemap_urls)} from sitemap)")
 
             # ── Step 1: Python substring filter ──────────────────────────────────────
-            # Find every URL whose slug contains at least one service word OR one
-            # location word.  No scoring heuristics — just plain string contains.
-            svc_matches  = [u for u in all_urls if any(_word_in_slug(w, urllib.parse.urlparse(u).path) for w in kw_words)]
-            loc_matches  = [u for u in all_urls if any(_word_in_slug(w, urllib.parse.urlparse(u).path) for w in loc_words)]
-            # Union, deduplicated
+            svc_matches = [u for u in all_urls if any(_word_in_slug(w, urllib.parse.urlparse(u).path) for w in kw_words)]
+            loc_matches = [u for u in all_urls if any(_word_in_slug(w, urllib.parse.urlparse(u).path) for w in loc_words)]
             seen: set = set()
             candidate_pool: list = []
             for u in svc_matches + loc_matches:
                 if u not in seen:
                     seen.add(u)
                     candidate_pool.append(u)
-            # Sort: pages with both service + location in slug first, then by hit count
             candidate_pool.sort(key=_slug_match_score, reverse=True)
             candidate_pool = candidate_pool[:25]
 
-            # ── Direct URL guessing (runs if sitemap found nothing useful) ─────────
-            # Generate slug permutations from service + location words and probe them.
-            # Catches cases where sitemap discovery fails entirely.
-            if not svc_matches and not loc_matches:
+            # ── Direct URL guessing (if substring filter found nothing) ───────────
+            if not candidate_pool:
                 svc_slug = "-".join(kw_words)
-                loc_slug = "-".join(loc_words[:2]) if loc_words else ""  # e.g. "newport-beach"
+                loc_slug = "-".join(loc_words[:2]) if loc_words else ""
                 guesses = []
                 if svc_slug and loc_slug:
                     guesses += [
@@ -2293,42 +2328,7 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                 guessed = [u for u in probe_results if u]
                 if guessed:
                     logger.info(f"find-page-for-keyword: direct-guess found {guessed}")
-                    candidate_pool = guessed + candidate_pool
-
-            # ── site: search fallback ─────────────────────────────────────────────
-            # If all sitemap + guessing attempts found nothing, query Google via
-            # DataForSEO with  site:{domain} {keyword} {city}  and use the results.
-            # Also stores titles from DataForSEO so we don't need to fetch the page
-            # (critical for sites that block bots with 403).
-            serp_titles: dict = {}  # url → title from DataForSEO results
-            if not candidate_pool and DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD:
-                try:
-                    city = (body.location or "").split(",")[0].strip()
-                    site_query = f"site:{base_netloc} {body.keyword} {city}".strip()
-                    logger.info(f"find-page-for-keyword: falling back to site-search: {site_query!r}")
-                    credentials = base64.b64encode(
-                        f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
-                    ).decode()
-                    _sr = await client.post(
-                        DATAFORSEO_ENDPOINT,
-                        headers={"Authorization": f"Basic {credentials}", "Content-Type": "application/json"},
-                        json=[{"keyword": site_query, "language_name": "English", "depth": 10, "se_domain": "google.com"}],
-                        timeout=30.0,
-                    )
-                    if _sr.status_code == 200:
-                        _sd = _sr.json()
-                        for _task in (_sd.get("tasks") or []):
-                            for _result in (_task.get("result") or []):
-                                for _item in (_result.get("items") or []):
-                                    if _item.get("type") == "organic":
-                                        _u = _item.get("url", "")
-                                        if _u and base_netloc in _u:
-                                            serp_titles[_u] = _item.get("title", "") or _u
-                                            if _u not in candidate_pool:
-                                                candidate_pool.append(_u)
-                        logger.info(f"find-page-for-keyword: site-search returned {len(candidate_pool)} results")
-                except Exception as _se:
-                    logger.warning(f"find-page-for-keyword: site-search failed ({_se})")
+                    candidate_pool = guessed
 
             # Generic fallback: if still nothing, take top 10 discovered URLs
             if not candidate_pool:
