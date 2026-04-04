@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { MapPin, Sparkles, ChevronDown, Building2, Loader2, FileSearch, FilePlus, PhoneCall, FileText, Trash2, CheckCircle2, PlusCircle } from "lucide-react";
+import { MapPin, Sparkles, ChevronDown, Building2, Loader2, FileSearch, FilePlus, PhoneCall, FileText, Trash2, CheckCircle2, PlusCircle, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import AnalysisResultsView from "@/components/AnalysisResultsView";
@@ -45,7 +45,7 @@ type CheckState =
 type ViewState =
   | { kind: "form" }
   | { kind: "score"; pageMatch: { url: string; title: string; h1?: string }; serpAnalysis: AnalysisResult; initialScoreResult: any }
-  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; tokenUsage: any; costBreakdown: any }
+  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; tokenUsage: any; costBreakdown: any; isNew?: boolean }
   | { kind: "analysis"; result: AnalysisResult };
 
 interface SavedPage {
@@ -223,6 +223,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
       pageTitle: page.page_title ?? "",
       tokenUsage: {},
       costBreakdown: {},
+      isNew: false,
     });
   };
 
@@ -493,6 +494,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
               pageTitle: genData.page_title ?? "",
               tokenUsage: genData.token_usage,
               costBreakdown: genData.cost_breakdown ?? {},
+              isNew: true,
             });
             return;
           }
@@ -788,7 +790,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         initialScoreResult={view.initialScoreResult}
         onBack={() => setView({ kind: "form" })}
         onGenerated={(result, mode) =>
-          setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "", htmlCssNotes: result.html_css_notes, tokenUsage: result.token_usage, costBreakdown: result.cost_breakdown ?? {} })
+          setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "", htmlCssNotes: result.html_css_notes, tokenUsage: result.token_usage, costBreakdown: result.cost_breakdown ?? {}, isNew: true })
         }
         onCreateNew={handleCreateNewPage}
         relatedPagePanel={relatedPagePanel}
@@ -802,6 +804,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         keyword={keyword}
         location={location}
         mode={view.mode}
+        isNew={view.isNew}
         contentHtml={view.contentHtml}
         schemaJson={view.schemaJson}
         pageTitle={view.pageTitle}
@@ -1251,45 +1254,82 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           <div className="rounded-xl border border-border overflow-hidden divide-y divide-border">
             {savedPages.map(page => {
               const biz = businesses.find(b => b.id === page.business_id);
-              const date = new Date(page.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+              const relativeTime = (() => {
+                const diff = Date.now() - new Date(page.created_at).getTime();
+                const mins = Math.floor(diff / 60000);
+                const hours = Math.floor(diff / 3600000);
+                const days = Math.floor(diff / 86400000);
+                if (mins < 2) return "just now";
+                if (mins < 60) return `${mins}m ago`;
+                if (hours < 24) return `${hours}h ago`;
+                if (days < 7) return `${days}d ago`;
+                return new Date(page.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+              })();
+              const downloadPage = () => {
+                const slug = page.keyword.replace(/\s+/g, "-").toLowerCase();
+                const blob = new Blob([page.content_html], { type: "text/html" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url; a.download = `${slug}.html`;
+                document.body.appendChild(a); a.click();
+                document.body.removeChild(a); URL.revokeObjectURL(url);
+              };
               return (
-                <div key={page.id} className="bg-card px-4 py-3 flex items-center gap-3">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-foreground truncate">
-                      {page.page_title || page.keyword}
-                    </p>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      {page.keyword} · {page.location.split(",")[0]}
-                      {biz && <> · <span className="text-foreground/70">{biz.business_name}</span></>}
-                      <span className="ml-2">{date}</span>
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="text-xs h-7 px-3"
-                      onClick={() => openSavedPage(page)}
-                    >
-                      View
-                    </Button>
-                    {confirmDeleteId === page.id ? (
-                      <div className="flex items-center gap-2 text-xs">
-                        <span className="text-muted-foreground">Delete?</span>
-                        <button onClick={() => deleteSavedPage(page.id)} className="text-destructive font-medium hover:underline">Yes</button>
-                        <button onClick={() => setConfirmDeleteId(null)} className="text-muted-foreground hover:text-foreground">No</button>
+                <div key={page.id} className="bg-card px-4 py-3">
+                  <div className="flex items-start gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p className="text-sm font-medium text-foreground truncate">
+                          {page.page_title || page.keyword}
+                        </p>
+                        <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded shrink-0 ${
+                          page.mode === "reoptimize"
+                            ? "bg-blue-500/10 text-blue-600"
+                            : "bg-green-500/10 text-green-600"
+                        }`}>
+                          {page.mode === "reoptimize" ? "Reoptimized" : "Generated"}
+                        </span>
                       </div>
-                    ) : (
-                      <button
-                        onClick={() => setConfirmDeleteId(page.id)}
-                        disabled={deletingId === page.id}
-                        className="text-muted-foreground hover:text-destructive transition-colors p-1 rounded"
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        {page.keyword} · {page.location.split(",")[0]}
+                        {biz && <> · {biz.business_name}</>}
+                        <span className="ml-2 opacity-60">{relativeTime}</span>
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="text-xs h-7 px-3"
+                        onClick={() => openSavedPage(page)}
                       >
-                        {deletingId === page.id
-                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          : <Trash2 className="w-3.5 h-3.5" />}
+                        View
+                      </Button>
+                      <button
+                        onClick={downloadPage}
+                        className="text-muted-foreground hover:text-foreground transition-colors p-1.5 rounded border border-border hover:bg-muted/40"
+                        title="Download HTML"
+                      >
+                        <Download className="w-3.5 h-3.5" />
                       </button>
-                    )}
+                      {confirmDeleteId === page.id ? (
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="text-muted-foreground">Delete?</span>
+                          <button onClick={() => deleteSavedPage(page.id)} className="text-destructive font-medium hover:underline">Yes</button>
+                          <button onClick={() => setConfirmDeleteId(null)} className="text-muted-foreground hover:text-foreground">No</button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setConfirmDeleteId(page.id)}
+                          disabled={deletingId === page.id}
+                          className="text-muted-foreground hover:text-destructive transition-colors p-1.5 rounded"
+                        >
+                          {deletingId === page.id
+                            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            : <Trash2 className="w-3.5 h-3.5" />}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               );

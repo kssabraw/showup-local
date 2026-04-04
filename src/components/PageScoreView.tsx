@@ -254,34 +254,37 @@ export default function PageScoreView({
         <div className="space-y-6">
           {/* Composite score */}
           <div className="bg-card rounded-xl border border-border p-6 flex items-center gap-6">
-            <div className="text-center">
+            <div className="text-center shrink-0">
               <div className={`text-6xl font-bold ${statusColor(scoreResult.composite_score)}`}>
                 {scoreResult.composite_score}
               </div>
-              <div className="text-xs text-muted-foreground mt-1">/ 100</div>
+              <div className="text-xs text-muted-foreground mt-1">out of 100</div>
             </div>
             <div>
-              <div className={`text-lg font-semibold capitalize ${statusColor(scoreResult.composite_score)}`}>
-                {scoreResult.composite_status.replace("_", " ")}
+              <div className={`text-lg font-semibold ${statusColor(scoreResult.composite_score)}`}>
+                {scoreResult.composite_score >= 80
+                  ? "Ready to publish"
+                  : scoreResult.composite_score >= 60
+                  ? "Good — a few tweaks could help"
+                  : scoreResult.composite_score >= 40
+                  ? "Needs some work"
+                  : "Needs significant improvements"}
               </div>
               <div className="text-sm text-muted-foreground mt-1">
                 {scoreResult.deficiencies.length === 0
-                  ? "No improvements needed."
+                  ? "No improvements needed — this page is well optimised."
                   : (() => {
                       const totalIssues = scoreResult.deficiencies.reduce((n, d) => n + (d.issues?.length ?? 1), 0);
-                      return `${totalIssues} SEO issue${totalIssues !== 1 ? "s" : ""} to address.`;
+                      return `${totalIssues} area${totalIssues !== 1 ? "s" : ""} to improve. Use Reoptimize to fix them automatically.`;
                     })()}
-              </div>
-              <div className="text-xs text-muted-foreground mt-1">
-                Cost: ${scoreResult.token_usage.cost_usd?.toFixed(5)} ({scoreResult.token_usage.input_tokens}+{scoreResult.token_usage.output_tokens} tokens)
               </div>
             </div>
           </div>
 
-          {/* Engine breakdown */}
+          {/* Score breakdown */}
           <div className="bg-card rounded-xl border border-border overflow-hidden">
             <div className="px-6 py-4 border-b border-border">
-              <h2 className="text-sm font-semibold text-foreground">Engine Breakdown</h2>
+              <h2 className="text-sm font-semibold text-foreground">Score Breakdown</h2>
             </div>
             <div className="divide-y divide-border">
               {Object.entries(ENGINE_LABELS).map(([key, label]) => {
@@ -309,7 +312,7 @@ export default function PageScoreView({
                       <div className="px-6 pb-4 space-y-3 bg-muted/20">
                         {eng.issues?.length > 0 && (
                           <div>
-                            <p className="text-xs font-semibold text-red-500 mb-1">Issues</p>
+                            <p className="text-xs font-semibold text-red-500 mb-1">What's missing</p>
                             <ul className="space-y-1">
                               {eng.issues.map((iss, i) => <li key={i} className="text-xs text-muted-foreground">• {iss}</li>)}
                             </ul>
@@ -317,7 +320,7 @@ export default function PageScoreView({
                         )}
                         {eng.recommendations?.length > 0 && (
                           <div>
-                            <p className="text-xs font-semibold text-green-500 mb-1">Recommended fixes</p>
+                            <p className="text-xs font-semibold text-green-500 mb-1">How to fix it</p>
                             <ul className="space-y-1">
                               {eng.recommendations.map((rec, i) => <li key={i} className="text-xs text-muted-foreground">→ {rec}</li>)}
                             </ul>
@@ -342,7 +345,7 @@ export default function PageScoreView({
             {scoreResult.deficiencies.length > 0 ? (
               <>
                 <p className="text-sm text-muted-foreground">
-                  Reoptimize this page to fix the SEO issues above and incorporate missing SERP signals.
+                  Let ShowUP automatically rewrite this page to fix the issues above and bring in the topics your competitors are covering.
                 </p>
                 <Button
                   className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"

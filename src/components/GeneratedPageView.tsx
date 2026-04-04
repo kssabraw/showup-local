@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { Copy, Check, Save, Loader2, ExternalLink, Download, Mail } from "lucide-react";
+import { Copy, Check, Save, Loader2, ExternalLink, Download, Mail, CheckCircle2, X } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 
 const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "";
@@ -10,6 +10,7 @@ interface Props {
   keyword: string;
   location: string;
   mode: "generate" | "reoptimize";
+  isNew?: boolean;
   contentHtml: string;
   schemaJson: string;
   pageTitle: string;
@@ -59,10 +60,11 @@ function scoreBadge(score?: number, status?: string) {
 
 export default function GeneratedPageView({
   keyword, location, mode, contentHtml, schemaJson, pageTitle, htmlCssNotes,
-  tokenUsage, costBreakdown,
+  tokenUsage, costBreakdown, isNew = false,
   businessId, businessName, website, gbpCategory, address,
   onBack, onNewPage, onRelatedAction,
 }: Props) {
+  const [bannerDismissed, setBannerDismissed] = useState(false);
   const [copiedHtml, setCopiedHtml] = useState(false);
   const [copiedSchema, setCopiedSchema] = useState(false);
   const [copiedRichText, setCopiedRichText] = useState(false);
@@ -303,6 +305,51 @@ Let me know if you have any questions!`
           </div>
         </div>
       </div>
+
+      {/* Celebration banner — shown only for freshly generated pages */}
+      {isNew && !bannerDismissed && (
+        <div className="bg-green-500/10 border border-green-500/25 rounded-xl px-5 py-4 flex items-start gap-4">
+          <CheckCircle2 className="w-5 h-5 text-green-500 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-foreground">
+              {mode === "reoptimize" ? "Your page has been reoptimized." : "Your page is ready to publish."}
+            </p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              ~{wordCount} words
+              {schemaJson ? " · Local schema markup included" : ""}
+              {" · "}{location.split(",")[0]}
+            </p>
+            <div className="flex items-center gap-4 mt-3">
+              <button
+                onClick={() => setActiveTab("preview")}
+                className="text-xs font-medium text-accent hover:opacity-80 transition-opacity"
+              >
+                Preview it →
+              </button>
+              <button
+                onClick={downloadHtml}
+                className="text-xs font-medium text-accent hover:opacity-80 transition-opacity"
+              >
+                Download HTML →
+              </button>
+              <button
+                onClick={savePage}
+                disabled={saving || saved}
+                className="text-xs font-medium text-accent hover:opacity-80 transition-opacity disabled:opacity-40"
+              >
+                {saved ? "Saved ✓" : "Save to ShowUP →"}
+              </button>
+            </div>
+          </div>
+          <button
+            onClick={() => setBannerDismissed(true)}
+            className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
+            aria-label="Dismiss"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Cost breakdown panel */}
       {showCostBreakdown && (
