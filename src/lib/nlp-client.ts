@@ -15,7 +15,8 @@ import { supabase } from "@/integrations/supabase/client";
 export const NLP_SERVICE_URL =
   import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
 
-const PROXY_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/nlp-proxy`;
+const PROXY_URL    = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/nlp-proxy`;
+const PURCHASE_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/purchase-rankability-pack`;
 
 async function getAuthHeader(): Promise<string> {
   const { data: { session } } = await supabase.auth.getSession();
@@ -242,3 +243,23 @@ export const nlp = {
     analysis_status: string;
   }>("/analyze-business", body, signal),
 };
+
+/** Purchase a map pack check top-up. Returns a Stripe Checkout URL once Stripe is configured. */
+export async function purchaseRankabilityPack(
+  pack_id: "5" | "10" | "20",
+): Promise<{ checkout_url: string | null; message?: string }> {
+  const authHeader = await getAuthHeader();
+  const res = await fetch(PURCHASE_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(authHeader ? { Authorization: authHeader } : {}),
+    },
+    body: JSON.stringify({ pack_id }),
+  });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    throw new Error((d as { error?: string }).error || `Purchase failed: ${res.status}`);
+  }
+  return res.json();
+}

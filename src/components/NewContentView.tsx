@@ -11,7 +11,8 @@ import { StepIndicator } from "@/components/StepIndicator";
 import { useBusinessProfiles } from "@/hooks/useBusinessProfiles";
 import { useInvalidateSavedPages } from "@/hooks/useSavedPages";
 import { useCredits, useInvalidateCredits } from "@/hooks/useCredits";
-import { nlp, nlpStream, InsufficientCreditsError, RankabilityLimitError } from "@/lib/nlp-client";
+import { nlp, nlpStream, InsufficientCreditsError, RankabilityLimitError, purchaseRankabilityPack } from "@/lib/nlp-client";
+import RankabilityPackModal from "@/components/RankabilityPackModal";
 import type { AnalysisResult, RankabilityResult } from "@/lib/nlp-types";
 import type { SavedPage } from "@/hooks/useSavedPages";
 
@@ -73,6 +74,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const [relatedPages, setRelatedPages] = useState<Array<{ keyword: string; group: string; status: string; url?: string; composite_score?: number }> | null>(null);
   const [rankability, setRankability] = useState<RankabilityResult | null>(null);
   const [rankabilityLoading, setRankabilityLoading] = useState(false);
+  const [showPackModal, setShowPackModal] = useState(false);
   const [relatedLoading, setRelatedLoading] = useState(false);
   const [selectedForCreate, setSelectedForCreate] = useState<Set<string>>(new Set());
   const [bulkCreating, setBulkCreating] = useState(false);
@@ -222,7 +224,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
       setRankability(data);
     } catch (e: any) {
       if (e instanceof RankabilityLimitError) {
-        setError(e.message);
+        setShowPackModal(true);
       } else {
         setRankability({
           score: 0, verdict: "unknown", score_breakdown: {},
@@ -718,7 +720,24 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const isChecking = checkState.status === "scanning" || checkState.status === "scoring" || checkState.status === "found";
 
   // ── Main form ──────────────────────────────────────────────────────────────
+  const handlePurchase = async (pack: { id: "5" | "10" | "20"; checks: number }) => {
+    const result = await purchaseRankabilityPack(pack.id);
+    if (result.checkout_url) {
+      window.location.href = result.checkout_url;
+    } else {
+      setShowPackModal(false);
+      setError(result.message ?? "Payment processing is not yet available. Please check back soon.");
+    }
+  };
+
   return (
+    <>
+    {showPackModal && (
+      <RankabilityPackModal
+        onClose={() => setShowPackModal(false)}
+        onPurchase={handlePurchase}
+      />
+    )}
     <div className="max-w-2xl mx-auto space-y-6">
       <div>
         <button onClick={onBack} className="text-sm text-muted-foreground hover:text-foreground mb-2 transition-colors">
@@ -1212,6 +1231,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         onOpen={openSavedPage}
       />
     </div>
+    </>
   );
 };
 
