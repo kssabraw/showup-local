@@ -60,13 +60,13 @@ interface SavedPage {
   created_at: string;
 }
 
-const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; defaultLocation?: string }) => {
+const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialLocation }: { onBack: () => void; defaultLocation?: string; initialKeyword?: string; initialLocation?: string }) => {
   const [businesses, setBusinesses] = useState<BusinessProfile[]>([]);
   const [selectedBusinessId, setSelectedBusinessId] = useState("");
-  const [keyword, setKeyword] = useState("");
-  const [location, setLocation] = useState(defaultLocation);
+  const [keyword, setKeyword] = useState(initialKeyword ?? "");
+  const [location, setLocation] = useState(initialLocation ?? defaultLocation);
   const [locationCode, setLocationCode] = useState<number | null>(null);
-  const [locationInput, setLocationInput] = useState(defaultLocation);
+  const [locationInput, setLocationInput] = useState(initialLocation ?? defaultLocation);
   const [locationSuggestions, setLocationSuggestions] = useState<{ name: string; code: number }[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [locationLoading, setLocationLoading] = useState(false);
