@@ -76,6 +76,8 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
   const [checkState, setCheckState] = useState<CheckState>({ status: "idle" });
   const [view, setView] = useState<ViewState>({ kind: "form" });
   const [creatingPhase, setCreatingPhase] = useState<"serp" | "generating">("serp");
+  const [generateProgress, setGenerateProgress] = useState(0);
+  const [generateStep, setGenerateStep] = useState("");
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -367,18 +369,15 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
 
   const handleCreateNewPage = async (kwOverride?: string) => {
     setCheckState({ status: "creating" });
-    setCreatingPhase("serp");
+    setGenerateProgress(0);
+    setGenerateStep("Starting…");
     setElapsedSeconds(0);
     setError("");
     elapsedRef.current = setInterval(() => setElapsedSeconds(s => s + 1), 1000);
     const kw = kwOverride ?? keyword;
+    const b = businesses.find(b => b.id === selectedBusinessId)!;
     try {
-      const serpData = await runAnalysisFor(kw, location, locationCode);
-      await saveAnalysisToSupabase(serpData);
-
-      const b = businesses.find(b => b.id === selectedBusinessId)!;
-      setCreatingPhase("generating");
-      const genRes = await fetch(`${NLP_SERVICE_URL}/generate-page`, {
+      const res = await fetch(`${NLP_SERVICE_URL}/generate-page`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
         body: JSON.stringify({
@@ -391,16 +390,61 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
           differentiators: b.differentiators,
           brand_voice: b.brand_voice,
           detected_icp: b.detected_icp,
-          serp_analysis: serpData,
         }),
       });
-      if (!genRes.ok) {
-        const d = await genRes.json().catch(() => ({}));
-        throw new Error(d.detail || `Generation error: ${genRes.status}`);
+      if (!res.ok || !res.body) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.detail || `Generation error: ${res.status}`);
       }
-      const genData = await genRes.json();
-      await saveTokenUsage(genData.token_usage);
-      setView({ kind: "generated", mode: "generate", contentHtml: genData.content_html, schemaJson: genData.schema_json, pageTitle: genData.page_title ?? "", tokenUsage: genData.token_usage, costBreakdown: genData.cost_breakdown ?? {} });
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          let evt: any;
+          try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+          if (evt.progress !== undefined) setGenerateProgress(evt.progress);
+          if (evt.message) setGenerateStep(evt.message);
+          if (evt.step === "error") throw new Error(evt.message || "Generation failed");
+          if (evt.step === "done" && evt.result) {
+            const genData = evt.result;
+            await saveTokenUsage(genData.token_usage);
+            // Save fresh competitor analysis to Supabase
+            if (genData.serp_analysis) {
+              await supabase.from("keyword_analyses").upsert(
+                {
+                  business_id: selectedBusinessId,
+                  keyword: kw.trim(),
+                  location: location.trim(),
+                  serp_urls: genData.serp_analysis.serp_urls ?? [],
+                  related_keywords: genData.serp_analysis.related_keywords,
+                  top_quadgrams: genData.serp_analysis.top_quadgrams,
+                  google_entities: genData.serp_analysis.google_entities,
+                  zone_targets: genData.serp_analysis.zone_targets ?? {},
+                  competitor_headings: genData.serp_analysis.competitor_headings ?? [],
+                },
+                { onConflict: "business_id,keyword,location" }
+              );
+            }
+            setView({
+              kind: "generated",
+              mode: "generate",
+              contentHtml: genData.content_html,
+              schemaJson: genData.schema_json,
+              pageTitle: genData.page_title ?? "",
+              tokenUsage: genData.token_usage,
+              costBreakdown: genData.cost_breakdown ?? {},
+            });
+            return;
+          }
+        }
+      }
     } catch (e: any) {
       setError(e.message || "Something went wrong");
       setCheckState({ status: "not_found" });
@@ -415,8 +459,7 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
     const b = businesses.find(b => b.id === selectedBusinessId);
     if (!b) return false;
     try {
-      const serpData = await runAnalysisFor(kw, location, locationCode);
-      const genRes = await fetch(`${NLP_SERVICE_URL}/generate-page`, {
+      const res = await fetch(`${NLP_SERVICE_URL}/generate-page`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
         body: JSON.stringify({
@@ -429,25 +472,47 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
           differentiators: b.differentiators,
           brand_voice: b.brand_voice,
           detected_icp: b.detected_icp,
-          serp_analysis: serpData,
         }),
       });
-      if (!genRes.ok) return false;
-      const genData = await genRes.json();
-      await supabase.from("generated_pages").upsert(
-        {
-          business_id: selectedBusinessId,
-          keyword: kw.trim(),
-          location: location.trim(),
-          mode: "generate",
-          page_title: genData.page_title ?? kw,
-          content_html: genData.content_html,
-          schema_json: genData.schema_json ?? null,
-        },
-        { onConflict: "business_id,keyword,location" }
-      );
-      await supabase.from("token_usage").insert({ ...genData.token_usage, business_id: selectedBusinessId, keyword: kw });
-      return true;
+      if (!res.ok || !res.body) return false;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          let evt: any;
+          try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+          if (evt.step === "error") return false;
+          if (evt.step === "done" && evt.result) {
+            const genData = evt.result;
+            await supabase.from("generated_pages").upsert(
+              {
+                business_id: selectedBusinessId,
+                keyword: kw.trim(),
+                location: location.trim(),
+                mode: "generate",
+                page_title: genData.page_title ?? kw,
+                content_html: genData.content_html,
+                schema_json: genData.schema_json ?? null,
+              },
+              { onConflict: "business_id,keyword,location" }
+            );
+            await supabase.from("token_usage").insert({
+              ...genData.token_usage,
+              business_id: selectedBusinessId,
+              keyword: kw,
+            });
+            return true;
+          }
+        }
+      }
+      return false;
     } catch {
       return false;
     }
@@ -958,47 +1023,34 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
 
         {/* Creating state — step tracker */}
         {checkState.status === "creating" && (() => {
-          const serpDone = creatingPhase === "generating";
-          // Step estimates in seconds: SERP fetch ~5s, scraping ~40s, Claude ~30s
-          const STEP_ESTIMATES = [5, 40, 30];
-          const TOTAL_EST = STEP_ESTIMATES.reduce((a, b) => a + b, 0);
           const steps = [
             {
               label: "Fetching top Google results",
               detail: "DataForSEO organic SERP",
-              est: STEP_ESTIMATES[0],
-              done: serpDone,
-              active: !serpDone,
+              done: generateProgress >= 40,
+              active: generateProgress < 40,
             },
             {
               label: "Scraping & analysing competitor pages",
               detail: "Up to 20 pages — TF-IDF, quadgrams, entities",
-              est: STEP_ESTIMATES[1],
-              done: serpDone,
-              active: !serpDone,
+              done: generateProgress >= 65,
+              active: generateProgress >= 15 && generateProgress < 65,
             },
             {
               label: "Generating page with Claude",
               detail: "13-section structure + JSON-LD schema",
-              est: STEP_ESTIMATES[2],
-              done: false,
-              active: creatingPhase === "generating",
+              done: generateProgress >= 100,
+              active: generateProgress >= 65,
             },
           ];
           const mins = Math.floor(elapsedSeconds / 60);
           const secs = elapsedSeconds % 60;
           const elapsed = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
-          const remaining = Math.max(0, TOTAL_EST - elapsedSeconds);
-          const remMins = Math.floor(remaining / 60);
-          const remSecs = remaining % 60;
-          const remLabel = remaining <= 0 ? "almost done…"
-            : remMins > 0 ? `~${remMins}m ${remSecs}s remaining`
-            : `~${remSecs}s remaining`;
           return (
             <div className="px-4 py-4 bg-muted/30 rounded-lg space-y-3">
               <div className="flex items-center justify-between text-xs text-muted-foreground">
                 <span className="font-medium">Building your page…</span>
-                <span>{elapsed} · {remLabel}</span>
+                <span>{elapsed}</span>
               </div>
               <div className="space-y-2">
                 {steps.map((step, i) => (
@@ -1019,9 +1071,6 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
                         <p className={`text-sm ${step.active ? "text-foreground font-medium" : step.done ? "text-muted-foreground line-through" : "text-muted-foreground"}`}>
                           {step.label}
                         </p>
-                        {!step.done && (
-                          <span className="text-xs text-muted-foreground shrink-0">~{step.est}s</span>
-                        )}
                       </div>
                       {step.active && (
                         <p className="text-xs text-muted-foreground mt-0.5">{step.detail}</p>
@@ -1030,6 +1079,13 @@ const NewContentView = ({ onBack, defaultLocation = "" }: { onBack: () => void; 
                   </div>
                 ))}
               </div>
+              <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-accent rounded-full transition-all duration-500"
+                  style={{ width: `${generateProgress}%` }}
+                />
+              </div>
+              {generateStep && <p className="text-xs text-muted-foreground text-center">{generateStep}</p>}
             </div>
           );
         })()}

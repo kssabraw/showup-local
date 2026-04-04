@@ -2652,87 +2652,129 @@ class GeneratePageResponse(BaseModel):
     cost_breakdown: dict = {}
 
 
-@app.post('/generate-page', response_model=GeneratePageResponse, dependencies=[Depends(verify_api_key)])
+@app.post('/generate-page', dependencies=[Depends(verify_api_key)])
 @limiter.limit("5/minute")
 async def generate_page(request: Request, body: GeneratePageRequest):
     if not ANTHROPIC_API_KEY:
         raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
 
-    import anthropic as _anthropic
-    client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    async def event_stream():
+        import anthropic as _anthropic
 
-    city = body.location.split(",")[0].strip()
-    serp_ctx = _serp_context(body.serp_analysis)
+        def sse(data: dict) -> str:
+            return f"data: {json.dumps(data)}\n\n"
 
-    diff_text = ""
-    if body.differentiators:
-        diff_text = "Differentiators (use these — include mechanism for each):\n" + \
-            "\n".join(f"  - {d.get('claim','')} (mechanism: {d.get('mechanism','')})" for d in body.differentiators)
+        try:
+            city = body.location.split(",")[0].strip()
 
-    reviews_text = ""
-    if body.reviews:
-        qualifying = [r for r in body.reviews if r.get("rating", 0) >= 4][:5]
-        if qualifying:
-            reviews_text = "GBP Reviews (use verbatim in Section 7 — do NOT fabricate):\n" + \
-                "\n".join(f'  ★{r.get("rating")} — {r.get("reviewer","")}: "{r.get("text","")}" ({r.get("date","")})'
-                          for r in qualifying)
+            # ── Step 1: Fetch competitor URLs ────────────────────────────────
+            yield sse({"step": "fetching_serp", "message": "Fetching competitor URLs from Google…", "progress": 5})
+            async with httpx.AsyncClient() as _sc:
+                comp_urls = await fetch_serp_urls(body.keyword, body.location, _sc)
+            if not comp_urls:
+                yield sse({"step": "error", "message": "DataForSEO returned no competitor URLs"})
+                return
 
-    icp = body.icp_type or "General Homeowner"
+            # ── Step 2: Scrape competitor pages ──────────────────────────────
+            yield sse({"step": "scraping", "message": f"Scraping {len(comp_urls)} competitor pages…", "progress": 15})
+            comp_pages = await scrape_urls(comp_urls)
+            if len(comp_pages) < 2:
+                yield sse({"step": "error", "message": "Could not scrape enough competitor pages"})
+                return
+            yield sse({"step": "scraping_done", "message": f"Scraped {len(comp_pages)} pages successfully", "progress": 40})
 
-    # Build brand voice block
-    brand_voice_text = ""
-    if body.brand_voice:
-        bv = body.brand_voice
-        # Use recommended_accepted voice if user accepted one, otherwise fall back to recommended, then current
-        accepted = bv.get("recommended_accepted")
-        if accepted == "recommended":
-            voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
-        elif accepted == "current":
-            voice = bv.get("current_voice") or {}
-        else:
-            voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
-        guide = bv.get("writer_execution_guide", "")
-        if voice or guide:
-            lines = ["BRAND VOICE (match this exactly):"]
-            if voice.get("tone"):
-                lines.append(f"  Tone: {voice['tone']}")
-            if voice.get("personality"):
-                lines.append(f"  Personality: {', '.join(voice['personality'])}")
-            ws = voice.get("writing_style", {})
-            if ws:
-                lines.append(f"  Writing style: {ws.get('sentence_length','')} sentences, {ws.get('person','')} person, {ws.get('formality','')} formality")
-            vocab = voice.get("vocabulary", {})
-            if vocab.get("use"):
-                lines.append(f"  Words/phrases to use: {', '.join(vocab['use'])}")
-            if vocab.get("avoid"):
-                lines.append(f"  Words/phrases to avoid: {', '.join(vocab['avoid'])}")
-            if guide:
-                lines.append(f"  Writer instructions: {guide}")
-            brand_voice_text = "\n".join(lines)
+            # ── Step 3: Analyze competitor signals ───────────────────────────
+            yield sse({"step": "analyzing_competitors", "message": "Extracting competitor entities and phrases…", "progress": 45})
+            comp_zone_buckets: Dict[str, List[str]] = {z: [] for z in ["title", "h1", "h2_h3", "body", "paragraphs"]}
+            for html in comp_pages:
+                zones = extract_zones(html)
+                for z in comp_zone_buckets:
+                    comp_zone_buckets[z].append(zones.get(z, ""))
+            comp_entities = await get_google_entities(comp_zone_buckets["paragraphs"])
+            comp_quadgrams = get_top_quadgrams(comp_zone_buckets["paragraphs"], body.keyword)
+            comp_related: dict = {}
+            for zone in ("title", "h1", "h2_h3", "body"):
+                comp_related[zone] = get_related_keywords_for_zone(comp_zone_buckets[zone], body.keyword)
+            fresh_serp_analysis = {
+                "google_entities": comp_entities,
+                "top_quadgrams": comp_quadgrams,
+                "related_keywords": comp_related,
+            }
+            yield sse({"step": "analyzing_competitors_done", "message": f"Found {len(comp_entities)} entities, {len(comp_quadgrams)} phrases", "progress": 65})
 
-    # Build ICP block
-    icp_text = ""
-    if body.detected_icp:
-        segments = body.detected_icp.get("segments", [])
-        if segments:
-            lines = ["TARGET CUSTOMER PROFILES (write to these):"]
-            for seg in segments[:3]:  # cap at 3 segments
-                name = seg.get("name", "")
-                desc = seg.get("description", "")
-                msg = seg.get("messaging", {})
-                tone = msg.get("tone", "")
-                hooks = msg.get("hooks", [])
-                pain = msg.get("trust_signals", [])
-                lines.append(f"  [{name}] {desc}")
-                if tone:
-                    lines.append(f"    Messaging tone: {tone}")
-                if hooks:
-                    lines.append(f"    Headline hooks: {'; '.join(hooks[:2])}")
-                if pain:
-                    lines.append(f"    Trust signals: {'; '.join(pain[:2])}")
-            icp_text = "\n".join(lines)
+            # ── Step 4: Generate page with Claude ────────────────────────────
+            yield sse({"step": "generating", "message": "Generating page content…", "progress": 70})
 
-    prompt = f"""You are an expert local SEO content writer. Generate a complete, publish-ready local service page following the exact structure below.
+            zone_targets_text = _zone_targets_text(fresh_serp_analysis)
+
+            diff_text = ""
+            if body.differentiators:
+                diff_text = "Differentiators (use these — include mechanism for each):\n" + \
+                    "\n".join(f"  - {d.get('claim','')} (mechanism: {d.get('mechanism','')})" for d in body.differentiators)
+
+            reviews_text = ""
+            if body.reviews:
+                qualifying = [r for r in body.reviews if r.get("rating", 0) >= 4][:5]
+                if qualifying:
+                    reviews_text = "GBP Reviews (use verbatim in Section 7 — do NOT fabricate):\n" + \
+                        "\n".join(f'  ★{r.get("rating")} — {r.get("reviewer","")}: "{r.get("text","")}" ({r.get("date","")})'
+                                  for r in qualifying)
+
+            icp = body.icp_type or "General Homeowner"
+
+            # Build brand voice block
+            brand_voice_text = ""
+            if body.brand_voice:
+                bv = body.brand_voice
+                accepted = bv.get("recommended_accepted")
+                if accepted == "recommended":
+                    voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
+                elif accepted == "current":
+                    voice = bv.get("current_voice") or {}
+                else:
+                    voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
+                guide = bv.get("writer_execution_guide", "")
+                if voice or guide:
+                    lines = ["BRAND VOICE (match this exactly):"]
+                    if voice.get("tone"):
+                        lines.append(f"  Tone: {voice['tone']}")
+                    if voice.get("personality"):
+                        lines.append(f"  Personality: {', '.join(voice['personality'])}")
+                    ws = voice.get("writing_style", {})
+                    if ws:
+                        lines.append(f"  Writing style: {ws.get('sentence_length','')} sentences, {ws.get('person','')} person, {ws.get('formality','')} formality")
+                    vocab = voice.get("vocabulary", {})
+                    if vocab.get("use"):
+                        lines.append(f"  Words/phrases to use: {', '.join(vocab['use'])}")
+                    if vocab.get("avoid"):
+                        lines.append(f"  Words/phrases to avoid: {', '.join(vocab['avoid'])}")
+                    if guide:
+                        lines.append(f"  Writer instructions: {guide}")
+                    brand_voice_text = "\n".join(lines)
+
+            # Build ICP block
+            icp_text = ""
+            if body.detected_icp:
+                segments = body.detected_icp.get("segments", [])
+                if segments:
+                    lines = ["TARGET CUSTOMER PROFILES (write to these):"]
+                    for seg in segments[:3]:
+                        name = seg.get("name", "")
+                        desc = seg.get("description", "")
+                        msg = seg.get("messaging", {})
+                        tone = msg.get("tone", "")
+                        hooks = msg.get("hooks", [])
+                        pain = msg.get("trust_signals", [])
+                        lines.append(f"  [{name}] {desc}")
+                        if tone:
+                            lines.append(f"    Messaging tone: {tone}")
+                        if hooks:
+                            lines.append(f"    Headline hooks: {'; '.join(hooks[:2])}")
+                        if pain:
+                            lines.append(f"    Trust signals: {'; '.join(pain[:2])}")
+                    icp_text = "\n".join(lines)
+
+            prompt = f"""You are an expert local SEO content writer. Generate a complete, publish-ready local service page following the exact structure below.
 
 BUSINESS DATA
 Name: {body.business_name}
@@ -2750,7 +2792,7 @@ ICP: {icp}
 {icp_text}
 {diff_text}
 {reviews_text}
-{serp_ctx}
+{zone_targets_text}
 
 OUTPUT FORMAT
 Return valid HTML only. No markdown. No explanations outside the HTML. Structure:
@@ -2866,61 +2908,74 @@ HARD RULES — NEVER:
 - Use vague differentiators ("trusted", "professional", "high quality") without a mechanism
 - Invent or guess phone numbers, addresses, hours, zip codes, street names, or landmarks not explicitly provided in the business data above"""
 
-    try:
-        msg = await client.messages.create(
-            model=GENERATION_MODEL,
-            max_tokens=8000,
-            messages=[{"role": "user", "content": prompt}],
-        )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Claude generation error: {e}")
+            client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+            try:
+                msg = await client.messages.create(
+                    model=GENERATION_MODEL,
+                    max_tokens=8000,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+            except Exception as e:
+                yield sse({"step": "error", "message": f"Claude generation error: {e}"})
+                return
 
-    token_rec = _token_record("generate-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
-    raw = msg.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
-        raw = re.sub(r'\n?```$', '', raw)
-        raw = raw.strip()
+            token_rec = _token_record("generate-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
+            raw = msg.content[0].text.strip()
+            if raw.startswith("```"):
+                raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
+                raw = re.sub(r'\n?```$', '', raw)
+                raw = raw.strip()
 
-    # Extract <title> tag
-    title_match = re.search(r'<title>(.*?)</title>', raw, re.IGNORECASE | re.DOTALL)
-    page_title = title_match.group(1).strip() if title_match else ""
-    if title_match:
-        raw = raw[:title_match.start()] + raw[title_match.end():]
-        raw = raw.strip()
+            # Extract <title> tag
+            title_match = re.search(r'<title>(.*?)</title>', raw, re.IGNORECASE | re.DOTALL)
+            page_title = title_match.group(1).strip() if title_match else ""
+            if title_match:
+                raw = raw[:title_match.start()] + raw[title_match.end():]
+                raw = raw.strip()
 
-    # Split content_html from schema_json
-    schema_split = raw.find('<script type="application/ld+json">')
-    if schema_split != -1:
-        content_html = raw[:schema_split].strip()
-        schema_json = raw[schema_split:].strip()
-    else:
-        content_html = raw
-        schema_json = ""
+            # Split content_html from schema_json
+            schema_split = raw.find('<script type="application/ld+json">')
+            if schema_split != -1:
+                content_html = raw[:schema_split].strip()
+                schema_json = raw[schema_split:].strip()
+            else:
+                content_html = raw
+                schema_json = ""
 
-    # Build combined cost breakdown
-    ac = (body.serp_analysis or {}).get("analysis_cost", {})
-    claude_cost = token_rec["cost_usd"]
-    cost_breakdown = {
-        "dataforseo":           ac.get("dataforseo", 0),
-        "scrapeowl_pages":      ac.get("scrapeowl_pages", 0),
-        "scrapeowl":            ac.get("scrapeowl", 0),
-        "google_nlp_chars":     ac.get("google_nlp_chars", 0),
-        "google_nlp":           ac.get("google_nlp", 0),
-        "claude_model":         token_rec["model"],
-        "claude_input_tokens":  token_rec["input_tokens"],
-        "claude_output_tokens": token_rec["output_tokens"],
-        "claude":               round(claude_cost, 6),
-        "total":                round(ac.get("subtotal", 0) + claude_cost, 6),
-    }
+            # Build cost breakdown from fresh scrape
+            scrapeowl_pages = len(comp_pages)
+            scrapeowl_cost = round(scrapeowl_pages * COST_SCRAPEOWL_PER_PAGE, 6)
+            google_nlp_chars = sum(len(p) for p in comp_zone_buckets["paragraphs"])
+            google_nlp_cost = round(google_nlp_chars / 1000 * COST_GOOGLE_NLP_PER_1K_CHARS, 6)
+            claude_cost = token_rec["cost_usd"]
+            cost_breakdown = {
+                "dataforseo":           COST_DATAFORSEO_PER_ANALYSIS,
+                "scrapeowl_pages":      scrapeowl_pages,
+                "scrapeowl":            scrapeowl_cost,
+                "google_nlp_chars":     google_nlp_chars,
+                "google_nlp":           google_nlp_cost,
+                "claude_model":         token_rec["model"],
+                "claude_input_tokens":  token_rec["input_tokens"],
+                "claude_output_tokens": token_rec["output_tokens"],
+                "claude":               round(claude_cost, 6),
+                "total":                round(COST_DATAFORSEO_PER_ANALYSIS + scrapeowl_cost + google_nlp_cost + claude_cost, 6),
+            }
 
-    return GeneratePageResponse(
-        content_html=content_html,
-        schema_json=schema_json,
-        page_title=page_title,
-        token_usage=token_rec,
-        cost_breakdown=cost_breakdown,
-    )
+            result = {
+                "content_html": content_html,
+                "schema_json": schema_json,
+                "page_title": page_title,
+                "token_usage": token_rec,
+                "cost_breakdown": cost_breakdown,
+                "serp_analysis": fresh_serp_analysis,
+            }
+            yield sse({"step": "done", "progress": 100, "result": result})
+
+        except Exception as e:
+            logger.warning(f"generate-page error: {e}")
+            yield sse({"step": "error", "message": str(e)})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 # ── /reoptimize-page ──────────────────────────────────────────────────────────
