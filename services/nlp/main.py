@@ -636,8 +636,8 @@ async def analyze(request: Request, body: AnalysisRequest):
         body=get_related_keywords_for_zone(zone_buckets["body"], body.keyword),
     )
     quadgrams = get_top_quadgrams(zone_buckets["paragraphs"], body.keyword)
-    google_entities = await get_google_entities(zone_buckets["paragraphs"])
-    zone_targets = compute_zone_targets(zone_buckets, related, google_entities)
+    # Google NLP is deferred to /generate-page (only paid when user actually generates content)
+    zone_targets = compute_zone_targets(zone_buckets, related, [])
 
     # Aggregate competitor headings by page spread
     total_pages = len(scraped_urls)
@@ -665,17 +665,13 @@ async def analyze(request: Request, body: AnalysisRequest):
                 "page_pct": round(count / total_pages, 2),
             })
 
-    # Estimate API costs for this analysis run
-    nlp_chars = sum(min(len(doc), GOOGLE_NLP_MAX_BYTES) for doc in zone_buckets["paragraphs"])
+    # Estimate API costs for this analysis run (Google NLP deferred to /generate-page)
     scrapeowl_cost = round(len(scraped_urls) * COST_SCRAPEOWL_PER_PAGE, 6)
-    google_nlp_cost = round(nlp_chars / 1000 * COST_GOOGLE_NLP_PER_1K_CHARS, 6)
     analysis_cost = {
         "dataforseo": round(COST_DATAFORSEO_PER_ANALYSIS, 6),
         "scrapeowl_pages": len(scraped_urls),
         "scrapeowl": scrapeowl_cost,
-        "google_nlp_chars": nlp_chars,
-        "google_nlp": google_nlp_cost,
-        "subtotal": round(COST_DATAFORSEO_PER_ANALYSIS + scrapeowl_cost + google_nlp_cost, 6),
+        "subtotal": round(COST_DATAFORSEO_PER_ANALYSIS + scrapeowl_cost, 6),
     }
 
     return AnalysisResponse(
@@ -684,7 +680,7 @@ async def analyze(request: Request, body: AnalysisRequest):
         serp_urls=scraped_urls,
         related_keywords=related,
         top_quadgrams=quadgrams,
-        google_entities=google_entities,
+        google_entities=[],  # fetched lazily in /generate-page to avoid cost on exploratory analyses
         zone_targets=zone_targets,
         competitor_headings=competitor_headings,
         analysis_cost=analysis_cost,
@@ -2746,7 +2742,46 @@ async def generate_page(request: Request, body: GeneratePageRequest):
     client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
     city = body.location.split(",")[0].strip()
-    serp_ctx = _serp_context(body.serp_analysis)
+
+    # ── Lazy Google NLP ──────────────────────────────────────────────────────
+    # Entities are not fetched during /analyze (saves ~$0.25 per exploratory run).
+    # We fetch them here, only when the user actually commits to generating a page.
+    # We reuse the competitor URLs already stored in the cached analysis; fetching
+    # paragraph text via direct httpx (no ScrapeOwl cost — no JS rendering needed).
+    serp_analysis_enriched: dict = dict(body.serp_analysis or {})
+    if GOOGLE_NLP_API_KEY and not serp_analysis_enriched.get("google_entities"):
+        _nlp_urls = serp_analysis_enriched.get("serp_urls", [])[:5]
+        if _nlp_urls:
+            async def _fetch_para_text(url: str) -> str:
+                try:
+                    async with httpx.AsyncClient(follow_redirects=True, timeout=8.0) as _hc:
+                        _r = await _hc.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"})
+                        if _r.status_code == 200:
+                            _soup = BeautifulSoup(_r.text, "html.parser")
+                            return " ".join(p.get_text(strip=True) for p in _soup.find_all("p"))
+                except Exception:
+                    pass
+                return ""
+
+            _para_texts = await asyncio.gather(*[_fetch_para_text(u) for u in _nlp_urls])
+            _para_texts = [t for t in _para_texts if len(t) > 100]
+            if _para_texts:
+                try:
+                    _fetched_entities = await get_google_entities(_para_texts)
+                    if _fetched_entities:
+                        serp_analysis_enriched["google_entities"] = _fetched_entities
+                        _nlp_chars = sum(min(len(t), GOOGLE_NLP_MAX_BYTES) for t in _para_texts)
+                        _nlp_cost = round(_nlp_chars / 1000 * COST_GOOGLE_NLP_PER_1K_CHARS, 6)
+                        serp_analysis_enriched.setdefault("analysis_cost", {}).update({
+                            "google_nlp_chars": _nlp_chars,
+                            "google_nlp": _nlp_cost,
+                        })
+                        logger.info("Lazy Google NLP: fetched %d entities from %d pages", len(_fetched_entities), len(_para_texts))
+                except Exception as _nlp_err:
+                    logger.warning("Lazy Google NLP fetch failed: %s", _nlp_err)
+                    # Non-fatal — generation continues without entity hints
+
+    serp_ctx = _serp_context(serp_analysis_enriched)
 
     diff_text = ""
     if body.differentiators:
@@ -2868,8 +2903,8 @@ ICP: {icp}
         content_html = raw
         schema_json = ""
 
-    # Build combined cost breakdown
-    ac = (body.serp_analysis or {}).get("analysis_cost", {})
+    # Build combined cost breakdown (includes lazy Google NLP if it ran)
+    ac = serp_analysis_enriched.get("analysis_cost", {})
     claude_cost = token_rec["cost_usd"]
     cost_breakdown = {
         "dataforseo":           ac.get("dataforseo", 0),
