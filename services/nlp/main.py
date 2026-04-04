@@ -2264,25 +2264,50 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                                         _u = _item.get("url", "")
                                         if _u and base_netloc in _u:
                                             serp_titles[_u] = _item.get("title", "") or _u
+                                        if len(serp_titles) >= 20:
+                                            break
                     logger.info(f"find-page-for-keyword: site-search found {len(serp_titles)} URLs: {list(serp_titles.keys())[:5]}")
                 except Exception as _se:
                     logger.warning(f"find-page-for-keyword: site-search failed ({_se})")
 
-            # If site: search returned results, pick the best non-blog one.
-            # Google already sorted by relevance so we trust the ranking.
+            # If site: search returned results, filter non-blog candidates and
+            # let Haiku pick the most relevant one.
             if serp_titles:
-                # Prefer non-blog pages; fall back to blog if nothing else
-                best_url: Optional[str] = None
-                best_title: str = ""
-                for _u, _t in serp_titles.items():
-                    if not _is_likely_blog_post(_u):
-                        best_url = _u
-                        best_title = _t
-                        break
-                if best_url is None:
-                    # All results look like blog posts — return the first anyway
-                    best_url, best_title = next(iter(serp_titles.items()))
+                non_blog = [(u, t) for u, t in serp_titles.items() if not _is_likely_blog_post(u)]
+                blog_only = [(u, t) for u, t in serp_titles.items() if _is_likely_blog_post(u)]
+                candidates = non_blog if non_blog else blog_only
 
+                haiku_pick: Optional[str] = None
+                if ANTHROPIC_API_KEY and len(candidates) > 1:
+                    try:
+                        _ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+                        location_context = biz_location if biz_location else "unknown"
+                        url_list_text = "\n".join(
+                            f"{i+1}. {u}  |  {t}" for i, (u, t) in enumerate(candidates)
+                        )
+                        _msg = await _ac.messages.create(
+                            model="claude-haiku-4-5-20251001",
+                            max_tokens=64,
+                            temperature=0,
+                            messages=[{"role": "user", "content": (
+                                f"Keyword: \"{body.keyword}\"\nLocation: {location_context}\n\n"
+                                f"Pick the single best URL that is a DEDICATED SERVICE PAGE targeting this keyword.\n"
+                                f"- Prefer URLs whose slug or title contains the core service AND location\n"
+                                f"- Business-type words (company, contractor, professional, etc.) are not in slugs — ignore them\n"
+                                f"- A near-match service page is better than 0\n\n"
+                                f"Reply with ONLY the number of the best URL.\n\n{url_list_text}"
+                            )}],
+                        )
+                        raw_pick = _msg.content[0].text.strip()
+                        pick_num = int(re.search(r'\d+', raw_pick).group()) if re.search(r'\d+', raw_pick) else 0
+                        if 1 <= pick_num <= len(candidates):
+                            haiku_pick = candidates[pick_num - 1][0]
+                            logger.info(f"find-page-for-keyword: Haiku picked #{pick_num} → {haiku_pick}")
+                    except Exception as _he:
+                        logger.warning(f"find-page-for-keyword: Haiku failed ({_he})")
+
+                best_url = haiku_pick or candidates[0][0]
+                best_title = serp_titles.get(best_url, best_url)
                 logger.info(f"find-page-for-keyword: site-search primary result → {best_url}")
                 is_blog = _is_likely_blog_post(best_url)
                 return FindPageResponse(
