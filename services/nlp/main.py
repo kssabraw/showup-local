@@ -3437,25 +3437,16 @@ def _rankability_score(
     }
 
 
-# SAB category keywords — if any of these appear in the GBP category, the business
-# is assumed to be a service area business (comes to the customer, not vice versa).
-_SAB_CATEGORY_KEYWORDS = {
-    "plumb", "electri", "roofer", "roofing", "hvac", "heating", "cooling",
-    "air condition", "landscap", "lawn", "pest control", "locksmith",
-    "cleaning service", "maid", "handyman", "tree service", "tree trim",
-    "gutter", "carpet clean", "pressure wash", "window clean", "chimney",
-    "pool service", "pool clean", "moving", "mover", "junk removal",
-    "appliance repair", "garage door", "painting contractor", "painter",
-    "siding", "insulation", "drywall", "flooring install", "tile install",
-    "fence", "deck builder", "concrete", "masonry", "septic",
-    "water heater", "drain", "sewer", "irrigation", "sprinkler",
-    "exterminator", "wildlife", "snow removal", "towing",
-}
-
-def _infer_is_sab(gbp_category: str) -> bool:
-    """Infer whether a GBP category is typically a service area business."""
-    cat_lower = gbp_category.lower()
-    return any(kw in cat_lower for kw in _SAB_CATEGORY_KEYWORDS)
+def _infer_is_sab(address: Optional[str]) -> bool:
+    """
+    Infer whether a business is a service area business (SAB) from its address.
+    Physical businesses have a street address starting with a number (e.g. "123 Main St").
+    SABs typically hide their address and store only a city, region, or service area
+    description — so the address either starts with a letter or is absent.
+    """
+    if not address or not address.strip():
+        return True   # no address stored → treat as SAB
+    return not re.match(r'^\d', address.strip())
 
 
 class RankabilityRequest(BaseModel):
@@ -3464,6 +3455,7 @@ class RankabilityRequest(BaseModel):
     location_code: Optional[int] = None
     gbp_category: str
     business_name: Optional[str] = None
+    business_address: Optional[str] = None  # used to infer SAB (no street number = SAB)
     business_lat: Optional[float] = None
     business_lng: Optional[float] = None
     website: Optional[str] = None  # to check top-10 organic presence
@@ -3643,7 +3635,7 @@ async def check_rankability(request: Request, body: RankabilityRequest):
             distance_ok = distance_miles <= 10.0
 
     # ── SAB auto-detection ─────────────────────────────────────────────────────
-    is_sab = _infer_is_sab(body.gbp_category)
+    is_sab = _infer_is_sab(body.business_address)
 
     # ── Score ──────────────────────────────────────────────────────────────────
     score_data = _rankability_score(

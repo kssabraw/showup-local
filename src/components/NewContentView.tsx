@@ -213,6 +213,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         location_code: locationCode,
         gbp_category: b.gbp_category,
         business_name: b.business_name,
+        business_address: b.address,
         business_lat: b.latitude ?? null,
         business_lng: b.longitude ?? null,
         website: b.website,

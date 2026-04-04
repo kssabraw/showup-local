@@ -192,6 +192,7 @@ export const nlp = {
       location_code?: number | null;
       gbp_category: string;
       business_name?: string;
+      business_address?: string | null;
       business_lat?: number | null;
       business_lng?: number | null;
       website?: string | null;
