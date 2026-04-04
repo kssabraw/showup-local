@@ -2256,6 +2256,127 @@ def _serp_context(serp_analysis: Optional[dict]) -> str:
     return "\n".join(parts)
 
 
+# ── /plan-pages ──────────────────────────────────────────────────────────────
+
+class PlanPagesRequest(BaseModel):
+    website_url: str
+    keyword: str
+    location: str
+
+class PlanPageItem(BaseModel):
+    keyword: str
+    group: str          # "primary" | "parent" | "sibling" | "child"
+    status: str         # "exists" | "missing"
+    page_url: Optional[str] = None
+    page_title: Optional[str] = None
+
+@app.post('/plan-pages', dependencies=[Depends(verify_api_key)])
+@limiter.limit("5/minute")
+async def plan_pages(request: Request, body: PlanPagesRequest):
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+
+    async def event_stream():
+        def sse(data: dict) -> str:
+            return f"data: {json.dumps(data)}\n\n"
+
+        try:
+            import anthropic as _anthropic
+            haiku_client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+            city = body.location.split(",")[0].strip()
+            parsed = urllib.parse.urlparse(
+                body.website_url if body.website_url.startswith("http") else f"https://{body.website_url}"
+            )
+            base_netloc = parsed.netloc
+
+            # Step 1: derive keyword universe via Haiku
+            yield sse({"step": "deriving", "message": "Deriving keyword targets…", "progress": 5})
+            try:
+                kw_data, _ = await _derive_related_keywords(body.keyword, body.location, haiku_client)
+            except Exception as _de:
+                logger.warning(f"plan-pages: keyword derivation failed ({_de}), using seed only")
+                kw_data = {"parents": [], "siblings": [], "children": []}
+
+            # Build ordered list with group labels, cap at 20 total
+            ordered: list[tuple[str, str]] = [(body.keyword, "primary")]
+            for kw in kw_data.get("parents", []):
+                ordered.append((kw, "parent"))
+            for kw in kw_data.get("siblings", []):
+                ordered.append((kw, "sibling"))
+            for kw in kw_data.get("children", []):
+                ordered.append((kw, "child"))
+
+            # Deduplicate (case-insensitive)
+            seen: set = set()
+            unique: list[tuple[str, str]] = []
+            for kw, grp in ordered:
+                key = kw.strip().lower()
+                if key and key not in seen:
+                    seen.add(key)
+                    unique.append((kw.strip(), grp))
+                if len(unique) >= 20:
+                    break
+
+            yield sse({"step": "checking", "message": f"Checking {len(unique)} keywords against your site…", "progress": 10, "total": len(unique)})
+
+            # Step 2: for each keyword, run site: search via DataForSEO
+            async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+                for i, (kw, grp) in enumerate(unique):
+                    progress = 10 + int((i / len(unique)) * 85)
+                    yield sse({
+                        "step": "checking_keyword",
+                        "message": f"Checking: {kw}",
+                        "progress": progress,
+                        "current": i + 1,
+                        "total": len(unique),
+                    })
+
+                    item: dict = {
+                        "keyword": kw,
+                        "group": grp,
+                        "status": "missing",
+                        "page_url": None,
+                        "page_title": None,
+                    }
+
+                    if DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD:
+                        try:
+                            site_query = f"site:{base_netloc} {kw} {city}".strip()
+                            creds = base64.b64encode(
+                                f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
+                            ).decode()
+                            _sr = await client.post(
+                                DATAFORSEO_ENDPOINT,
+                                headers={"Authorization": f"Basic {creds}", "Content-Type": "application/json"},
+                                json=[{"keyword": site_query, "language_name": "English", "depth": 5, "se_domain": "google.com"}],
+                                timeout=30.0,
+                            )
+                            if _sr.status_code == 200:
+                                for _task in (_sr.json().get("tasks") or []):
+                                    for _result in (_task.get("result") or []):
+                                        for _result_item in (_result.get("items") or []):
+                                            if _result_item.get("type") == "organic":
+                                                _u = _result_item.get("url", "")
+                                                if _u and base_netloc in _u and not _is_likely_blog_post(_u):
+                                                    item["status"] = "exists"
+                                                    item["page_url"] = _u
+                                                    item["page_title"] = _result_item.get("title", "") or _u
+                                                    break
+                        except Exception as _e:
+                            logger.warning(f"plan-pages: site-search failed for {kw!r}: {_e}")
+
+                    yield sse({"step": "keyword_result", "item": item})
+                    await asyncio.sleep(0.2)  # gentle pacing between DataForSEO calls
+
+            yield sse({"step": "done", "progress": 100, "message": "Scan complete"})
+
+        except Exception as e:
+            logger.warning(f"plan-pages error: {e}")
+            yield sse({"step": "error", "message": str(e)})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 # ── /find-page-for-keyword ────────────────────────────────────────────────────
 
 class FindPageRequest(BaseModel):

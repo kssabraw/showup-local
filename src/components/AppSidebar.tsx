@@ -1,11 +1,12 @@
-import { 
-  LayoutDashboard, 
-  FileText, 
-  MapPin, 
-  Settings, 
+import {
+  LayoutDashboard,
+  FileText,
+  MapPin,
+  Settings,
   Plus,
   ChevronLeft,
-  Zap
+  Zap,
+  ClipboardList
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -19,6 +20,7 @@ interface SidebarProps {
 const navItems = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "content", label: "Content", icon: FileText },
+  { id: "planning", label: "Planning", icon: ClipboardList },
   { id: "locations", label: "Locations", icon: MapPin },
   { id: "settings", label: "Settings", icon: Settings },
 ];

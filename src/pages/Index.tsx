@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import AppSidebar from "@/components/AppSidebar";
 import DashboardView from "@/components/DashboardView";
 import NewContentView from "@/components/NewContentView";
+import PlanningView from "@/components/PlanningView";
 import BusinessSearchView, { type BusinessDetails } from "@/components/BusinessSearchView";
 import LocationsView from "@/components/LocationsView";
 import LocationDetailView from "@/components/LocationDetailView";
@@ -20,6 +21,8 @@ const Index = () => {
   const [activeItem, setActiveItem] = useState("dashboard");
   const [collapsed, setCollapsed] = useState(false);
   const [selectedLocationId, setSelectedLocationId] = useState<string | null>(null);
+  const [planningKeyword, setPlanningKeyword] = useState("");
+  const [planningLocation, setPlanningLocation] = useState("");
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -173,7 +176,20 @@ const Index = () => {
             />
           )}
           {activeItem === "content" && (
-            <NewContentView onBack={() => setActiveItem("dashboard")} />
+            <NewContentView
+              onBack={() => setActiveItem("dashboard")}
+              initialKeyword={planningKeyword}
+              initialLocation={planningLocation}
+            />
+          )}
+          {activeItem === "planning" && (
+            <PlanningView
+              onCreatePage={(kw, loc) => {
+                setPlanningKeyword(kw);
+                setPlanningLocation(loc);
+                setActiveItem("content");
+              }}
+            />
           )}
           {activeItem === "locations" && !selectedLocationId && (
             <LocationsView
