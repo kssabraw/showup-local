@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, RefreshCw, CheckCircle2, AlertCircle, Sparkles, Plus, Trash2, X } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
@@ -73,6 +73,7 @@ const LocationDetailView = ({
   const [editingBrandVoice, setEditingBrandVoice] = useState(false);
   const [brandVoiceDraft, setBrandVoiceDraft] = useState<any>(null);
   const [savingBrandVoice, setSavingBrandVoice] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     fetchBusiness();
@@ -149,17 +150,22 @@ const LocationDetailView = ({
     }
   };
 
+  const cancelAnalysis = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setRescanning(false);
+    setScanningBrandVoice(false);
+  };
+
   const runAnalysis = async (b: BusinessProfile) => {
+    abortRef.current = new AbortController();
     setRescanning(true);
 
     let website = b.website;
     if (!website) {
       website = await fetchWebsiteFromGBP(b);
     }
-    if (!website) {
-      setRescanning(false);
-      return;
-    }
+    // website may still be null — backend handles no-website case gracefully
 
     // Set status to running
     await supabase
@@ -172,11 +178,12 @@ const LocationDetailView = ({
         method: "POST",
         headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
         body: JSON.stringify({
-          website_url: website,
+          ...(website ? { website_url: website } : {}),
           business_name: b.business_name,
           gbp_category: b.gbp_category,
           gbp_categories: b.gbp_categories || [],
         }),
+        signal: abortRef.current.signal,
       });
 
       if (!response.ok) {
@@ -197,13 +204,19 @@ const LocationDetailView = ({
 
       if (error) throw error;
       await fetchBusiness();
-    } catch (err) {
+    } catch (err: any) {
+      if (err.name === "AbortError") return;
       console.error("Analysis error:", err);
       await supabase
         .from("business_profiles")
         .update({ analysis_status: "failed" })
         .eq("id", b.id);
       await fetchBusiness();
+      toast({
+        title: "Analysis failed",
+        description: err instanceof Error ? err.message : "Could not complete the website analysis. Please try again.",
+        variant: "destructive",
+      });
     } finally {
       setRescanning(false);
     }
@@ -279,10 +292,11 @@ const LocationDetailView = ({
   };
 
   const scanBrandVoice = async (b: BusinessProfile) => {
+    abortRef.current = new AbortController();
     let website = b.website;
     if (!website) {
       website = await fetchWebsiteFromGBP(b);
-      if (!website) return;
+      // website may still be null — backend handles no-website case via category inference
     }
     setScanningBrandVoice(true);
     try {
@@ -290,9 +304,11 @@ const LocationDetailView = ({
         method: "POST",
         headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
         body: JSON.stringify({
-          website_url: website,
+          ...(website ? { website_url: website } : {}),
           business_name: b.business_name,
+          gbp_category: b.gbp_category || "",
         }),
+        signal: abortRef.current.signal,
       });
       if (!response.ok) {
         const errBody = await response.json().catch(() => ({}));
@@ -314,7 +330,8 @@ const LocationDetailView = ({
         .eq("id", b.id);
       if (error) throw error;
       await fetchBusiness();
-    } catch (err) {
+    } catch (err: any) {
+      if (err.name === "AbortError") return;
       console.error("Brand voice scan error:", err);
       toast({
         title: "Brand voice scan failed",
@@ -422,19 +439,27 @@ const LocationDetailView = ({
 
       {/* Tabs */}
       <div className="flex gap-1 bg-muted rounded-lg p-1">
-        {TABS.map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`flex-1 text-xs font-medium py-1.5 rounded-md transition-colors ${
-              activeTab === tab
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {tab}
-          </button>
-        ))}
+        {TABS.map((tab) => {
+          const hasDot =
+            (tab === "ICP & Differentiators" && (icp?.segments?.length > 0 || differentiators.length > 0)) ||
+            (tab === "Brand Voice" && !!business.brand_voice);
+          return (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`flex-1 text-xs font-medium py-1.5 rounded-md transition-colors relative ${
+                activeTab === tab
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {tab}
+              {hasDot && (
+                <span className="absolute top-1 right-2 w-1.5 h-1.5 rounded-full bg-green-500" />
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {/* Overview tab */}
@@ -535,14 +560,19 @@ const LocationDetailView = ({
                   </button>
                 )}
                 {analysisStatus !== "running" && !editingIcp && (
-                  <button
-                    onClick={() => runAnalysis(business)}
-                    disabled={rescanning}
-                    className="flex items-center gap-1.5 text-xs font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    {rescanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                    {rescanning ? "Scanning..." : icp ? "Re-run" : "Scan Website"}
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => runAnalysis(business)}
+                      disabled={rescanning}
+                      className="flex items-center gap-1.5 text-xs font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {rescanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                      {rescanning ? "Scanning..." : icp ? "Re-run" : (business.website ? "Scan Website" : "Detect from Category")}
+                    </button>
+                    {rescanning && (
+                      <button onClick={cancelAnalysis} className="text-xs text-muted-foreground hover:text-destructive transition-colors">Cancel</button>
+                    )}
+                  </div>
                 )}
                 {editingIcp && (
                   <div className="flex items-center gap-3">
@@ -712,7 +742,7 @@ const LocationDetailView = ({
             {/* Empty state */}
             {!editingIcp && !icp && (
               <p className="text-sm text-muted-foreground text-center py-4">
-                {analysisStatus === "running" ? "Detecting ICP…" : "Click Scan Website above to auto-detect ICP."}
+                {analysisStatus === "running" ? "Detecting ICP…" : (business.website ? "Click Scan Website above to auto-detect ICP." : "Click Detect from Category above to infer ICP from your business type.")}
               </p>
             )}
           </div>
@@ -929,14 +959,19 @@ const LocationDetailView = ({
                     </button>
                   )}
                   {!editingBrandVoice && (
-                    <button
-                      onClick={() => scanBrandVoice(business)}
-                      disabled={scanningBrandVoice}
-                      className="flex items-center gap-1.5 text-xs font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      {scanningBrandVoice ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                      {scanningBrandVoice ? "Scanning..." : bv ? "Re-scan" : "Scan Website"}
-                    </button>
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => scanBrandVoice(business)}
+                        disabled={scanningBrandVoice}
+                        className="flex items-center gap-1.5 text-xs font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {scanningBrandVoice ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                        {scanningBrandVoice ? "Scanning..." : bv ? "Re-scan" : (business.website ? "Scan Website" : "Generate from Category")}
+                      </button>
+                      {scanningBrandVoice && (
+                        <button onClick={cancelAnalysis} className="text-xs text-muted-foreground hover:text-destructive transition-colors">Cancel</button>
+                      )}
+                    </div>
                   )}
                   {editingBrandVoice && (
                     <div className="flex items-center gap-3">
@@ -951,7 +986,9 @@ const LocationDetailView = ({
 
               {!bv && (
                 <p className="text-sm text-muted-foreground text-center py-4">
-                  {scanningBrandVoice ? "Scanning website for brand voice signals…" : "Click Scan Website to auto-generate a brand voice profile."}
+                  {scanningBrandVoice
+                    ? (business.website ? "Scanning website for brand voice signals…" : "Generating brand voice from business category…")
+                    : (business.website ? "Click Scan Website to auto-generate a brand voice profile." : "No website found. Click Generate from Category to create a brand voice profile based on your business type.")}
                 </p>
               )}
 
@@ -1113,6 +1150,38 @@ const LocationDetailView = ({
           </div>
         );
       })()}
+
+      {/* Sticky save/cancel bar — shown whenever any section is in edit mode */}
+      {(editingIcp || editingDifferentiators || editingBrandVoice) && (
+        <div className="fixed bottom-0 left-0 right-0 z-50 border-t border-border bg-card/95 backdrop-blur-sm px-6 py-3 flex items-center justify-between">
+          <p className="text-xs text-muted-foreground">
+            {editingIcp ? "Editing ICP segments" : editingDifferentiators ? "Editing differentiators" : "Editing brand voice"}
+          </p>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => {
+                setEditingIcp(false);
+                setEditingDifferentiators(false);
+                setEditingBrandVoice(false);
+              }}
+              className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => {
+                if (editingIcp) saveIcp();
+                else if (editingDifferentiators) saveDifferentiators();
+                else if (editingBrandVoice) saveBrandVoice();
+              }}
+              disabled={savingIcp || savingBrandVoice}
+              className="text-sm font-medium bg-accent text-accent-foreground px-4 py-1.5 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              {(savingIcp || savingBrandVoice) ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

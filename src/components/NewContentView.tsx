@@ -80,6 +80,8 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const [generateStep, setGenerateStep] = useState("");
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const bulkCancelledRef = useRef(false);
 
   const [savedPages, setSavedPages] = useState<SavedPage[]>([]);
   const [loadingSaved, setLoadingSaved] = useState(false);
@@ -94,6 +96,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const [bulkProgress, setBulkProgress] = useState<{ current: number; total: number; currentKw: string } | null>(null);
   const [bulkDone, setBulkDone] = useState(0);
   const [manualUrl, setManualUrl] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const locationDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const locationContainerRef = useRef<HTMLDivElement>(null);
@@ -199,6 +202,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   };
 
   const deleteSavedPage = async (id: string) => {
+    setConfirmDeleteId(null);
     setDeletingId(id);
     await supabase.from("generated_pages").delete().eq("id", id);
     setSavedPages(prev => prev.filter(p => p.id !== id));
@@ -226,11 +230,21 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     await supabase.from("token_usage").insert({ ...record, business_id: selectedBusinessId, keyword });
   };
 
-  const runAnalysisFor = async (kw: string, loc: string, locCode: number | null): Promise<AnalysisResult> => {
+  const cancelOperation = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    bulkCancelledRef.current = true;
+    if (elapsedRef.current) { clearInterval(elapsedRef.current); elapsedRef.current = null; }
+    setCheckState({ status: "idle" });
+    setElapsedSeconds(0);
+  };
+
+  const runAnalysisFor = async (kw: string, loc: string, locCode: number | null, signal?: AbortSignal): Promise<AnalysisResult> => {
     const response = await fetch(`${NLP_SERVICE_URL}/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
       body: JSON.stringify({ keyword: kw.trim(), location: loc.trim(), location_code: locCode }),
+      signal,
     });
     if (!response.ok) {
       const d = await response.json().catch(() => ({}));
@@ -286,6 +300,9 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
       return;
     }
 
+    abortRef.current = new AbortController();
+    const signal = abortRef.current.signal;
+
     setError("");
     setCheckState({ status: "scanning" });
     setRelatedPages(null);
@@ -299,6 +316,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           method: "POST",
           headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
           body: JSON.stringify({ website_url: b.website, keyword: keyword.trim(), location: location.trim() }),
+          signal,
         }),
         // Fire related-pages in background; results stored separately
         fetch(`${NLP_SERVICE_URL}/related-pages`, {
@@ -312,6 +330,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             address: b.address,
             website: b.website,
           }),
+          signal,
         }).then(r => r.json()).then(d => {
           setRelatedPages(d.items ?? []);
           setRelatedLoading(false);
@@ -328,6 +347,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         foundPage = { ...scanData.page, isBlogPost: scanData.is_blog_post === true };
       }
     } catch (e: any) {
+      if (e.name === "AbortError") return;
       setError(e.message || "Site scan failed");
       setCheckState({ status: "idle" });
       setRelatedLoading(false);
@@ -346,11 +366,15 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const runScoreForPage = async (pageToScore: { url: string; title: string; h1?: string; isBlogPost?: boolean }) => {
     const b = businesses.find(b => b.id === selectedBusinessId);
     if (!b) return;
+
+    abortRef.current = new AbortController();
+    const signal = abortRef.current.signal;
+
     setCheckState({ status: "scoring", page: pageToScore });
     setError("");
     try {
       const [serpData, scoreRes] = await Promise.all([
-        runAnalysis(),
+        runAnalysisFor(keyword, location, locationCode, signal),
         fetch(`${NLP_SERVICE_URL}/score-page`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
@@ -362,6 +386,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             gbp_category: b.gbp_category,
             address: b.address,
           }),
+          signal,
         }),
       ]);
 
@@ -385,12 +410,16 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         setCheckState({ status: "idle" });
       }
     } catch (e: any) {
+      if (e.name === "AbortError") return;
       setError(e.message || "Scoring failed");
       setCheckState({ status: "idle" });
     }
   };
 
   const handleCreateNewPage = async (kwOverride?: string) => {
+    abortRef.current = new AbortController();
+    const signal = abortRef.current.signal;
+
     setCheckState({ status: "creating" });
     setGenerateProgress(0);
     setGenerateStep("Starting…");
@@ -414,6 +443,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           brand_voice: b.brand_voice,
           detected_icp: b.detected_icp,
         }),
+        signal,
       });
       if (!res.ok || !res.body) {
         const d = await res.json().catch(() => ({}));
@@ -469,16 +499,17 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         }
       }
     } catch (e: any) {
+      if (e.name === "AbortError") return;
       setError(e.message || "Something went wrong");
       setCheckState({ status: "not_found" });
     } finally {
       setLoadingLabel("");
-      if (elapsedRef.current) clearInterval(elapsedRef.current);
+      if (elapsedRef.current) { clearInterval(elapsedRef.current); elapsedRef.current = null; }
     }
   };
 
   // Creates + auto-saves a page for the given keyword without navigating away
-  const createAndSavePage = async (kw: string): Promise<boolean> => {
+  const createAndSavePage = async (kw: string, signal?: AbortSignal): Promise<boolean> => {
     const b = businesses.find(b => b.id === selectedBusinessId);
     if (!b) return false;
     try {
@@ -496,6 +527,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           brand_voice: b.brand_voice,
           detected_icp: b.detected_icp,
         }),
+        signal,
       });
       if (!res.ok || !res.body) return false;
       const reader = res.body.getReader();
@@ -544,12 +576,15 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const handleBulkCreate = async () => {
     const queue = Array.from(selectedForCreate);
     if (!queue.length) return;
+    abortRef.current = new AbortController();
+    bulkCancelledRef.current = false;
     setBulkCreating(true);
     setBulkDone(0);
     let done = 0;
     for (let i = 0; i < queue.length; i++) {
+      if (bulkCancelledRef.current) break;
       setBulkProgress({ current: i + 1, total: queue.length, currentKw: queue[i] });
-      const ok = await createAndSavePage(queue[i]);
+      const ok = await createAndSavePage(queue[i], abortRef.current?.signal);
       if (ok) done++;
     }
     setBulkCreating(false);
@@ -557,6 +592,12 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     setBulkDone(done);
     setSelectedForCreate(new Set());
     fetchSavedPages();
+  };
+
+  const cancelBulk = () => {
+    bulkCancelledRef.current = true;
+    abortRef.current?.abort();
+    abortRef.current = null;
   };
 
   const handleScoreManualUrl = async () => {
@@ -706,13 +747,18 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           </div>
         )}
         {selectedForCreate.size > 0 && (
-          <div className="px-4 py-3 border-t border-border bg-muted/20">
+          <div className="px-4 py-3 border-t border-border bg-muted/20 space-y-2">
             <Button className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold"
               onClick={handleBulkCreate} disabled={bulkCreating}>
               {bulkCreating && bulkProgress
                 ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Creating {bulkProgress.currentKw} ({bulkProgress.current}/{bulkProgress.total})…</>
                 : <><Sparkles className="w-4 h-4 mr-2" />Create {selectedForCreate.size} Selected Page{selectedForCreate.size > 1 ? "s" : ""}</>}
             </Button>
+            {bulkCreating && (
+              <button onClick={cancelBulk} className="w-full text-xs text-muted-foreground hover:text-destructive transition-colors text-center py-0.5">
+                Cancel
+              </button>
+            )}
           </div>
         )}
         {bulkDone > 0 && !bulkCreating && (
@@ -848,7 +894,6 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         {/* Area / Location input */}
         <div className="space-y-2" ref={locationContainerRef}>
           <label className="text-sm font-medium text-foreground">Area</label>
-          <p className="text-xs text-muted-foreground -mt-1">Type to search — select from the list</p>
           <div className="relative">
             <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground z-10" />
             <input
@@ -856,6 +901,11 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
               value={locationInput}
               onChange={(e) => handleLocationInput(e.target.value)}
               onFocus={() => { if (locationSuggestions.length > 0) setShowSuggestions(true); }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && locationSuggestions.length > 0) {
+                  selectLocation(locationSuggestions[0]);
+                }
+              }}
               disabled={isChecking}
               placeholder="Search locations…"
               className={`w-full bg-background border rounded-lg pl-9 pr-8 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60 ${location ? "border-green-500" : "border-input"}`}
@@ -898,9 +948,12 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
 
         {/* Scanning state */}
         {checkState.status === "scanning" && (
-          <div className="flex items-center gap-3 px-4 py-3 bg-muted/30 rounded-lg text-sm text-muted-foreground">
-            <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-            <span>Scanning <span className="font-medium text-foreground">{selectedBusiness?.website}</span> for "{keyword}" pages…</span>
+          <div className="px-4 py-3 bg-muted/30 rounded-lg space-y-2">
+            <div className="flex items-center gap-3 text-sm text-muted-foreground">
+              <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+              <span>Scanning <span className="font-medium text-foreground">{selectedBusiness?.website}</span> for "{keyword}" pages…</span>
+            </div>
+            <button onClick={cancelOperation} className="text-xs text-muted-foreground hover:text-destructive transition-colors">Cancel</button>
           </div>
         )}
 
@@ -951,9 +1004,12 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                 <span>⚠️ This appears to be a blog post, not a service page. Consider creating a dedicated service page for this keyword.</span>
               </div>
             )}
-            <div className="flex items-center gap-3 px-4 py-3 bg-muted/30 rounded-lg text-sm text-muted-foreground">
-              <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-              <span>Fetching competitor data and scoring this page…</span>
+            <div className="px-4 py-3 bg-muted/30 rounded-lg space-y-2">
+              <div className="flex items-center gap-3 text-sm text-muted-foreground">
+                <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                <span>Fetching competitor data and scoring this page… <span className="opacity-60 text-xs">(usually 20–40s)</span></span>
+              </div>
+              <button onClick={cancelOperation} className="text-xs text-muted-foreground hover:text-destructive transition-colors">Cancel</button>
             </div>
           </div>
         )}
@@ -990,15 +1046,19 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
               <p className="text-sm text-foreground">
                 If this page isn't ranking, on-page reoptimization is unlikely to be the issue. There may be off-page factors, domain authority gaps, or GBP signals holding it back.
               </p>
-              <div className="bg-card border border-border rounded-lg px-4 py-3 flex items-start gap-3">
-                <PhoneCall className="w-4 h-4 text-accent mt-0.5 shrink-0" />
-                <div>
+              <a
+                href="mailto:hello@showuplocal.com?subject=Off-page%20%2B%20GBP%20Analysis%20Request"
+                className="bg-card border border-border rounded-lg px-4 py-3 flex items-center gap-3 hover:border-accent/40 transition-colors group"
+              >
+                <PhoneCall className="w-4 h-4 text-accent shrink-0" />
+                <div className="flex-1 min-w-0">
                   <p className="text-sm font-semibold text-foreground">Contact ShowUp Experts</p>
                   <p className="text-xs text-muted-foreground mt-0.5">
-                    Get a full off-page + GBP analysis from our team — <span className="font-medium text-foreground">$20/page</span>.
+                    Get a full off-page + GBP analysis — <span className="font-medium text-foreground">$20/page</span>
                   </p>
                 </div>
-              </div>
+                <span className="text-xs text-accent font-medium shrink-0 group-hover:underline">Get in touch →</span>
+              </a>
             </div>
             {relatedPagePanel}
 
@@ -1072,8 +1132,8 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           return (
             <div className="px-4 py-4 bg-muted/30 rounded-lg space-y-3">
               <div className="flex items-center justify-between text-xs text-muted-foreground">
-                <span className="font-medium">Building your page…</span>
-                <span>{elapsed}</span>
+                <span className="font-medium">Building your page… <span className="tabular-nums">{elapsed}</span></span>
+                <span className="opacity-70">Usually 60–120 seconds</span>
               </div>
               <div className="space-y-2">
                 {steps.map((step, i) => (
@@ -1109,6 +1169,12 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                 />
               </div>
               {generateStep && <p className="text-xs text-muted-foreground text-center">{generateStep}</p>}
+              <button
+                onClick={cancelOperation}
+                className="text-xs text-muted-foreground hover:text-destructive transition-colors mt-1"
+              >
+                Cancel
+              </button>
             </div>
           );
         })()}
@@ -1207,15 +1273,23 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                     >
                       View
                     </Button>
-                    <button
-                      onClick={() => deleteSavedPage(page.id)}
-                      disabled={deletingId === page.id}
-                      className="text-muted-foreground hover:text-destructive transition-colors p-1 rounded"
-                    >
-                      {deletingId === page.id
-                        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        : <Trash2 className="w-3.5 h-3.5" />}
-                    </button>
+                    {confirmDeleteId === page.id ? (
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="text-muted-foreground">Delete?</span>
+                        <button onClick={() => deleteSavedPage(page.id)} className="text-destructive font-medium hover:underline">Yes</button>
+                        <button onClick={() => setConfirmDeleteId(null)} className="text-muted-foreground hover:text-foreground">No</button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmDeleteId(page.id)}
+                        disabled={deletingId === page.id}
+                        className="text-muted-foreground hover:text-destructive transition-colors p-1 rounded"
+                      >
+                        {deletingId === page.id
+                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          : <Trash2 className="w-3.5 h-3.5" />}
+                      </button>
+                    )}
                   </div>
                 </div>
               );

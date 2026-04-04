@@ -661,7 +661,7 @@ async def health():
 # ── Business Analysis: website crawl + ICP/differentiator extraction ──────────
 
 class BusinessAnalysisRequest(BaseModel):
-    website_url: str
+    website_url: Optional[str] = None
     business_name: str
     gbp_category: str
     gbp_categories: List[str] = []
@@ -676,8 +676,9 @@ class BusinessAnalysisResponse(BaseModel):
 
 
 class BrandVoiceRequest(BaseModel):
-    website_url: str
+    website_url: Optional[str] = None
     business_name: str
+    gbp_category: str = ""
     existing_pages: List[dict] = []
 
 
@@ -1293,14 +1294,23 @@ async def analyze_business_with_anthropic(
 
         client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-        page_lines = []
-        for p in pages[:25]:
-            page_lines.append(
-                f"  [{p['page_type']}] {p['url']}\n"
-                f"    Title: {p['title']}\n"
-                f"    H1: {p['h1']}"
-            )
-        pages_text = '\n'.join(page_lines) if page_lines else '  (no pages discovered)'
+        has_pages = bool(pages)
+
+        if has_pages:
+            page_lines = []
+            for p in pages[:25]:
+                page_lines.append(
+                    f"  [{p['page_type']}] {p['url']}\n"
+                    f"    Title: {p['title']}\n"
+                    f"    H1: {p['h1']}"
+                )
+            pages_text = '\n'.join(page_lines)
+            pages_section = f"""Discovered website pages (URL-classified, may include misclassified blog/content pages):
+{pages_text}
+
+IMPORTANT: Before analyzing, mentally discard any pages that look like blog posts, articles, news, or general content (e.g. URLs with date patterns, long descriptive slugs, how-to or tips-style titles). Only use pages that represent actual services, locations, or core business offerings for your analysis."""
+        else:
+            pages_section = "No website available. Base your analysis entirely on the business name and GBP categories above. Use your knowledge of this business type to infer the most likely customer segments."
 
         prompt = f"""You are an expert marketing strategist. Analyze this local service business and identify its ideal customer profiles (ICPs) with full psychographic detail.
 
@@ -1308,10 +1318,7 @@ Business Name: {business_name}
 GBP Primary Category: {gbp_category}
 All GBP Categories: {', '.join(gbp_categories) if gbp_categories else 'N/A'}
 
-Discovered website pages (URL-classified, may include misclassified blog/content pages):
-{pages_text}
-
-IMPORTANT: Before analyzing, mentally discard any pages that look like blog posts, articles, news, or general content (e.g. URLs with date patterns, long descriptive slugs, how-to or tips-style titles). Only use pages that represent actual services, locations, or core business offerings for your analysis.
+{pages_section}
 
 Identify 1-3 distinct customer segments this business serves. For each segment provide deep psychographic insight a marketer could use to write targeted local SEO content.
 
@@ -1386,22 +1393,19 @@ async def analyze_business(request: Request, body: BusinessAnalysisRequest):
       2. Classify each page as service / location / city_service / other
       3. Use Claude Haiku to detect ICP and extract differentiators
     """
-    if not body.website_url:
-        raise HTTPException(status_code=400, detail="website_url is required")
-
-    # Normalize URL
-    url = body.website_url.strip()
-    if not url.startswith(('http://', 'https://')):
-        url = f"https://{url}"
-
-    try:
-        pages = await asyncio.wait_for(
-            crawl_website(url),
-            timeout=90.0,
-        )
-    except asyncio.TimeoutError:
-        logger.warning(f"Page discovery timed out for {url}")
-        pages = []
+    pages = []
+    if body.website_url and body.website_url.strip():
+        url = body.website_url.strip()
+        if not url.startswith(('http://', 'https://')):
+            url = f"https://{url}"
+        try:
+            pages = await asyncio.wait_for(
+                crawl_website(url),
+                timeout=90.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Page discovery timed out for {url}")
+            pages = []
 
     try:
         llm_result = await analyze_business_with_anthropic(
@@ -1502,7 +1506,7 @@ async def _fetch_page_text(url: str, client: httpx.AsyncClient) -> str:
         return ""
 
 
-async def analyze_brand_voice_with_anthropic(page_contents: List[str], business_name: str) -> dict:
+async def analyze_brand_voice_with_anthropic(page_contents: List[str], business_name: str, gbp_category: str = "", **kwargs) -> dict:
     """Use Claude Haiku to extract brand voice from sampled page copy.
     Runs three sequential API calls:
       1. Current voice — purely descriptive (what the site sounds like now)
@@ -1516,7 +1520,8 @@ async def analyze_brand_voice_with_anthropic(page_contents: List[str], business_
     import anthropic
     import json as json_lib
 
-    content_text = "\n\n---\n\n".join(page_contents) if page_contents else "(no content available)"
+    has_content = bool(page_contents)
+    content_text = "\n\n---\n\n".join(page_contents) if page_contents else ""
 
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -1545,8 +1550,35 @@ async def analyze_brand_voice_with_anthropic(page_contents: List[str], business_
   "content_generation_instructions": "<2-3 sentences of concrete guidance for writing content that matches this brand voice>"
 }"""
 
-    # ── Call 1: Current voice (purely descriptive) ────────────────────────────
-    prompt_current = f"""Business: {business_name}
+    if not has_content:
+        # ── No-website path: skip current voice, generate recommended + guide from category ──
+        logger.info(f"Brand voice: no website content for {business_name} — using category-based inference")
+
+        prompt_recommended_no_site = f"""Business: {business_name}
+GBP Category: {gbp_category}
+
+No website is available for this business. Based solely on the business name and category, recommend a high-performing brand voice that would work well for a local {gbp_category or 'service'} business. Draw on best practices for this business type.
+
+Return a JSON object with exactly this structure:
+{VOICE_SCHEMA}"""
+
+        try:
+            msg_rec = await client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1024,
+                system="You are a senior brand strategist and direct-response copywriter for local service businesses. Recommend a high-performing brand voice based on business type. Return only valid JSON, no markdown, no explanation.",
+                messages=[{'role': 'user', 'content': prompt_recommended_no_site}],
+            )
+            u_rec = msg_rec.usage
+            logger.info(f"Brand voice (no-site recommended) — input: {u_rec.input_tokens}, output: {u_rec.output_tokens}")
+            recommended_voice = _parse(msg_rec)
+            current_voice = {}
+        except Exception as e:
+            logger.error(f"Brand voice no-site recommended error: {e}")
+            raise
+    else:
+        # ── Website path: Call 1 — Current voice (purely descriptive) ────────────────────────────
+        prompt_current = f"""Business: {business_name}
 
 Website copy (service, location, and core business pages only):
 {content_text[:8000]}
@@ -1556,22 +1588,22 @@ Describe the brand voice EXACTLY as it currently exists on this website. Be obje
 Return a JSON object with exactly this structure:
 {VOICE_SCHEMA}"""
 
-    try:
-        msg1 = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
-            system="You are a brand analyst. Describe brand voice objectively based on evidence from the website copy. Do not prescribe or recommend — only describe what you observe. Return only valid JSON, no markdown, no explanation.",
-            messages=[{'role': 'user', 'content': prompt_current}],
-        )
-        u1 = msg1.usage
-        logger.info(f"Brand voice call 1 (current) — input: {u1.input_tokens}, output: {u1.output_tokens}, est. cost: ${(u1.input_tokens * 0.0000008) + (u1.output_tokens * 0.000004):.5f}")
-        current_voice = _parse(msg1)
-    except Exception as e:
-        logger.error(f"Brand voice call 1 error: {e}")
-        raise
+        try:
+            msg1 = await client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1024,
+                system="You are a brand analyst. Describe brand voice objectively based on evidence from the website copy. Do not prescribe or recommend — only describe what you observe. Return only valid JSON, no markdown, no explanation.",
+                messages=[{'role': 'user', 'content': prompt_current}],
+            )
+            u1 = msg1.usage
+            logger.info(f"Brand voice call 1 (current) — input: {u1.input_tokens}, output: {u1.output_tokens}, est. cost: ${(u1.input_tokens * 0.0000008) + (u1.output_tokens * 0.000004):.5f}")
+            current_voice = _parse(msg1)
+        except Exception as e:
+            logger.error(f"Brand voice call 1 error: {e}")
+            raise
 
-    # ── Call 2: Recommended voice (aspirational) ──────────────────────────────
-    prompt_recommended = f"""Business: {business_name}
+        # ── Call 2: Recommended voice (aspirational) ──────────────────────────────
+        prompt_recommended = f"""Business: {business_name}
 
 Current brand voice:
 - Personality: {', '.join(current_voice.get('personality', []))}
@@ -1585,26 +1617,26 @@ Based on the current brand voice and business type, recommend an elevated brand 
 Return a JSON object with exactly this structure:
 {VOICE_SCHEMA}"""
 
-    try:
-        msg2 = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
-            system="You are a senior brand strategist and direct-response copywriter for local service businesses. Recommend an elevated, optimized brand voice. Return only valid JSON, no markdown, no explanation.",
-            messages=[{'role': 'user', 'content': prompt_recommended}],
-        )
-        u2 = msg2.usage
-        logger.info(f"Brand voice call 2 (recommended) — input: {u2.input_tokens}, output: {u2.output_tokens}, est. cost: ${(u2.input_tokens * 0.0000008) + (u2.output_tokens * 0.000004):.5f}")
-        recommended_voice = _parse(msg2)
-    except Exception as e:
-        logger.error(f"Brand voice call 2 error: {e}")
-        recommended_voice = {}
+        try:
+            msg2 = await client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1024,
+                system="You are a senior brand strategist and direct-response copywriter for local service businesses. Recommend an elevated, optimized brand voice. Return only valid JSON, no markdown, no explanation.",
+                messages=[{'role': 'user', 'content': prompt_recommended}],
+            )
+            u2 = msg2.usage
+            logger.info(f"Brand voice call 2 (recommended) — input: {u2.input_tokens}, output: {u2.output_tokens}, est. cost: ${(u2.input_tokens * 0.0000008) + (u2.output_tokens * 0.000004):.5f}")
+            recommended_voice = _parse(msg2)
+        except Exception as e:
+            logger.error(f"Brand voice call 2 error: {e}")
+            recommended_voice = {}
 
-    # ── Call 3: Writer Execution Guide (based on recommended voice) ────────────
+    # ── Call 3 (shared): Writer Execution Guide (based on recommended voice) ────────────
     prompt_guide = f"""Business: {business_name}
 Recommended brand voice summary: {recommended_voice.get('tone', '')}
 Personality: {', '.join(recommended_voice.get('personality', []))}
 
-Website copy:
+{"Website copy:" if has_content else "No website available — write the guide based on the recommended voice and business category."}
 {content_text[:6000]}
 
 Return a JSON object with exactly this structure:
@@ -1651,62 +1683,68 @@ Return a JSON object with exactly this structure:
 async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
     """
     Brand voice pipeline:
-      1. Crawl up to 25 pages from the site (home → about → service → other)
-      2. Fetch paragraph text from each page
-      3. Send to Claude Haiku for brand voice extraction
+      - With website: crawl up to 25 pages, extract text, analyze with Claude Haiku
+      - Without website: generate category-based recommended voice with Claude Haiku
     """
-    if not body.website_url:
-        raise HTTPException(status_code=400, detail="website_url is required")
+    page_contents: List[str] = []
+    pages_sampled = 0
 
-    url = body.website_url.strip()
-    if not url.startswith(('http://', 'https://')):
-        url = f"https://{url}"
+    if body.website_url and body.website_url.strip():
+        url = body.website_url.strip()
+        if not url.startswith(('http://', 'https://')):
+            url = f"https://{url}"
 
-    async with httpx.AsyncClient(
-        follow_redirects=True,
-        timeout=15.0,
-        headers=CRAWL_HEADERS,
-    ) as client:
-        # Check homepage is reachable before doing anything else
-        try:
-            probe = await client.get(url, timeout=10.0)
-            if probe.status_code >= 400:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=15.0,
+            headers=CRAWL_HEADERS,
+        ) as client:
+            try:
+                probe = await client.get(url, timeout=10.0)
+                if probe.status_code >= 400:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Your website returned a {probe.status_code} error. Check that the URL is correct and the site is live."
+                    )
+            except httpx.RequestError as e:
                 raise HTTPException(
                     status_code=422,
-                    detail=f"Your website returned a {probe.status_code} error. Check that the URL is correct and the site is live."
+                    detail=f"Your website couldn't be reached ({type(e).__name__}). Check that the URL is correct and your site is live."
                 )
-        except httpx.RequestError as e:
+
+            selected = await _crawl_pages_for_brand_voice(url, client, max_pages=25)
+            texts = await asyncio.gather(*[_fetch_page_text(p['url'], client) for p in selected])
+
+        page_contents = [
+            f"[{p.get('page_type', 'page')}] {p['url']}\n{text[:600]}"
+            for p, text in zip(selected, texts)
+            if text.strip()
+        ]
+        pages_sampled = len(page_contents)
+        logger.info(f"Brand voice: sampled {pages_sampled}/{len(selected)} pages for {url}")
+
+        if not page_contents:
             raise HTTPException(
                 status_code=422,
-                detail=f"Your website couldn't be reached ({type(e).__name__}). Check that the URL is correct and your site is live."
+                detail=(
+                    "Your website was reached but no readable text content was found. "
+                    "This usually means the site is JavaScript-rendered (React, Vue, etc.) "
+                    "and requires server-side rendering to be crawlable. "
+                    "Contact ShowUP support for assistance."
+                )
             )
-
-        selected = await _crawl_pages_for_brand_voice(url, client, max_pages=25)
-        texts = await asyncio.gather(*[_fetch_page_text(p['url'], client) for p in selected])
-
-    page_contents = [
-        f"[{p.get('page_type', 'page')}] {p['url']}\n{text[:600]}"
-        for p, text in zip(selected, texts)
-        if text.strip()
-    ]
-    pages_sampled = len(page_contents)
-    logger.info(f"Brand voice: sampled {pages_sampled}/{len(selected)} pages for {url}")
-
-    if not page_contents:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Your website was reached but no readable text content was found. "
-                "This usually means the site is JavaScript-rendered (React, Vue, etc.) "
-                "and requires server-side rendering to be crawlable. "
-                "Contact ShowUP support for assistance."
-            )
-        )
+    else:
+        logger.info(f"Brand voice: no website for {body.business_name} — using category inference")
 
     try:
-        brand_voice = await analyze_brand_voice_with_anthropic(page_contents, body.business_name)
+        brand_voice = await analyze_brand_voice_with_anthropic(
+            page_contents,
+            body.business_name,
+            gbp_category=getattr(body, 'gbp_category', ''),
+        )
     except Exception as e:
-        logger.error(f"Brand voice Anthropic error for {url}: {e}")
+        identifier = body.website_url or body.business_name
+        logger.error(f"Brand voice Anthropic error for {identifier}: {e}")
         raise HTTPException(
             status_code=502,
             detail="Our AI analysis service encountered an error. Please try again — if the problem continues, contact ShowUP support."

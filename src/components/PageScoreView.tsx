@@ -1,4 +1,4 @@
-import { useState, ReactNode } from "react";
+import { useState, useRef, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader2, CheckCircle, AlertTriangle, XCircle, ChevronDown, ChevronUp } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
@@ -93,6 +93,7 @@ export default function PageScoreView({
   const [reoptimizeStep, setReoptimizeStep] = useState("");
   const [error, setError] = useState("");
   const [expandedEngines, setExpandedEngines] = useState<Set<string>>(new Set());
+  const abortRef = useRef<AbortController | null>(null);
 
   const saveTokenUsage = async (record: Record<string, any>) => {
     await supabase.from("token_usage").insert({
@@ -102,7 +103,15 @@ export default function PageScoreView({
     });
   };
 
+  const cancelOperation = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setScoring(false);
+    setReoptimizing(false);
+  };
+
   const runScore = async () => {
+    abortRef.current = new AbortController();
     setScoring(true);
     setError("");
     try {
@@ -118,6 +127,7 @@ export default function PageScoreView({
           address,
           serp_analysis,
         }),
+        signal: abortRef.current.signal,
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
@@ -127,6 +137,7 @@ export default function PageScoreView({
       setScoreResult(data);
       await saveTokenUsage(data.token_usage);
     } catch (e: any) {
+      if (e.name === "AbortError") return;
       setError(e.message || "Scoring failed");
     } finally {
       setScoring(false);
@@ -135,6 +146,7 @@ export default function PageScoreView({
 
   const runReoptimize = async () => {
     if (!scoreResult) return;
+    abortRef.current = new AbortController();
     setReoptimizing(true);
     setReoptimizeProgress(0);
     setReoptimizeStep("Starting…");
@@ -154,6 +166,7 @@ export default function PageScoreView({
           phone,
           serp_analysis,
         }),
+        signal: abortRef.current.signal,
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
@@ -183,6 +196,7 @@ export default function PageScoreView({
         }
       }
     } catch (e: any) {
+      if (e.name === "AbortError") return;
       setError(e.message || "Reoptimize failed");
     } finally {
       setReoptimizing(false);
@@ -227,6 +241,12 @@ export default function PageScoreView({
           >
             {scoring ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Scoring page…</> : "Score This Page"}
           </Button>
+          {scoring && (
+            <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
+              <span className="opacity-70">Usually 20–40 seconds</span>
+              <button onClick={cancelOperation} className="hover:text-destructive transition-colors">Cancel</button>
+            </div>
+          )}
         </div>
       )}
 
@@ -340,6 +360,10 @@ export default function PageScoreView({
                       />
                     </div>
                     <p className="text-xs text-muted-foreground text-center">{reoptimizeStep}</p>
+                    <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
+                      <span className="opacity-70">Usually 60–90 seconds</span>
+                      <button onClick={cancelOperation} className="hover:text-destructive transition-colors">Cancel</button>
+                    </div>
                   </div>
                 )}
                 <Button
