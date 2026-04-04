@@ -286,18 +286,15 @@ async def scrape_url(url: str, client: httpx.AsyncClient) -> Optional[str]:
 
 async def scrape_urls(urls: List[str]) -> List[str]:
     """
-    Scrapes all URLs concurrently via ScrapeOwl.
+    Scrapes all URLs via ScrapeOwl with a 0.5s stagger between requests.
     Returns only non-empty HTML strings — failed pages are silently dropped.
-    Limits concurrency to 10 to stay within ScrapeOwl's concurrent request cap.
     """
-    sem = asyncio.Semaphore(10)
-
-    async def scrape_with_sem(url: str, client: httpx.AsyncClient) -> Optional[str]:
-        async with sem:
-            return await scrape_url(url, client)
-
     async with httpx.AsyncClient() as client:
-        results = await asyncio.gather(*[scrape_with_sem(url, client) for url in urls])
+        results = []
+        for i, url in enumerate(urls):
+            if i > 0:
+                await asyncio.sleep(0.5)
+            results.append(await scrape_url(url, client))
 
     pages = [html for html in results if html]
     logger.info(f"Successfully scraped {len(pages)}/{len(urls)} pages")
