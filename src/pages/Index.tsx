@@ -11,10 +11,8 @@ import SettingsView from "@/components/SettingsView";
 import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
+import { nlp } from "@/lib/nlp-client";
 import type { Session } from "@supabase/supabase-js";
-
-const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
-const NLP_API_KEY = import.meta.env.VITE_NLP_API_KEY ?? "";
 
 const Index = () => {
   const { toast } = useToast();
@@ -101,7 +99,6 @@ const Index = () => {
 
   const triggerBusinessAnalysis = async (business: BusinessDetails) => {
     try {
-      // Fetch the saved business ID
       const { data: saved } = await supabase
         .from("business_profiles")
         .select("id")
@@ -109,25 +106,17 @@ const Index = () => {
         .single();
       if (!saved) return;
 
-      // Mark as running
       await supabase
         .from("business_profiles")
         .update({ analysis_status: "running" })
         .eq("id", saved.id);
 
-      const response = await fetch(`${NLP_SERVICE_URL}/analyze-business`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-        body: JSON.stringify({
-          website_url: business.website,
-          business_name: business.name,
-          gbp_category: business.category,
-          gbp_categories: business.categories || [],
-        }),
+      const result = await nlp.analyzeBusiness({
+        website_url: business.website!,
+        business_name: business.name,
+        gbp_category: business.category,
+        gbp_categories: business.categories || [],
       });
-
-      if (!response.ok) throw new Error(`Analysis failed: ${response.status}`);
-      const result = await response.json();
 
       await supabase
         .from("business_profiles")

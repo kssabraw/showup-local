@@ -23,7 +23,6 @@ logger.info(f"Files in cwd: {os.listdir('.')}")
 try:
     from fastapi import FastAPI, HTTPException, Depends, Security, Request
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import StreamingResponse
     from fastapi.security import APIKeyHeader
     from pydantic import BaseModel
     from typing import List, Dict, Optional
@@ -75,17 +74,31 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # Reads allowed origins from CORS_ORIGINS env var (comma-separated).
 # Falls back to * in development. Tighten to your Railway/Vercel frontend
 # URL in production via the Railway dashboard.
-_cors_origins_env = os.environ.get("CORS_ORIGINS", "*")
-CORS_ORIGINS = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+_cors_raw = os.environ.get("CORS_ORIGINS", "*")
+CORS_ORIGINS = [o.strip() for o in _cors_raw.split(",") if o.strip()]
+_cors_wildcard = CORS_ORIGINS == ["*"]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=not _cors_wildcard,  # Never allow credentials with *
     allow_methods=["*"],
     allow_headers=["*"],
 )
 logger.info(f"CORS origins: {CORS_ORIGINS}")
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
+
+class LimitRequestSizeMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: StarletteRequest, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > 2_000_000:  # 2MB limit
+            from starlette.responses import JSONResponse
+            return JSONResponse({"detail": "Request body too large"}, status_code=413)
+        return await call_next(request)
+
+app.add_middleware(LimitRequestSizeMiddleware)
 
 STOP_WORDS = set(stopwords.words('english'))
 
@@ -106,10 +119,9 @@ async def verify_api_key(api_key: str = Security(_api_key_header)):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
     return api_key
 
-GOOGLE_NLP_ENDPOINT       = "https://language.googleapis.com/v1/documents:analyzeEntities"
-DATAFORSEO_ENDPOINT       = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced"
-DATAFORSEO_MAPS_ENDPOINT  = "https://api.dataforseo.com/v3/serp/google/maps/live/advanced"
-SCRAPEOWL_ENDPOINT        = "https://api.scrapeowl.com/v1/scrape"
+GOOGLE_NLP_ENDPOINT  = "https://language.googleapis.com/v1/documents:analyzeEntities"
+DATAFORSEO_ENDPOINT  = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced"
+SCRAPEOWL_ENDPOINT   = "https://api.scrapeowl.com/v1/scrape"
 
 logger.info("App initialized, ready to serve")
 for name, val in [
@@ -119,7 +131,7 @@ for name, val in [
     ("ANTHROPIC_API_KEY",  ANTHROPIC_API_KEY),
 ]:
     if val:
-        logger.info(f"{name} is set (length={len(val)})")
+        logger.info(f"{name} is set")
     else:
         logger.warning(f"{name} not set — related feature will be skipped")
 
@@ -140,8 +152,9 @@ SERP_RESULT_COUNT = 20
 # API cost estimates (USD) — used for per-generation cost breakdown display
 # DataForSEO organic SERP live/advanced: ~$0.0025 per task
 COST_DATAFORSEO_PER_ANALYSIS  = 0.0025
-# ScrapeOwl with premium_proxies: ~$0.0075 per page
+# ScrapeOwl without JS: ~$0.0075/page; with JS render: ~$0.015/page
 COST_SCRAPEOWL_PER_PAGE       = 0.0075
+COST_SCRAPEOWL_PER_PAGE_JS    = 0.0150
 # Google Natural Language API entity analysis: $0.001 per 1,000 chars
 COST_GOOGLE_NLP_PER_1K_CHARS  = 0.001
 
@@ -154,6 +167,29 @@ SKIP_DOMAINS = {
     "wikipedia.org", "amazon.com", "ebay.com",
     "angieslist.com", "nextdoor.com", "mapquest.com", "maps.google.com",
 }
+
+
+import ipaddress as _ipaddress
+import urllib.parse as _urlparse
+
+
+def _block_ssrf(url: str) -> None:
+    """Raise HTTPException 400 if the URL targets a private/internal network."""
+    try:
+        parsed = _urlparse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise HTTPException(status_code=400, detail="Invalid URL scheme")
+        hostname = parsed.hostname or ""
+        try:
+            ip = _ipaddress.ip_address(hostname)
+            if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
+                raise HTTPException(status_code=400, detail="URL targets a private network address")
+        except ValueError:
+            pass  # Not an IP address — hostname, allow
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid URL")
 
 
 # ── Request / Response models ─────────────────────────────────────────────────
@@ -252,24 +288,27 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
 
 # ── Step 2: ScrapeOwl — fetch raw HTML for each URL ──────────────────────────
 
-async def scrape_url(url: str, client: httpx.AsyncClient) -> Optional[str]:
+async def _scrape_one(url: str, client: httpx.AsyncClient, render_js: bool = False) -> Optional[str]:
     """
-    Fetches raw HTML via ScrapeOwl v1 API with premium proxies.
-    Returns None on failure so the pipeline continues with remaining pages.
+    Single ScrapeOwl request. render_js=True costs ~2× but handles JS-heavy sites.
+    Returns None on failure.
     """
     try:
-        payload = json.dumps({
+        payload: dict = {
             "api_key": SCRAPEOWL_API_KEY,
             "url": url,
             "premium_proxies": True,
             "country": "us",
             "json_response": True,
-        })
+        }
+        if render_js:
+            payload["render_js"] = True
+            payload["wait_for_selector"] = "body"   # wait until body is present
         response = await client.post(
             SCRAPEOWL_ENDPOINT,
-            content=payload,
+            content=json.dumps(payload),
             headers={"Content-Type": "application/json"},
-            timeout=30.0,
+            timeout=45.0,
         )
         if response.status_code != 200:
             logger.warning(f"ScrapeOwl HTTP {response.status_code} for {url}: {response.text[:200]}")
@@ -277,29 +316,61 @@ async def scrape_url(url: str, client: httpx.AsyncClient) -> Optional[str]:
         data = response.json()
         html = data.get("html") or ""
         if len(html.strip()) < 200:
-            logger.warning(f"Thin content ({len(html)} chars) for {url}")
+            logger.warning(f"Thin content ({len(html)} chars) for {url} (render_js={render_js})")
             return None
         return html
     except Exception as e:
-        logger.warning(f"Scrape error for {url}: {type(e).__name__}: {e}")
+        logger.warning(f"Scrape error for {url} (render_js={render_js}): {type(e).__name__}: {e}")
         return None
 
 
-async def scrape_urls(urls: List[str]) -> List[str]:
+async def scrape_urls(urls: List[str]) -> tuple[List[str], dict]:
     """
-    Scrapes all URLs via ScrapeOwl with a 0.5s stagger between requests.
-    Returns only non-empty HTML strings — failed pages are silently dropped.
-    """
-    async with httpx.AsyncClient() as client:
-        results = []
-        for i, url in enumerate(urls):
-            if i > 0:
-                await asyncio.sleep(0.5)
-            results.append(await scrape_url(url, client))
+    Hybrid two-pass scraper:
+      Pass 1 — render_js=False (fast, cheap) for all URLs concurrently.
+      Pass 2 — render_js=True  (JS rendering) only for URLs that failed/returned thin HTML.
 
-    pages = [html for html in results if html]
-    logger.info(f"Successfully scraped {len(pages)}/{len(urls)} pages")
-    return pages
+    Returns (pages, cost_info) where pages contains only non-empty HTML strings.
+    cost_info breaks down pages scraped at each tier for billing.
+    """
+    sem = asyncio.Semaphore(10)
+
+    async def attempt(url: str, render_js: bool) -> Optional[str]:
+        async with sem:
+            return await _scrape_one(url, client, render_js=render_js)
+
+    async with httpx.AsyncClient() as client:
+        # Pass 1: no JS
+        pass1 = await asyncio.gather(*[attempt(url, False) for url in urls])
+        failed_urls = [url for url, html in zip(urls, pass1) if not html]
+
+        # Pass 2: retry failures with JS rendering
+        pass2: List[Optional[str]] = []
+        if failed_urls:
+            logger.info(f"Retrying {len(failed_urls)} failed URLs with JS rendering")
+            pass2 = await asyncio.gather(*[attempt(url, True) for url in failed_urls])
+
+    # Merge: keep pass1 results, fill gaps with pass2
+    fail_iter = iter(pass2)
+    merged: List[Optional[str]] = []
+    for html in pass1:
+        if html:
+            merged.append(html)
+        else:
+            merged.append(next(fail_iter, None))
+
+    pages = [html for html in merged if html]
+    js_success = sum(1 for html in pass2 if html)
+    no_js_success = len(pages) - js_success
+    logger.info(
+        f"Scraping complete: {len(pages)}/{len(urls)} pages "
+        f"(no-JS: {no_js_success}, JS-render: {js_success}, failed: {len(urls) - len(pages)})"
+    )
+    cost_info = {
+        "no_js_pages": no_js_success,
+        "js_pages": js_success,
+    }
+    return pages, cost_info
 
 
 # ── HTML parsing ──────────────────────────────────────────────────────────────
@@ -548,29 +619,28 @@ async def get_google_entities(
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
-@app.post('/analyze', response_model=AnalysisResponse, dependencies=[Depends(verify_api_key)])
-@limiter.limit("10/minute")
-async def analyze(request: Request, body: AnalysisRequest):
+async def _run_serp_analysis(
+    keyword: str,
+    location: str,
+    location_code: Optional[int] = None,
+    urls: Optional[List[str]] = None,
+) -> AnalysisResponse:
     """
-    Full pipeline:
-      1. DataForSEO  — fetch top organic URLs for keyword + location
-      2. ScrapeOwl   — fetch raw HTML for each URL concurrently
-      3. NLP         — related keywords, quadgrams, Google entity analysis
-
-    Pass optional `urls` to skip the DataForSEO SERP step (testing / override).
+    Shared SERP analysis pipeline used by both /analyze and /score-page.
+    Runs DataForSEO → ScrapeOwl (hybrid JS retry) → TF-IDF → quadgrams → Google NLP.
     """
     # Step 1: get URLs
-    if body.urls:
-        urls = body.urls
-        logger.info(f"Using {len(urls)} manually provided URLs")
+    if urls:
+        serp_urls = urls
+        logger.info(f"Using {len(serp_urls)} manually provided URLs")
     else:
         async with httpx.AsyncClient() as client:
-            urls = await fetch_serp_urls(body.keyword, body.location, client, body.location_code)
-        if not urls:
+            serp_urls = await fetch_serp_urls(keyword, location, client, location_code)
+        if not serp_urls:
             raise HTTPException(status_code=502, detail="DataForSEO returned no usable URLs")
 
-    # Step 2: scrape
-    pages = await scrape_urls(urls)
+    # Step 2: scrape (hybrid: no-JS first, retry failures with JS rendering)
+    pages, scrape_cost_info = await scrape_urls(serp_urls)
     if len(pages) < 2:
         raise HTTPException(
             status_code=502,
@@ -582,7 +652,7 @@ async def analyze(request: Request, body: AnalysisRequest):
     h2_per_page: List[List[str]] = []
     h3_per_page: List[List[str]] = []
     scraped_urls: List[str] = []
-    for url, html in zip(urls, pages):
+    for url, html in zip(serp_urls, pages):
         zones = extract_zones(html)
         for z in ZONES + ["paragraphs"]:
             zone_buckets[z].append(zones[z])
@@ -592,21 +662,34 @@ async def analyze(request: Request, body: AnalysisRequest):
 
     # Step 4: NLP analysis
     related = ZoneKeywords(
-        title=get_related_keywords_for_zone(zone_buckets["title"], body.keyword),
-        h1=get_related_keywords_for_zone(zone_buckets["h1"], body.keyword),
-        h2_h3=get_related_keywords_for_zone(zone_buckets["h2_h3"], body.keyword),
-        body=get_related_keywords_for_zone(zone_buckets["body"], body.keyword),
+        title=get_related_keywords_for_zone(zone_buckets["title"], keyword),
+        h1=get_related_keywords_for_zone(zone_buckets["h1"], keyword),
+        h2_h3=get_related_keywords_for_zone(zone_buckets["h2_h3"], keyword),
+        body=get_related_keywords_for_zone(zone_buckets["body"], keyword),
     )
-    quadgrams = get_top_quadgrams(zone_buckets["paragraphs"], body.keyword)
-    google_entities = await get_google_entities(zone_buckets["paragraphs"])
+    quadgrams = get_top_quadgrams(zone_buckets["paragraphs"], keyword)
+
+    # Step 5: Google NLP entity analysis — use paragraph text already in memory
+    google_entities: List[dict] = []
+    nlp_chars = 0
+    if GOOGLE_NLP_API_KEY:
+        para_texts = [t for t in zone_buckets["paragraphs"] if len(t) > 100][:5]
+        if para_texts:
+            try:
+                google_entities = await get_google_entities(para_texts)
+                nlp_chars = sum(min(len(t), GOOGLE_NLP_MAX_BYTES) for t in para_texts)
+                logger.info(f"Google NLP: {len(google_entities)} entities from {len(para_texts)} pages")
+            except Exception as _nlp_err:
+                logger.warning(f"Google NLP failed (non-fatal): {_nlp_err}")
+
     zone_targets = compute_zone_targets(zone_buckets, related, google_entities)
 
     # Aggregate competitor headings by page spread
     total_pages = len(scraped_urls)
     competitor_headings: List[dict] = []
     for tag_type, per_page in (("h2", h2_per_page), ("h3", h3_per_page)):
-        canonical: Dict[str, str] = {}   # lowercase -> first-seen original
-        page_count: Dict[str, int] = {}  # lowercase -> pages containing it
+        canonical: Dict[str, str] = {}
+        page_count: Dict[str, int] = {}
         for page_headings in per_page:
             seen_this_page: set = set()
             for h in page_headings:
@@ -627,22 +710,26 @@ async def analyze(request: Request, body: AnalysisRequest):
                 "page_pct": round(count / total_pages, 2),
             })
 
-    # Estimate API costs for this analysis run
-    nlp_chars = sum(min(len(doc), GOOGLE_NLP_MAX_BYTES) for doc in zone_buckets["paragraphs"])
-    scrapeowl_cost = round(len(scraped_urls) * COST_SCRAPEOWL_PER_PAGE, 6)
-    google_nlp_cost = round(nlp_chars / 1000 * COST_GOOGLE_NLP_PER_1K_CHARS, 6)
+    no_js_pages = scrape_cost_info["no_js_pages"]
+    js_pages = scrape_cost_info["js_pages"]
+    scrapeowl_cost = round(
+        no_js_pages * COST_SCRAPEOWL_PER_PAGE + js_pages * COST_SCRAPEOWL_PER_PAGE_JS, 6
+    )
+    nlp_cost = round(nlp_chars / 1000 * COST_GOOGLE_NLP_PER_1K_CHARS, 6)
     analysis_cost = {
         "dataforseo": round(COST_DATAFORSEO_PER_ANALYSIS, 6),
         "scrapeowl_pages": len(scraped_urls),
+        "scrapeowl_no_js_pages": no_js_pages,
+        "scrapeowl_js_pages": js_pages,
         "scrapeowl": scrapeowl_cost,
         "google_nlp_chars": nlp_chars,
-        "google_nlp": google_nlp_cost,
-        "subtotal": round(COST_DATAFORSEO_PER_ANALYSIS + scrapeowl_cost + google_nlp_cost, 6),
+        "google_nlp": nlp_cost,
+        "subtotal": round(COST_DATAFORSEO_PER_ANALYSIS + scrapeowl_cost + nlp_cost, 6),
     }
 
     return AnalysisResponse(
-        keyword=body.keyword,
-        location=body.location,
+        keyword=keyword,
+        location=location,
         serp_urls=scraped_urls,
         related_keywords=related,
         top_quadgrams=quadgrams,
@@ -653,7 +740,21 @@ async def analyze(request: Request, body: AnalysisRequest):
     )
 
 
-@app.get('/health')
+@app.post('/analyze', response_model=AnalysisResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+async def analyze(request: Request, body: AnalysisRequest):
+    """
+    Full pipeline:
+      1. DataForSEO  — fetch top organic URLs for keyword + location
+      2. ScrapeOwl   — fetch raw HTML for each URL concurrently
+      3. NLP         — related keywords, quadgrams, Google entity analysis
+
+    Pass optional `urls` to skip the DataForSEO SERP step (testing / override).
+    """
+    return await _run_serp_analysis(body.keyword, body.location, body.location_code, body.urls)
+
+
+@app.get('/health', dependencies=[Depends(verify_api_key)])
 async def health():
     return {'status': 'ok'}
 
@@ -891,11 +992,7 @@ def _slug_looks_like_blog(slug: str) -> bool:
     return False
 
 CRAWL_HEADERS = {
-    'User-Agent': (
-        'Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) '
-        'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.5735.179 '
-        'Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
-    ),
+    'User-Agent': 'ShowUPLocalBot/1.0 (business-page-discovery; respects robots.txt)',
 }
 
 
@@ -1201,6 +1298,7 @@ async def crawl_website(website_url: str, max_pages: int = 200) -> List[dict]:
     """
     import urllib.parse
 
+    _block_ssrf(website_url)
     url = website_url.strip()
     if not url.startswith(('http://', 'https://')):
         url = f"https://{url}"
@@ -1393,6 +1491,8 @@ async def analyze_business(request: Request, body: BusinessAnalysisRequest):
       2. Classify each page as service / location / city_service / other
       3. Use Claude Haiku to detect ICP and extract differentiators
     """
+    if body.website_url and body.website_url.strip():
+        _block_ssrf(body.website_url)
     pages = []
     if body.website_url and body.website_url.strip():
         url = body.website_url.strip()
@@ -1415,7 +1515,8 @@ async def analyze_business(request: Request, body: BusinessAnalysisRequest):
             body.gbp_categories,
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Anthropic analysis failed: {e}")
+        logger.exception("Anthropic analysis failed")
+        raise HTTPException(status_code=502, detail="Analysis service temporarily unavailable")
 
     status = 'complete' if pages else 'partial'
 
@@ -1437,6 +1538,7 @@ async def _crawl_pages_for_brand_voice(website_url: str, client: httpx.AsyncClie
     Skips blog pages and admin/legal slugs.
     """
     import urllib.parse
+    _block_ssrf(website_url)
     parsed = urllib.parse.urlparse(website_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
 
@@ -1686,6 +1788,8 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
       - With website: crawl up to 25 pages, extract text, analyze with Claude Haiku
       - Without website: generate category-based recommended voice with Claude Haiku
     """
+    if body.website_url and body.website_url.strip():
+        _block_ssrf(body.website_url)
     page_contents: List[str] = []
     pages_sampled = 0
 
@@ -1707,9 +1811,10 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
                         detail=f"Your website returned a {probe.status_code} error. Check that the URL is correct and the site is live."
                     )
             except httpx.RequestError as e:
+                logger.warning(f"Brand voice website probe failed for {url}: {type(e).__name__}: {e}")
                 raise HTTPException(
                     status_code=422,
-                    detail=f"Your website couldn't be reached ({type(e).__name__}). Check that the URL is correct and your site is live."
+                    detail="Your website couldn't be reached. Check that the URL is correct and your site is live."
                 )
 
             selected = await _crawl_pages_for_brand_voice(url, client, max_pages=25)
@@ -1758,12 +1863,181 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
 # ══════════════════════════════════════════════════════════════════════════════
 
 GENERATION_MODEL = "claude-sonnet-4-6"
+SCORE_MODEL = "claude-haiku-4-5-20251001"  # Structured JSON grading — Haiku is sufficient
 
-# Pricing per million tokens
+# Pricing per million tokens (cached input tokens billed at ~10% of normal input rate)
 _MODEL_PRICING: Dict[str, Dict[str, float]] = {
     "claude-sonnet-4-6":          {"input": 3.00,  "output": 15.00},
     "claude-haiku-4-5-20251001":  {"input": 0.80,  "output":  4.00},
 }
+
+# ── Cached system prompts ────────────────────────────────────────────────────
+# These are sent as system messages with cache_control so Anthropic caches the
+# large static instruction blocks. Cache TTL is 5 minutes, refreshed on each hit.
+# Cost on cache hit: ~10% of normal input token price.
+
+_GEN_SYSTEM_PROMPT = """You are an expert local SEO content writer. Generate a complete, publish-ready local service page following the exact structure below.
+
+OUTPUT FORMAT
+Return valid HTML only. No markdown. No explanations outside the HTML. Structure:
+<title>[SEE TITLE FORMULA BELOW]</title>
+<article>
+  [13 sections as specified below]
+</article>
+Then on a NEW LINE after </article>, output the JSON-LD schema block starting with <script type="application/ld+json"> (3 schema blocks in one script tag).
+
+TITLE TAG FORMULA (follow exactly — do not deviate):
+<title>[Power Word]! [Exact Match Keyword] | [Brand Name] | [Justification using entities] | [Additional persuasion + entities]</title>
+- Power Word: a single urgent/emotional word (e.g. Trusted, Fast, Expert, Certified, Local, Licensed)
+- Exact Match Keyword: the primary keyword verbatim
+- Brand Name: the business name
+- Justification: a short phrase using 1–2 Google entities that validates the claim (e.g. "Serving Anaheim Hills & Orange County")
+- Additional persuasion: a benefit or proof point that includes 1–2 more entities (e.g. "Same-Day Response, No Overtime Fees")
+- Total title length: 60–70 characters ideal, 80 max
+
+MANDATORY 13-SECTION STRUCTURE
+
+Section 1 — Intro / Direct Answer Block (100–150 words)
+<section id="intro">
+  <h1>[Exact Match Keyword] + [1–2 entities that reinforce location or service scope]</h1>
+  H1 FORMULA: Write the primary keyword verbatim, then append relevant entities naturally (e.g. "Emergency Plumber Anaheim — Serving Anaheim Hills, Yorba Linda & Orange County")
+  <p>[Brand] provides [service] to [city] — [primary differentiator stated in first sentence]. [2–3 sentences: service confirmation, availability, phone CTA.] [Close with direct service claim + city.]</p>
+</section>
+
+Section 2 — USP / Value Proposition (150–200 words)
+<section id="usp">
+  <h2>[Single sentence combining: exact match keyword + persuasion/outcome + 1–2 entities]</h2>
+  FIRST H2 FORMULA: Must be a complete sentence (not a fragment) that includes the primary keyword, a persuasive outcome or differentiator, and 1–2 entities. (e.g. "When Anaheim Homeowners Need an Emergency Plumber Fast, [Brand] Delivers Same-Day Repairs Across Orange County")
+  [Min 3 differentiators with mechanisms. One contrast statement. One proof signal.]
+</section>
+
+Section 3 — Special Offers (omit this section if no offer data provided)
+<section id="offers">...</section>
+
+Section 4 — CTA Block Primary (50–75 words)
+<section id="cta-primary">
+  <h2>[Action-oriented H2]</h2>
+  [Differentiated CTA — not "Contact us today". Include phone.]
+</section>
+
+Section 5 — Features and Benefits (150–200 words)
+<section id="features">
+  <h2>[Benefit-focused H2]</h2>
+  <ul>[Min 4 feature/benefit pairs — outcome-first, ICP pain points addressed]</ul>
+</section>
+
+Section 6 — Main Service Body (800–1400 words)
+<section id="services">
+  Use the COMPETITOR H2/H3 HEADINGS from the SERP data above as your structural baseline.
+  Cover every topic competitors cover, then add H2/H3 sections for topics competitors DON'T cover
+  that would more fully answer the user's implied query — this is called INFORMATION GAIN and
+  is critical for outranking competitors.
+
+  Structure rules:
+  - You may use MULTIPLE H2s within this section if the content warrants separate major topics
+  - Each H2 should represent a distinct major topic or service category
+  - Use H3s under each H2 for sub-services, use cases, or scenarios
+  - Every heading: include service/city naturally where it fits (not forced)
+  - Open with a primary service description paragraph (answer-first)
+  - Each H3: 2–4 sentences covering description, real-world scenario, differentiator, geo reference
+  - Naturally weave in competitor entities and phrases from SERP data throughout
+  - Do NOT copy competitor headings verbatim — use them to understand topic coverage, then write
+    headings that are more specific, benefit-oriented, or locally relevant
+</section>
+
+Section 7 — Testimonials (include only if reviews provided above; omit if none)
+<section id="testimonials">
+  <h2>[Social proof H2]</h2>
+  [Verbatim reviews only — first name + last initial, stars, date, full text]
+</section>
+
+Section 8 — CTA Block Secondary (50–75 words — different angle from Section 4)
+<section id="cta-secondary">...</section>
+
+Section 9 — Getting Started (150–200 words)
+<section id="getting-started">
+  <h2>[Process-focused H2]</h2>
+  <ol>[3–5 steps, plain language, close with CTA]</ol>
+</section>
+
+Section 10 — Geographic / Local SEO Section (200–300 words)
+<section id="local">
+  <h2>[City + service in heading]</h2>
+  [City + min 3 neighborhoods in sentence context (not just a list) + min 1 landmark + min 2 streets + zip codes (min 3). Use only real, verifiable geographic details. If neighborhood/landmark/street/zip data is not provided in the business data, include only what you are certain is accurate for the target city. Do not invent or guess street names, zip codes, or landmarks. Coverage + response time.]
+</section>
+
+Section 11 — CTA Block Tertiary (50–75 words — urgency-forward)
+<section id="cta-tertiary">...</section>
+
+Section 12 — FAQ (min 6, max 10 entries — 40–80 words each)
+<section id="faq">
+  <h2>Frequently Asked Questions</h2>
+  [Must cover: availability, response time, coverage area, emergency service. Answer-first. Geographic + availability signal in each proximity FAQ.]
+</section>
+
+Section 13 — Schema (delivered AFTER </article> as a separate <script> block)
+Generate 3 schema blocks as a single JSON-LD array inside one <script type="application/ld+json"> tag:
+1. LocalBusiness (subtype from category: Plumber/HVACBusiness/Electrician etc.)
+2. Service
+3. FAQPage (auto-extracted from Section 12)
+
+HARD RULES — NEVER:
+- Start with "Welcome to [Brand]"
+- Use "We are a [city] [service] company" as first sentence
+- Write "Contact us today" as standalone CTA
+- Use generic headings ("About Us", "Our Services", "Why Choose Us")
+- Use "near me" literally in body content
+- Include placeholder text like [Insert here]
+- Fabricate reviews
+- Use vague differentiators ("trusted", "professional", "high quality") without a mechanism
+- Invent or guess phone numbers, addresses, hours, zip codes, street names, or landmarks not explicitly provided in the business data"""
+
+_REOPT_SYSTEM_PROMPT = """You are an expert local SEO content writer. Fix the SEO deficiencies in the page provided by updating its text content only.
+
+STRICT RULES — follow exactly:
+1. TEXT ONLY: Only change text content (words between HTML tags). You may also update SEO-relevant attributes: alt, title, meta[content], og:title, og:description, aria-label, and JSON-LD schema text values.
+2. PRESERVE EVERYTHING ELSE: Do not change any element types, CSS classes, IDs, data-* attributes, href, src, or any non-content attributes. Do not add, remove, or reorder any HTML elements.
+3. Fix every deficiency listed through word choices, phrasing, and copy — not by adding new HTML sections.
+4. Naturally incorporate competitor entities and phrases from SERP data where missing.
+5. Do not fabricate reviews or placeholder text. Do not use "near me" literally in body copy.
+
+Return your response in EXACTLY this format (do not deviate):
+
+<<<NOTES>>>
+List each HTML/CSS structural change that would further improve SEO but that you could NOT make because it requires adding/moving/removing elements or changing classes. Be specific (e.g. "Add an FAQ section with schema markup", "H1 tag is missing — the page title is wrapped in a <div> instead"). If none, write "None."
+<<<HTML>>>
+[Complete page HTML with ONLY text content and SEO attributes changed]"""
+
+_SCORE_SYSTEM_PROMPT = """You are an expert local SEO analyst. Score the provided page against all 7 engines below.
+
+SCORING CRITERIA — score each engine 0–100:
+
+1. organic_ranking (weight 20%): keyword in title + H1 + opening ¶; service/transactional tone (not blog); CTA + phone visible; clear service offering.
+
+2. gbp_maps (weight 25%): exact city name present; service matches GBP category; brand+service+city entity triplet; NAP signals consistent; multiple service mentions.
+
+3. entity_establishment (weight 15%): brand+service+city co-occurrence in ≥3 sections; sub-services mentioned; descriptive anchor text signals; topical depth.
+
+4. icp_alignment (weight 10%): detect ICP from keyword modifier (emergency→urgent tone; commercial→B2B tone; general→professional/reliable); CTA matches ICP; pain points addressed.
+
+5. aeo_llm_retrieval (weight 10%): answer-first formatting (direct claim before explanation); FAQ with ≥4 entries; each section ≤300 words; Q&A heading structure; specific operational details (not generic filler).
+
+6. geographic_legitimacy (weight 10%): city in title+H1+opening ¶; ≥2 neighborhood references in sentence context; ≥1 landmark reference; ≥3 zip codes in visible content; geo signals in ≥3 page sections.
+
+7. nearme_intent (weight 10%): phone above fold; availability language in opening block; response time stated explicitly; ≥2 neighborhood+service+availability blocks; ≥1 street reference; ≥2 proximity FAQs (availability/response/coverage/emergency).
+
+Return ONLY valid JSON — no markdown, no explanation:
+{
+  "organic_ranking":       {"score": 0, "issues": [], "recommendations": []},
+  "gbp_maps":              {"score": 0, "issues": [], "recommendations": []},
+  "entity_establishment":  {"score": 0, "issues": [], "recommendations": []},
+  "icp_alignment":         {"score": 0, "icp_detected": "", "issues": [], "recommendations": []},
+  "aeo_llm_retrieval":     {"score": 0, "issues": [], "recommendations": []},
+  "geographic_legitimacy": {"score": 0, "issues": [], "recommendations": []},
+  "nearme_intent":         {"score": 0, "issues": [], "recommendations": []}
+}
+
+Be specific — reference actual content found (or missing) in the page."""
 
 def _calc_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     p = _MODEL_PRICING.get(model, {"input": 3.00, "output": 15.00})
@@ -1871,155 +2145,6 @@ def compute_zone_targets(
     return targets
 
 
-def _parse_page_zones(html: str) -> dict:
-    """Parse existing page HTML into zones for coverage analysis."""
-    return extract_zones(html)
-
-
-def _compute_coverage(page_zones: dict, serp_analysis: dict) -> dict:
-    """
-    Compute entity/quadgram/keyword coverage gaps between competitor benchmark and existing page.
-    Returns a dict with present/missing lists per signal type and zone.
-    Quadgrams are checked in paragraphs only.
-    """
-    entities = serp_analysis.get("google_entities", [])
-    quadgrams = serp_analysis.get("top_quadgrams", [])
-    related_kw = serp_analysis.get("related_keywords", {})
-
-    full_text = " ".join(v for v in page_zones.values() if isinstance(v, str)).lower()
-    para_text = page_zones.get("paragraphs", "").lower()
-
-    # Entity coverage — checked against full page text
-    present_entities, missing_entities = [], []
-    for e in entities:
-        (present_entities if e["name"].lower() in full_text else missing_entities).append(e)
-
-    # Quadgram coverage — paragraphs only
-    present_quadgrams, missing_quadgrams = [], []
-    for q in quadgrams:
-        (present_quadgrams if q["phrase"].lower() in para_text else missing_quadgrams).append(q)
-
-    # Related keyword coverage per zone
-    zone_keyword_coverage: dict = {}
-    for zone in ("title", "h1", "h2_h3", "body"):
-        zone_text = page_zones.get(zone if zone != "h2_h3" else "h2_h3", "").lower()
-        terms = related_kw.get(zone, []) if isinstance(related_kw, dict) else []
-        present = [t for t in terms if t["term"].lower() in zone_text]
-        missing = [t for t in terms if t["term"].lower() not in zone_text]
-        zone_keyword_coverage[zone] = {"present": present, "missing": missing}
-
-    return {
-        "present_entities": present_entities,
-        "missing_entities": missing_entities,
-        "present_quadgrams": present_quadgrams,
-        "missing_quadgrams": missing_quadgrams,
-        "zone_keyword_coverage": zone_keyword_coverage,
-    }
-
-
-def _coverage_context(coverage: dict) -> str:
-    """Format coverage gaps into a prompt-friendly string for scoring and reoptimization."""
-    parts: list = []
-
-    # Zone keyword coverage
-    zone_labels = {
-        "title": "PAGE TITLE",
-        "h1": "H1 HEADING",
-        "h2_h3": "H2/H3 SUBHEADINGS",
-        "body": "BODY TEXT",
-    }
-    zkc = coverage.get("zone_keyword_coverage", {})
-    for zone, label in zone_labels.items():
-        zc = zkc.get(zone, {})
-        present = zc.get("present", [])
-        missing = zc.get("missing", [])
-        total = len(present) + len(missing)
-        if total == 0:
-            continue
-        parts.append(f"\n{label}: {len(present)}/{total} competitor terms present")
-        if missing:
-            parts.append(f"  Missing: {', '.join(t['term'] for t in missing[:12])}")
-
-    # Entity coverage
-    p_ent = coverage.get("present_entities", [])
-    m_ent = coverage.get("missing_entities", [])
-    total_ent = len(p_ent) + len(m_ent)
-    if total_ent:
-        parts.append(f"\nENTITIES: {len(p_ent)}/{total_ent} competitor entities present in page")
-        if m_ent:
-            ent_items = [f"{e['name']} (×{e['recommended_mentions']})" for e in m_ent[:15]]
-            parts.append(f"  Missing: {', '.join(ent_items)}")
-
-    # Quadgram coverage (paragraphs only)
-    p_q = coverage.get("present_quadgrams", [])
-    m_q = coverage.get("missing_quadgrams", [])
-    total_q = len(p_q) + len(m_q)
-    if total_q:
-        parts.append(f"\nCOMPETITOR PHRASES (paragraphs only): {len(p_q)}/{total_q} present")
-        if m_q:
-            parts.append(f"  Missing: {', '.join(q['phrase'] for q in m_q[:12])}")
-
-    return "\n".join(parts) if parts else ""
-
-
-def _zone_targets_text(serp_analysis: dict) -> str:
-    """
-    Format competitor benchmark signals into zone-specific targets for the
-    generation prompt. Unlike _coverage_context (which diffs against an existing
-    page), this simply tells Claude what signals belong in each zone of a NEW page.
-    """
-    if not serp_analysis:
-        return ""
-    entities = serp_analysis.get("google_entities", [])
-    quadgrams = serp_analysis.get("top_quadgrams", [])
-    related_kw = serp_analysis.get("related_keywords", {})
-    if not isinstance(related_kw, dict):
-        related_kw = {}
-
-    parts = ["ZONE-SPECIFIC SIGNAL TARGETS — place signals in the correct zones:\n"]
-
-    top_entities = sorted(entities, key=lambda e: e.get("mean_salience", 0), reverse=True)
-
-    # Title
-    title_terms = [t["term"] for t in related_kw.get("title", [])[:6]]
-    title_ents = [e["name"] for e in top_entities[:3]]
-    if title_terms or title_ents:
-        parts.append("PAGE TITLE:")
-        if title_ents:
-            parts.append(f"  Include 1–2 of these high-salience entities: {', '.join(title_ents)}")
-        if title_terms:
-            parts.append(f"  Incorporate these terms: {', '.join(title_terms)}")
-
-    # H1
-    h1_terms = [t["term"] for t in related_kw.get("h1", [])[:6]]
-    h1_ents = [e["name"] for e in top_entities[:2]]
-    if h1_terms or h1_ents:
-        parts.append("\nH1 HEADING:")
-        if h1_ents:
-            parts.append(f"  Include 1–2 of these entities: {', '.join(h1_ents)}")
-        if h1_terms:
-            parts.append(f"  Incorporate these terms: {', '.join(h1_terms)}")
-
-    # H2/H3
-    h2h3_terms = [t["term"] for t in related_kw.get("h2_h3", [])[:12]]
-    if h2h3_terms:
-        parts.append(f"\nH2/H3 SUBHEADINGS — distribute these across your subheadings:")
-        parts.append(f"  {', '.join(h2h3_terms)}")
-
-    # Body paragraphs
-    body_terms = [t["term"] for t in related_kw.get("body", [])[:10]]
-    parts.append("\nBODY PARAGRAPHS:")
-    if entities:
-        ent_items = [f"{e['name']} (×{e['recommended_mentions']})" for e in entities[:20]]
-        parts.append(f"  Entities with target mention counts: {', '.join(ent_items)}")
-    if quadgrams:
-        parts.append(f"  Competitor phrases to use naturally: {', '.join(q['phrase'] for q in quadgrams[:15])}")
-    if body_terms:
-        parts.append(f"  Additional body terms: {', '.join(body_terms)}")
-
-    return "\n".join(parts)
-
-
 def _build_score_prompt(
     business_name: str,
     gbp_category: str,
@@ -2028,55 +2153,19 @@ def _build_score_prompt(
     address: Optional[str],
     serp_ctx: str,
     page_text: str,
-    coverage_ctx: str = "",
 ) -> str:
-    coverage_block = f"\nCOVERAGE GAPS (computed from competitor benchmark):{coverage_ctx}" if coverage_ctx else ""
-    return f"""You are an expert local SEO analyst. Score this page against all 7 engines below.
-
-CONTEXT
+    """Returns the dynamic user-message portion of the scoring prompt.
+    The static system instructions are in _SCORE_SYSTEM_PROMPT (cached separately)."""
+    return f"""CONTEXT
 Business: {business_name}
 Category: {gbp_category}
 Keyword: {keyword}
 City: {city}
 Address: {address or "Not provided"}
-{serp_ctx}{coverage_block}
+{serp_ctx}
 
 PAGE CONTENT (first 8,000 chars):
-{page_text}
-
-SCORING CRITERIA — score each engine 0–100:
-
-1. organic_ranking (weight 20%): keyword in title + H1 + opening ¶; service/transactional tone (not blog); CTA + phone visible; clear service offering.
-
-2. gbp_maps (weight 25%): exact city name present; service matches GBP category; brand+service+city entity triplet; NAP signals consistent; multiple service mentions.
-
-3. entity_establishment (weight 15%): Use the COVERAGE GAPS block above to score this engine precisely.
-   - Zone keyword coverage: penalise missing competitor terms per zone (title, H1, H2/H3, body)
-   - Entity coverage: penalise each missing competitor entity (especially high recommended_mentions ones)
-   - Phrase coverage: penalise missing competitor phrases from paragraphs
-   - Also consider: brand+service+city co-occurrence in ≥3 sections; sub-services mentioned; topical depth.
-   - In issues/recommendations, list specific missing entities and phrases by name.
-
-4. icp_alignment (weight 10%): detect ICP from keyword modifier (emergency→urgent tone; commercial→B2B tone; general→professional/reliable); CTA matches ICP; pain points addressed.
-
-5. aeo_llm_retrieval (weight 10%): answer-first formatting (direct claim before explanation); FAQ with ≥4 entries; each section ≤300 words; Q&A heading structure; specific operational details (not generic filler).
-
-6. geographic_legitimacy (weight 10%): city in title+H1+opening ¶; ≥2 neighborhood references in sentence context; ≥1 landmark reference; ≥3 zip codes in visible content; geo signals in ≥3 page sections.
-
-7. nearme_intent (weight 10%): phone above fold; availability language in opening block; response time stated explicitly; ≥2 neighborhood+service+availability blocks; ≥1 street reference; ≥2 proximity FAQs (availability/response/coverage/emergency).
-
-Return ONLY valid JSON — no markdown, no explanation:
-{{
-  "organic_ranking":       {{"score": 0, "issues": [], "recommendations": []}},
-  "gbp_maps":              {{"score": 0, "issues": [], "recommendations": []}},
-  "entity_establishment":  {{"score": 0, "issues": [], "recommendations": []}},
-  "icp_alignment":         {{"score": 0, "icp_detected": "", "issues": [], "recommendations": []}},
-  "aeo_llm_retrieval":     {{"score": 0, "issues": [], "recommendations": []}},
-  "geographic_legitimacy": {{"score": 0, "issues": [], "recommendations": []}},
-  "nearme_intent":         {{"score": 0, "issues": [], "recommendations": []}}
-}}
-
-Be specific — reference actual content found (or missing) in the page."""
+{page_text}"""
 
 
 async def _derive_related_keywords(keyword: str, location: str, haiku_client) -> tuple:
@@ -2217,11 +2306,12 @@ async def _score_page_for_related(
         page_html = _resp.text
     page_text = _BS2(page_html, "html.parser").get_text(separator="\n", strip=True)[:8000]
     city = location.split(",")[0].strip()
-    prompt = _build_score_prompt(business_name, gbp_category, keyword, city, address, "", page_text)
+    user_prompt = _build_score_prompt(business_name, gbp_category, keyword, city, address, "", page_text)
     msg = await haiku_client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}],
+        system=[{"type": "text", "text": _SCORE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+        messages=[{"role": "user", "content": user_prompt}],
     )
     token_rec = _token_record(
         "related-pages/score", "claude-haiku-4-5-20251001",
@@ -2293,241 +2383,6 @@ def _serp_context(serp_analysis: Optional[dict]) -> str:
                 parts.append(f"    \"{h['text']}\" ({h['page_count']} pages)")
 
     return "\n".join(parts)
-
-
-# ── /check-rankability ────────────────────────────────────────────────────────
-
-class CheckRankabilityRequest(BaseModel):
-    keyword: str
-    location: str
-    gbp_category: str
-
-class CheckRankabilityResponse(BaseModel):
-    verdict: str            # "match" | "partial" | "mismatch"
-    client_category: str
-    match_count: int        # how many of the top results share the client's category
-    total_results: int
-    ranking_categories: List[dict]   # [{"category": str, "count": int}]
-    top_businesses: List[dict]       # [{"name": str, "category": str, "rating": float}]
-    message: str
-
-
-def _category_matches(client: str, ranking: str) -> bool:
-    """Loose match: exact, plural-insensitive, or substring."""
-    c = client.lower().strip().rstrip("s")
-    r = ranking.lower().strip().rstrip("s")
-    return c == r or c in r or r in c
-
-
-@app.post('/check-rankability', response_model=CheckRankabilityResponse, dependencies=[Depends(verify_api_key)])
-@limiter.limit("20/minute")
-async def check_rankability(request: Request, body: CheckRankabilityRequest):
-    if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
-        raise HTTPException(status_code=503, detail="DataForSEO credentials not configured")
-
-    creds = base64.b64encode(f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()).decode()
-    city = body.location.split(",")[0].strip()
-
-    async with httpx.AsyncClient() as client:
-        try:
-            resp = await client.post(
-                DATAFORSEO_MAPS_ENDPOINT,
-                headers={"Authorization": f"Basic {creds}", "Content-Type": "application/json"},
-                json=[{
-                    "keyword": f"{body.keyword} {city}".strip(),
-                    "location_name": body.location,
-                    "language_name": "English",
-                    "depth": 20,
-                }],
-                timeout=30.0,
-            )
-            resp.raise_for_status()
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"DataForSEO Maps error: {e}")
-
-    top_businesses: List[dict] = []
-    category_counts: Dict[str, int] = {}
-
-    for task in (resp.json().get("tasks") or []):
-        for result in (task.get("result") or []):
-            for item in (result.get("items") or []):
-                if item.get("type") != "maps_search":
-                    continue
-                name = item.get("title", "")
-                cat = item.get("category", "") or ""
-                rating_obj = item.get("rating") or {}
-                rating = rating_obj.get("value", 0) or 0
-                if cat:
-                    category_counts[cat] = category_counts.get(cat, 0) + 1
-                top_businesses.append({"name": name, "category": cat, "rating": float(rating)})
-                if len(top_businesses) >= 10:
-                    break
-
-    total = len(top_businesses)
-    match_count = sum(
-        1 for b in top_businesses if _category_matches(body.gbp_category, b["category"])
-    )
-
-    # Sort ranking categories by frequency
-    ranking_categories = sorted(
-        [{"category": c, "count": n} for c, n in category_counts.items()],
-        key=lambda x: x["count"], reverse=True,
-    )
-
-    if total == 0:
-        verdict = "unknown"
-        message = "No map pack results found for this keyword and location."
-    elif match_count >= 7:
-        verdict = "match"
-        message = (
-            f"Your category '{body.gbp_category}' appears in {match_count}/{total} map pack results. "
-            f"Strong signal that you can rank for this keyword."
-        )
-    elif match_count >= 3:
-        verdict = "partial"
-        message = (
-            f"Your category '{body.gbp_category}' appears in {match_count}/{total} map pack results. "
-            f"You may be able to rank with a highly optimized page, but will need to heavily include offpage signals including links, clicks, citations, and brand mentions."
-        )
-    else:
-        verdict = "mismatch"
-        top_cats = ", ".join(c["category"] for c in ranking_categories[:3])
-        message = (
-            f"Your category '{body.gbp_category}' does not appear in the map pack for this keyword. "
-            f"The map pack is dominated by: {top_cats}. "
-            f"You are unlikely to rank here in Google Maps."
-        )
-
-    return CheckRankabilityResponse(
-        verdict=verdict,
-        client_category=body.gbp_category,
-        match_count=match_count,
-        total_results=total,
-        ranking_categories=ranking_categories,
-        top_businesses=top_businesses,
-        message=message,
-    )
-
-
-# ── /plan-pages ──────────────────────────────────────────────────────────────
-
-class PlanPagesRequest(BaseModel):
-    website_url: str
-    keyword: str
-    location: str
-
-class PlanPageItem(BaseModel):
-    keyword: str
-    group: str          # "primary" | "parent" | "sibling" | "child"
-    status: str         # "exists" | "missing"
-    page_url: Optional[str] = None
-    page_title: Optional[str] = None
-
-@app.post('/plan-pages', dependencies=[Depends(verify_api_key)])
-@limiter.limit("5/minute")
-async def plan_pages(request: Request, body: PlanPagesRequest):
-    if not ANTHROPIC_API_KEY:
-        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
-
-    async def event_stream():
-        def sse(data: dict) -> str:
-            return f"data: {json.dumps(data)}\n\n"
-
-        try:
-            import anthropic as _anthropic
-            haiku_client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-            city = body.location.split(",")[0].strip()
-            parsed = urllib.parse.urlparse(
-                body.website_url if body.website_url.startswith("http") else f"https://{body.website_url}"
-            )
-            base_netloc = parsed.netloc
-
-            # Step 1: derive keyword universe via Haiku
-            yield sse({"step": "deriving", "message": "Deriving keyword targets…", "progress": 5})
-            try:
-                kw_data, _ = await _derive_related_keywords(body.keyword, body.location, haiku_client)
-            except Exception as _de:
-                logger.warning(f"plan-pages: keyword derivation failed ({_de}), using seed only")
-                kw_data = {"parents": [], "siblings": [], "children": []}
-
-            # Build ordered list with group labels, cap at 20 total
-            ordered: list[tuple[str, str]] = [(body.keyword, "primary")]
-            for kw in kw_data.get("parents", []):
-                ordered.append((kw, "parent"))
-            for kw in kw_data.get("siblings", []):
-                ordered.append((kw, "sibling"))
-            for kw in kw_data.get("children", []):
-                ordered.append((kw, "child"))
-
-            # Deduplicate (case-insensitive)
-            seen: set = set()
-            unique: list[tuple[str, str]] = []
-            for kw, grp in ordered:
-                key = kw.strip().lower()
-                if key and key not in seen:
-                    seen.add(key)
-                    unique.append((kw.strip(), grp))
-                if len(unique) >= 20:
-                    break
-
-            yield sse({"step": "checking", "message": f"Checking {len(unique)} keywords against your site…", "progress": 10, "total": len(unique)})
-
-            # Step 2: for each keyword, run site: search via DataForSEO
-            async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
-                for i, (kw, grp) in enumerate(unique):
-                    progress = 10 + int((i / len(unique)) * 85)
-                    yield sse({
-                        "step": "checking_keyword",
-                        "message": f"Checking: {kw}",
-                        "progress": progress,
-                        "current": i + 1,
-                        "total": len(unique),
-                    })
-
-                    item: dict = {
-                        "keyword": kw,
-                        "group": grp,
-                        "status": "missing",
-                        "page_url": None,
-                        "page_title": None,
-                    }
-
-                    if DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD:
-                        try:
-                            site_query = f"site:{base_netloc} {kw} {city}".strip()
-                            creds = base64.b64encode(
-                                f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
-                            ).decode()
-                            _sr = await client.post(
-                                DATAFORSEO_ENDPOINT,
-                                headers={"Authorization": f"Basic {creds}", "Content-Type": "application/json"},
-                                json=[{"keyword": site_query, "language_name": "English", "depth": 5, "se_domain": "google.com"}],
-                                timeout=30.0,
-                            )
-                            if _sr.status_code == 200:
-                                for _task in (_sr.json().get("tasks") or []):
-                                    for _result in (_task.get("result") or []):
-                                        for _result_item in (_result.get("items") or []):
-                                            if _result_item.get("type") == "organic":
-                                                _u = _result_item.get("url", "")
-                                                if _u and base_netloc in _u and not _is_likely_blog_post(_u):
-                                                    item["status"] = "exists"
-                                                    item["page_url"] = _u
-                                                    item["page_title"] = _result_item.get("title", "") or _u
-                                                    break
-                        except Exception as _e:
-                            logger.warning(f"plan-pages: site-search failed for {kw!r}: {_e}")
-
-                    yield sse({"step": "keyword_result", "item": item})
-                    await asyncio.sleep(0.2)  # gentle pacing between DataForSEO calls
-
-            yield sse({"step": "done", "progress": 100, "message": "Scan complete"})
-
-        except Exception as e:
-            logger.warning(f"plan-pages error: {e}")
-            yield sse({"step": "error", "message": str(e)})
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 # ── /find-page-for-keyword ────────────────────────────────────────────────────
@@ -2663,149 +2518,180 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             timeout=15.0,
             headers=CRAWL_HEADERS,
         ) as client:
-            origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
-            biz_location = (body.location or "").strip()
-            city = biz_location.split(",")[0].strip()
-
-            # ── Primary: DataForSEO site: search ─────────────────────────────────
-            # Google's own index already ranked by relevance for this keyword.
-            # This is the most reliable signal — trust it directly.
-            serp_titles: dict = {}
-            if DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD:
-                try:
-                    site_query = f"site:{base_netloc} {body.keyword} {city}".strip()
-                    logger.info(f"find-page-for-keyword: site-search query: {site_query!r}")
-                    creds = base64.b64encode(
-                        f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
-                    ).decode()
-                    _sr = await client.post(
-                        DATAFORSEO_ENDPOINT,
-                        headers={"Authorization": f"Basic {creds}", "Content-Type": "application/json"},
-                        json=[{"keyword": site_query, "language_name": "English", "depth": 10, "se_domain": "google.com"}],
-                        timeout=30.0,
-                    )
-                    if _sr.status_code == 200:
-                        for _task in (_sr.json().get("tasks") or []):
-                            for _result in (_task.get("result") or []):
-                                for _item in (_result.get("items") or []):
-                                    if _item.get("type") == "organic":
-                                        _u = _item.get("url", "")
-                                        if _u and base_netloc in _u:
-                                            serp_titles[_u] = _item.get("title", "") or _u
-                                        if len(serp_titles) >= 20:
-                                            break
-                    logger.info(f"find-page-for-keyword: site-search found {len(serp_titles)} URLs: {list(serp_titles.keys())[:5]}")
-                except Exception as _se:
-                    logger.warning(f"find-page-for-keyword: site-search failed ({_se})")
-
-            # If site: search returned results, filter non-blog candidates and
-            # let Haiku pick the most relevant one.
-            if serp_titles:
-                non_blog = [(u, t) for u, t in serp_titles.items() if not _is_likely_blog_post(u)]
-                blog_only = [(u, t) for u, t in serp_titles.items() if _is_likely_blog_post(u)]
-                candidates = non_blog if non_blog else blog_only
-
-                haiku_pick: Optional[str] = None
-                if ANTHROPIC_API_KEY and len(candidates) > 1:
-                    try:
-                        _ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-                        location_context = biz_location if biz_location else "unknown"
-                        url_list_text = "\n".join(
-                            f"{i+1}. {u}  |  {t}" for i, (u, t) in enumerate(candidates)
-                        )
-                        _msg = await _ac.messages.create(
-                            model="claude-haiku-4-5-20251001",
-                            max_tokens=64,
-                            temperature=0,
-                            messages=[{"role": "user", "content": (
-                                f"Keyword: \"{body.keyword}\"\nLocation: {location_context}\n\n"
-                                f"Pick the single best URL that is a DEDICATED SERVICE PAGE targeting this keyword.\n"
-                                f"- Prefer URLs whose slug or title contains the core service AND location\n"
-                                f"- Business-type words (company, contractor, professional, etc.) are not in slugs — ignore them\n"
-                                f"- A near-match service page is better than 0\n\n"
-                                f"Reply with ONLY the number of the best URL.\n\n{url_list_text}"
-                            )}],
-                        )
-                        raw_pick = _msg.content[0].text.strip()
-                        pick_num = int(re.search(r'\d+', raw_pick).group()) if re.search(r'\d+', raw_pick) else 0
-                        if 1 <= pick_num <= len(candidates):
-                            haiku_pick = candidates[pick_num - 1][0]
-                            logger.info(f"find-page-for-keyword: Haiku picked #{pick_num} → {haiku_pick}")
-                    except Exception as _he:
-                        logger.warning(f"find-page-for-keyword: Haiku failed ({_he})")
-
-                best_url = haiku_pick or candidates[0][0]
-                best_title = serp_titles.get(best_url, best_url)
-                logger.info(f"find-page-for-keyword: site-search primary result → {best_url}")
-                is_blog = _is_likely_blog_post(best_url)
-                return FindPageResponse(
-                    found=True,
-                    page={'url': best_url, 'title': best_title, 'h1': '', 'is_blog_post': is_blog},
-                    is_blog_post=is_blog,
-                )
-
-            # ── Fallback: sitemap discovery + slug filter ─────────────────────────
-            # Only runs if DataForSEO returned nothing (not indexed, API down, etc.)
-            logger.info("find-page-for-keyword: no site-search results, falling back to sitemap")
+            # Discover site URLs
             discovered = await _discover_via_sitemap(url, client)
             if not discovered:
+                logger.info(f"find-page-for-keyword: no sitemap for {url} — trying nav")
                 discovered = await _discover_via_nav(url, client)
+
+            origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
             all_urls = list(dict.fromkeys(
                 [origin] + [u for u in discovered if _same_domain(u)]
             ))
-            logger.info(f"find-page-for-keyword: sitemap fallback found {len(all_urls)} URLs")
+            logger.info(f"find-page-for-keyword: {len(all_urls)} URLs discovered for {url}")
 
-            # Slug-match filter
-            svc_matches = [u for u in all_urls if any(_word_in_slug(w, urllib.parse.urlparse(u).path) for w in kw_words)]
-            loc_matches = [u for u in all_urls if any(_word_in_slug(w, urllib.parse.urlparse(u).path) for w in loc_words)]
+            biz_location = (body.location or "").strip()
+
+            # ── Step 1: Python substring filter ──────────────────────────────────────
+            # Find every URL whose slug contains at least one service word OR one
+            # location word.  No scoring heuristics — just plain string contains.
+            svc_matches  = [u for u in all_urls if any(_word_in_slug(w, urllib.parse.urlparse(u).path) for w in kw_words)]
+            loc_matches  = [u for u in all_urls if any(_word_in_slug(w, urllib.parse.urlparse(u).path) for w in loc_words)]
+            # Union, deduplicated
             seen: set = set()
             candidate_pool: list = []
             for u in svc_matches + loc_matches:
                 if u not in seen:
                     seen.add(u)
                     candidate_pool.append(u)
+            # Sort: pages with both service + location in slug first, then by hit count
             candidate_pool.sort(key=_slug_match_score, reverse=True)
             candidate_pool = candidate_pool[:25]
 
-            logger.info(f"find-page-for-keyword: {len(candidate_pool)} slug-matched candidates")
+            # ── Direct URL guessing (runs if sitemap found nothing useful) ─────────
+            # Generate slug permutations from service + location words and probe them.
+            # Catches cases where sitemap discovery fails entirely.
+            if not svc_matches and not loc_matches:
+                svc_slug = "-".join(kw_words)
+                loc_slug = "-".join(loc_words[:2]) if loc_words else ""  # e.g. "newport-beach"
+                guesses = []
+                if svc_slug and loc_slug:
+                    guesses += [
+                        f"{origin}/{loc_slug}-{svc_slug}/",
+                        f"{origin}/{loc_slug}-{svc_slug}s/",
+                        f"{origin}/{svc_slug}-{loc_slug}/",
+                        f"{origin}/{svc_slug}s-{loc_slug}/",
+                    ]
+                if svc_slug:
+                    guesses += [f"{origin}/{svc_slug}/", f"{origin}/{svc_slug}s/"]
 
-            if candidate_pool:
-                # Use Haiku to pick the best slug-matched candidate
-                haiku_pick: Optional[str] = None
-                if ANTHROPIC_API_KEY:
+                async def _probe(u: str) -> Optional[str]:
                     try:
-                        _ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-                        url_list_text = "\n".join(f"{i+1}. {u}" for i, u in enumerate(candidate_pool))
-                        location_context = biz_location if biz_location else "unknown"
-                        _msg = await _ac.messages.create(
-                            model="claude-haiku-4-5-20251001",
-                            max_tokens=64,
-                            temperature=0,
-                            messages=[{"role": "user", "content": (
-                                f"Keyword: \"{body.keyword}\"\nLocation: {location_context}\n\n"
-                                f"Pick the single best URL that is a DEDICATED SERVICE PAGE for this keyword.\n"
-                                f"- Prefer URLs with service words AND location words in the slug\n"
-                                f"- Business-type words (company, contractor, etc.) won't appear in slugs — ignore them\n"
-                                f"- Reject blog posts, news, guides, about pages, homepages\n"
-                                f"- A near-match is better than 0\n\n"
-                                f"Reply with ONLY the number, or 0 if every URL is unrelated.\n\n{url_list_text}"
-                            )}],
-                        )
-                        raw_pick = _msg.content[0].text.strip()
-                        pick_num = int(re.search(r'\d+', raw_pick).group()) if re.search(r'\d+', raw_pick) else 0
-                        if 1 <= pick_num <= len(candidate_pool):
-                            haiku_pick = candidate_pool[pick_num - 1]
-                            logger.info(f"find-page-for-keyword: Haiku picked #{pick_num} → {haiku_pick}")
-                    except Exception as _he:
-                        logger.warning(f"find-page-for-keyword: Haiku failed ({_he})")
+                        r = await client.head(u, timeout=5.0)
+                        return u if r.status_code in (200, 301, 302) else None
+                    except Exception:
+                        return None
 
-                picked = haiku_pick or candidate_pool[0]
-                is_blog = _is_likely_blog_post(picked)
-                return FindPageResponse(
-                    found=True,
-                    page={'url': picked, 'title': picked, 'h1': '', 'is_blog_post': is_blog},
-                    is_blog_post=is_blog,
-                )
+                probe_results = await asyncio.gather(*[_probe(g) for g in guesses])
+                guessed = [u for u in probe_results if u]
+                if guessed:
+                    logger.info(f"find-page-for-keyword: direct-guess found {guessed}")
+                    candidate_pool = guessed + candidate_pool
+
+            # ── site: search fallback ─────────────────────────────────────────────
+            # If all sitemap + guessing attempts found nothing, query Google via
+            # DataForSEO with  site:{domain} {keyword} {city}  and use the results.
+            if not candidate_pool and DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD:
+                try:
+                    city = (body.location or "").split(",")[0].strip()
+                    site_query = f"site:{base_netloc} {body.keyword} {city}".strip()
+                    logger.info(f"find-page-for-keyword: falling back to site-search: {site_query!r}")
+                    credentials = base64.b64encode(
+                        f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
+                    ).decode()
+                    _sr = await client.post(
+                        DATAFORSEO_ENDPOINT,
+                        headers={"Authorization": f"Basic {credentials}", "Content-Type": "application/json"},
+                        json=[{"keyword": site_query, "language_name": "English", "depth": 10, "se_domain": "google.com"}],
+                        timeout=30.0,
+                    )
+                    if _sr.status_code == 200:
+                        _sd = _sr.json()
+                        for _task in (_sd.get("tasks") or []):
+                            for _result in (_task.get("result") or []):
+                                for _item in (_result.get("items") or []):
+                                    if _item.get("type") == "organic":
+                                        _u = _item.get("url", "")
+                                        if _u and base_netloc in _u and _u not in candidate_pool:
+                                            candidate_pool.append(_u)
+                        logger.info(f"find-page-for-keyword: site-search returned {len(candidate_pool)} results")
+                except Exception as _se:
+                    logger.warning(f"find-page-for-keyword: site-search failed ({_se})")
+
+            # Generic fallback: if still nothing, take top 10 discovered URLs
+            if not candidate_pool:
+                candidate_pool = all_urls[:10]
+
+            logger.info(f"find-page-for-keyword: {len(candidate_pool)} candidates ({len(svc_matches)} svc, {len(loc_matches)} loc matches from {len(all_urls)} total)")
+            for i, u in enumerate(candidate_pool[:15]):
+                score = _slug_match_score(u)
+                logger.info(f"  candidate #{i+1} (both={score[0]}, svc={score[1]}, loc={score[2]}): {u}")
+
+            # ── Step 2: Haiku picks the best candidate ────────────────────────────────
+            haiku_pick: Optional[str] = None
+            if ANTHROPIC_API_KEY and candidate_pool:
+                try:
+                    _ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+                    url_list_text = "\n".join(f"{i+1}. {u}" for i, u in enumerate(candidate_pool))
+
+                    # Build location context line
+                    location_context = biz_location if biz_location else "unknown"
+
+                    location_rule = (
+                        f"  - Target location: {location_context}\n"
+                        f"  - Strongly prefer URLs whose slug contains BOTH the service words AND location words (e.g. city name).\n"
+                        f"  - A URL with just the service words (no location in slug) is acceptable if no location-specific page exists.\n"
+                    ) if biz_location else (
+                        "  - Find the best dedicated service page for this service type.\n"
+                    )
+                    _msg = await _ac.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=64,
+                        temperature=0,
+                        messages=[{"role": "user", "content": (
+                            f"Keyword: \"{body.keyword}\"\n"
+                            f"Location: {location_context}\n\n"
+                            f"Pick the single best URL below that is a DEDICATED SERVICE PAGE targeting this keyword for this location.\n"
+                            f"Guidelines:\n"
+                            f"{location_rule}"
+                            f"  - Business-type words in the keyword (company, contractor, professional, etc.) will NOT appear in URL slugs — ignore them when scoring slug relevance\n"
+                            f"  - Prefer URLs whose slug contains the core service concept (e.g. 'tree-service', 'tree-trimming') and optionally the location\n"
+                            f"  - Reject blog posts, news, guides, how-to articles, about pages, homepages\n"
+                            f"  - A near-match service page is better than no result — prefer the closest match over 0\n\n"
+                            f"Reply with ONLY the number of the best URL, or 0 only if every URL is clearly a blog post or unrelated.\n\n"
+                            f"{url_list_text}"
+                        )}],
+                    )
+                    raw_pick = _msg.content[0].text.strip()
+                    logger.info(f"find-page-for-keyword: Haiku raw response: {repr(raw_pick)}")
+                    pick_num = int(re.search(r'\d+', raw_pick).group()) if re.search(r'\d+', raw_pick) else 0
+                    if 1 <= pick_num <= len(candidate_pool):
+                        haiku_pick = candidate_pool[pick_num - 1]
+                        logger.info(f"find-page-for-keyword: Haiku picked #{pick_num} → {haiku_pick}")
+                    else:
+                        logger.info(f"find-page-for-keyword: Haiku returned 0 or out-of-range ({pick_num}), using regex fallback")
+                except Exception as _he:
+                    logger.warning(f"find-page-for-keyword: Haiku selection failed ({_he}), falling back to regex")
+
+            # If Haiku picked a URL, trust it — fetch just enough to get title/H1
+            if haiku_pick:
+                try:
+                    resp = await client.get(haiku_pick, timeout=8.0)
+                    if resp.status_code == 200:
+                        soup = BeautifulSoup(resp.text, 'html.parser')
+                        title_tag = soup.find('title')
+                        h1_tag = soup.find('h1')
+                        title_text = title_tag.get_text(strip=True) if title_tag else haiku_pick
+                        h1_text = h1_tag.get_text(strip=True) if h1_tag else ''
+                        is_blog = _is_likely_blog_post(haiku_pick)
+                        return FindPageResponse(
+                            found=True,
+                            page={'url': str(resp.url), 'title': title_text, 'h1': h1_text, 'is_blog_post': is_blog},
+                            is_blog_post=is_blog,
+                        )
+                except Exception as _fe:
+                    logger.warning(f"find-page-for-keyword: failed to fetch Haiku pick ({_fe}), falling back")
+
+            # Fallback: check top candidates with keyword-in-title gate
+            to_check = [u for u in candidate_pool if u != haiku_pick]
+            results = await asyncio.gather(*[_check_page(u, client) for u in to_check])
+            matches = [r for r in results if r]
+            matches.sort(key=lambda r: r.get('is_blog_post', False))
+            if matches:
+                res = matches[0]
+                is_blog = res.get('is_blog_post', False)
+                logger.info(f"find-page-for-keyword: found {'blog' if is_blog else 'service'} page → {res['url']}")
+                return FindPageResponse(found=True, page=res, is_blog_post=is_blog)
 
     except Exception as e:
         logger.warning(f"find-page-for-keyword error ({url}): {e}")
@@ -2819,6 +2705,7 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
 class ScorePageRequest(BaseModel):
     keyword: str
     location: str
+    location_code: Optional[int] = None  # DataForSEO numeric location code
     page_url: Optional[str] = None
     page_content: Optional[str] = None  # if omitted, fetched from page_url
     business_name: str
@@ -2832,6 +2719,8 @@ class ScorePageResponse(BaseModel):
     engine_scores: dict
     deficiencies: List[dict]
     token_usage: dict
+    serp_analysis: Optional[dict] = None   # populated when analysis was run inline
+    analysis_cost: Optional[dict] = None   # cost of the inline SERP analysis
 
 
 @app.post('/score-page', response_model=ScorePageResponse, dependencies=[Depends(verify_api_key)])
@@ -2843,6 +2732,18 @@ async def score_page(request: Request, body: ScorePageRequest):
     import anthropic as _anthropic
     client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
+    # ── Run SERP analysis inline if not provided ───────────────────────────────
+    # Scoring against competitors requires SERP data. If the caller doesn't pass
+    # serp_analysis (e.g. user hits Score directly without a prior analysis run),
+    # we run the full pipeline here and return it so the frontend can cache it.
+    inline_serp: Optional[AnalysisResponse] = None
+    serp_analysis_dict: Optional[dict] = body.serp_analysis
+    if not serp_analysis_dict:
+        logger.info(f"score-page: no serp_analysis provided — running inline SERP analysis for '{body.keyword}'")
+        inline_serp = await _run_serp_analysis(body.keyword, body.location, body.location_code)
+        serp_analysis_dict = inline_serp.model_dump()
+
+    from bs4 import BeautifulSoup as _BS
     page_html = body.page_content
     if not page_html and body.page_url:
         try:
@@ -2852,42 +2753,28 @@ async def score_page(request: Request, body: ScorePageRequest):
                 _resp.raise_for_status()
                 page_html = _resp.text
         except Exception as _e:
-            raise HTTPException(status_code=422, detail=f"Could not fetch {body.page_url}: {_e}")
+            logger.warning(f"Could not fetch page_url for scoring: {_e}")
+            raise HTTPException(status_code=422, detail="Could not fetch the provided page URL. Check that it is correct and publicly accessible.")
     if not page_html:
         raise HTTPException(status_code=422, detail="Either page_content or page_url is required")
-    page_zones = _parse_page_zones(page_html)
-    page_text = " ".join([
-        page_zones.get("title", ""),
-        page_zones.get("h1", ""),
-        page_zones.get("h2_h3", ""),
-        page_zones.get("body", ""),
-    ])[:8000]
+    page_text = _BS(page_html, "html.parser").get_text(separator="\n", strip=True)[:8000]
     city = body.location.split(",")[0].strip()
-    serp_ctx = _serp_context(body.serp_analysis)
+    serp_ctx = _serp_context(serp_analysis_dict)
 
-    # Run Google NLP on the page's paragraphs and compute coverage gaps
-    coverage: dict = {}
-    if body.serp_analysis:
-        async with httpx.AsyncClient() as _nlp_client:
-            page_raw_entities = await fetch_google_entities(page_zones.get("paragraphs", ""), _nlp_client)
-        # Inject page's own entities into page_zones for coverage check
-        page_entity_names = {e.get("name", "").lower() for e in page_raw_entities}
-        # Recompute full_text to include entity names found by NLP (belt-and-suspenders)
-        coverage = _compute_coverage(page_zones, body.serp_analysis)
-
-    coverage_ctx = _coverage_context(coverage)
-    prompt = _build_score_prompt(body.business_name, body.gbp_category, body.keyword, city, body.address, serp_ctx, page_text, coverage_ctx)
+    user_prompt = _build_score_prompt(body.business_name, body.gbp_category, body.keyword, city, body.address, serp_ctx, page_text)
 
     try:
         msg = await client.messages.create(
-            model=GENERATION_MODEL,
-            max_tokens=4000,
-            messages=[{"role": "user", "content": prompt}],
+            model=SCORE_MODEL,
+            max_tokens=2000,
+            system=[{"type": "text", "text": _SCORE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user_prompt}],
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Claude scoring error: {e}")
+        logger.exception("Claude scoring error")
+        raise HTTPException(status_code=502, detail="Scoring service temporarily unavailable")
 
-    token_rec = _token_record("score-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
+    token_rec = _token_record("score-page", SCORE_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
     scores = _parse_claude_json(msg.content[0].text)
     composite, status = _composite_from_scores(scores)
 
@@ -2897,6 +2784,8 @@ async def score_page(request: Request, body: ScorePageRequest):
         engine_scores=scores,
         deficiencies=_build_deficiencies(scores),
         token_usage=token_rec,
+        serp_analysis=serp_analysis_dict if inline_serp else None,
+        analysis_cost=inline_serp.analysis_cost if inline_serp else None,
     )
 
 
@@ -2926,131 +2815,90 @@ class GeneratePageResponse(BaseModel):
     cost_breakdown: dict = {}
 
 
-@app.post('/generate-page', dependencies=[Depends(verify_api_key)])
+@app.post('/generate-page', response_model=GeneratePageResponse, dependencies=[Depends(verify_api_key)])
 @limiter.limit("5/minute")
 async def generate_page(request: Request, body: GeneratePageRequest):
     if not ANTHROPIC_API_KEY:
         raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
 
-    async def event_stream():
-        import anthropic as _anthropic
+    import anthropic as _anthropic
+    client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-        def sse(data: dict) -> str:
-            return f"data: {json.dumps(data)}\n\n"
+    city = body.location.split(",")[0].strip()
 
-        try:
-            city = body.location.split(",")[0].strip()
+    # Google NLP entities are now fetched during /analyze, so serp_analysis
+    # passed here already contains them.
+    serp_ctx = _serp_context(body.serp_analysis)
 
-            # ── Step 1: Fetch competitor URLs ────────────────────────────────
-            yield sse({"step": "fetching_serp", "message": "Fetching competitor URLs from Google…", "progress": 5})
-            async with httpx.AsyncClient() as _sc:
-                comp_urls = await fetch_serp_urls(body.keyword, body.location, _sc)
-            if not comp_urls:
-                yield sse({"step": "error", "message": "DataForSEO returned no competitor URLs"})
-                return
+    diff_text = ""
+    if body.differentiators:
+        diff_text = "Differentiators (use these — include mechanism for each):\n" + \
+            "\n".join(f"  - {d.get('claim','')} (mechanism: {d.get('mechanism','')})" for d in body.differentiators)
 
-            # ── Step 2: Scrape competitor pages ──────────────────────────────
-            yield sse({"step": "scraping", "message": f"Scraping {len(comp_urls)} competitor pages…", "progress": 15})
-            comp_pages = await scrape_urls(comp_urls)
-            if len(comp_pages) < 2:
-                yield sse({"step": "error", "message": "Could not scrape enough competitor pages"})
-                return
-            yield sse({"step": "scraping_done", "message": f"Scraped {len(comp_pages)} pages successfully", "progress": 40})
+    reviews_text = ""
+    if body.reviews:
+        qualifying = [r for r in body.reviews if r.get("rating", 0) >= 4][:5]
+        if qualifying:
+            reviews_text = "GBP Reviews (use verbatim in Section 7 — do NOT fabricate):\n" + \
+                "\n".join(f'  ★{r.get("rating")} — {r.get("reviewer","")}: "{r.get("text","")}" ({r.get("date","")})'
+                          for r in qualifying)
 
-            # ── Step 3: Analyze competitor signals ───────────────────────────
-            yield sse({"step": "analyzing_competitors", "message": "Extracting competitor entities and phrases…", "progress": 45})
-            comp_zone_buckets: Dict[str, List[str]] = {z: [] for z in ["title", "h1", "h2_h3", "body", "paragraphs"]}
-            for html in comp_pages:
-                zones = extract_zones(html)
-                for z in comp_zone_buckets:
-                    comp_zone_buckets[z].append(zones.get(z, ""))
-            comp_entities = await get_google_entities(comp_zone_buckets["paragraphs"])
-            comp_quadgrams = get_top_quadgrams(comp_zone_buckets["paragraphs"], body.keyword)
-            comp_related: dict = {}
-            for zone in ("title", "h1", "h2_h3", "body"):
-                comp_related[zone] = get_related_keywords_for_zone(comp_zone_buckets[zone], body.keyword)
-            fresh_serp_analysis = {
-                "google_entities": comp_entities,
-                "top_quadgrams": comp_quadgrams,
-                "related_keywords": comp_related,
-            }
-            yield sse({"step": "analyzing_competitors_done", "message": f"Found {len(comp_entities)} entities, {len(comp_quadgrams)} phrases", "progress": 65})
+    icp = body.icp_type or "General Homeowner"
 
-            # ── Step 4: Generate page with Claude ────────────────────────────
-            yield sse({"step": "generating", "message": "Generating page content…", "progress": 70})
+    # Build brand voice block
+    brand_voice_text = ""
+    if body.brand_voice:
+        bv = body.brand_voice
+        # Use recommended_accepted voice if user accepted one, otherwise fall back to recommended, then current
+        accepted = bv.get("recommended_accepted")
+        if accepted == "recommended":
+            voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
+        elif accepted == "current":
+            voice = bv.get("current_voice") or {}
+        else:
+            voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
+        guide = bv.get("writer_execution_guide", "")
+        if voice or guide:
+            lines = ["BRAND VOICE (match this exactly):"]
+            if voice.get("tone"):
+                lines.append(f"  Tone: {voice['tone']}")
+            if voice.get("personality"):
+                lines.append(f"  Personality: {', '.join(voice['personality'])}")
+            ws = voice.get("writing_style", {})
+            if ws:
+                lines.append(f"  Writing style: {ws.get('sentence_length','')} sentences, {ws.get('person','')} person, {ws.get('formality','')} formality")
+            vocab = voice.get("vocabulary", {})
+            if vocab.get("use"):
+                lines.append(f"  Words/phrases to use: {', '.join(vocab['use'])}")
+            if vocab.get("avoid"):
+                lines.append(f"  Words/phrases to avoid: {', '.join(vocab['avoid'])}")
+            if guide:
+                lines.append(f"  Writer instructions: {guide}")
+            brand_voice_text = "\n".join(lines)
 
-            zone_targets_text = _zone_targets_text(fresh_serp_analysis)
+    # Build ICP block
+    icp_text = ""
+    if body.detected_icp:
+        segments = body.detected_icp.get("segments", [])
+        if segments:
+            lines = ["TARGET CUSTOMER PROFILES (write to these):"]
+            for seg in segments[:3]:  # cap at 3 segments
+                name = seg.get("name", "")
+                desc = seg.get("description", "")
+                msg = seg.get("messaging", {})
+                tone = msg.get("tone", "")
+                hooks = msg.get("hooks", [])
+                pain = msg.get("trust_signals", [])
+                lines.append(f"  [{name}] {desc}")
+                if tone:
+                    lines.append(f"    Messaging tone: {tone}")
+                if hooks:
+                    lines.append(f"    Headline hooks: {'; '.join(hooks[:2])}")
+                if pain:
+                    lines.append(f"    Trust signals: {'; '.join(pain[:2])}")
+            icp_text = "\n".join(lines)
 
-            diff_text = ""
-            if body.differentiators:
-                diff_text = "Differentiators (use these — include mechanism for each):\n" + \
-                    "\n".join(f"  - {d.get('claim','')} (mechanism: {d.get('mechanism','')})" for d in body.differentiators)
-
-            reviews_text = ""
-            if body.reviews:
-                qualifying = [r for r in body.reviews if r.get("rating", 0) >= 4][:5]
-                if qualifying:
-                    reviews_text = "GBP Reviews (use verbatim in Section 7 — do NOT fabricate):\n" + \
-                        "\n".join(f'  ★{r.get("rating")} — {r.get("reviewer","")}: "{r.get("text","")}" ({r.get("date","")})'
-                                  for r in qualifying)
-
-            icp = body.icp_type or "General Homeowner"
-
-            # Build brand voice block
-            brand_voice_text = ""
-            if body.brand_voice:
-                bv = body.brand_voice
-                accepted = bv.get("recommended_accepted")
-                if accepted == "recommended":
-                    voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
-                elif accepted == "current":
-                    voice = bv.get("current_voice") or {}
-                else:
-                    voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
-                guide = bv.get("writer_execution_guide", "")
-                if voice or guide:
-                    lines = ["BRAND VOICE (match this exactly):"]
-                    if voice.get("tone"):
-                        lines.append(f"  Tone: {voice['tone']}")
-                    if voice.get("personality"):
-                        lines.append(f"  Personality: {', '.join(voice['personality'])}")
-                    ws = voice.get("writing_style", {})
-                    if ws:
-                        lines.append(f"  Writing style: {ws.get('sentence_length','')} sentences, {ws.get('person','')} person, {ws.get('formality','')} formality")
-                    vocab = voice.get("vocabulary", {})
-                    if vocab.get("use"):
-                        lines.append(f"  Words/phrases to use: {', '.join(vocab['use'])}")
-                    if vocab.get("avoid"):
-                        lines.append(f"  Words/phrases to avoid: {', '.join(vocab['avoid'])}")
-                    if guide:
-                        lines.append(f"  Writer instructions: {guide}")
-                    brand_voice_text = "\n".join(lines)
-
-            # Build ICP block
-            icp_text = ""
-            if body.detected_icp:
-                segments = body.detected_icp.get("segments", [])
-                if segments:
-                    lines = ["TARGET CUSTOMER PROFILES (write to these):"]
-                    for seg in segments[:3]:
-                        name = seg.get("name", "")
-                        desc = seg.get("description", "")
-                        msg = seg.get("messaging", {})
-                        tone = msg.get("tone", "")
-                        hooks = msg.get("hooks", [])
-                        pain = msg.get("trust_signals", [])
-                        lines.append(f"  [{name}] {desc}")
-                        if tone:
-                            lines.append(f"    Messaging tone: {tone}")
-                        if hooks:
-                            lines.append(f"    Headline hooks: {'; '.join(hooks[:2])}")
-                        if pain:
-                            lines.append(f"    Trust signals: {'; '.join(pain[:2])}")
-                    icp_text = "\n".join(lines)
-
-            prompt = f"""You are an expert local SEO content writer. Generate a complete, publish-ready local service page following the exact structure below.
-
-BUSINESS DATA
+    user_prompt = f"""BUSINESS DATA
 Name: {body.business_name}
 Category: {body.gbp_category}
 Address: {body.address}
@@ -3066,190 +2914,65 @@ ICP: {icp}
 {icp_text}
 {diff_text}
 {reviews_text}
-{zone_targets_text}
+{serp_ctx}"""
 
-OUTPUT FORMAT
-Return valid HTML only. No markdown. No explanations outside the HTML. Structure:
-<title>[SEE TITLE FORMULA BELOW]</title>
-<article>
-  [13 sections as specified below]
-</article>
-Then on a NEW LINE after </article>, output the JSON-LD schema block starting with <script type="application/ld+json"> (3 schema blocks in one script tag).
+    try:
+        msg = await client.messages.create(
+            model=GENERATION_MODEL,
+            max_tokens=6000,
+            system=[{"type": "text", "text": _GEN_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+    except Exception as e:
+        logger.exception("Claude generation error")
+        raise HTTPException(status_code=502, detail="Content generation failed. Please try again.")
 
-TITLE TAG FORMULA (follow exactly — do not deviate):
-<title>[Power Word]! [Exact Match Keyword] | [Brand Name] | [Justification using entities] | [Additional persuasion + entities]</title>
-- Power Word: a single urgent/emotional word (e.g. Trusted, Fast, Expert, Certified, Local, Licensed)
-- Exact Match Keyword: the primary keyword verbatim
-- Brand Name: the business name
-- Justification: a short phrase using 1–2 Google entities that validates the claim (e.g. "Serving Anaheim Hills & Orange County")
-- Additional persuasion: a benefit or proof point that includes 1–2 more entities (e.g. "Same-Day Response, No Overtime Fees")
-- Total title length: 60–70 characters ideal, 80 max
+    token_rec = _token_record("generate-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
+    raw = msg.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
+        raw = re.sub(r'\n?```$', '', raw)
+        raw = raw.strip()
 
-MANDATORY 13-SECTION STRUCTURE
+    # Extract <title> tag
+    title_match = re.search(r'<title>(.*?)</title>', raw, re.IGNORECASE | re.DOTALL)
+    page_title = title_match.group(1).strip() if title_match else ""
+    if title_match:
+        raw = raw[:title_match.start()] + raw[title_match.end():]
+        raw = raw.strip()
 
-Section 1 — Intro / Direct Answer Block (100–150 words)
-<section id="intro">
-  <h1>[Exact Match Keyword] + [1–2 entities that reinforce location or service scope]</h1>
-  H1 FORMULA: Write the primary keyword verbatim, then append relevant entities naturally (e.g. "Emergency Plumber Anaheim — Serving Anaheim Hills, Yorba Linda & Orange County")
-  <p>[Brand] provides [service] to [city] — [primary differentiator stated in first sentence]. [2–3 sentences: service confirmation, availability, phone CTA.] [Close with direct service claim + city.]</p>
-</section>
+    # Split content_html from schema_json
+    schema_split = raw.find('<script type="application/ld+json">')
+    if schema_split != -1:
+        content_html = raw[:schema_split].strip()
+        schema_json = raw[schema_split:].strip()
+    else:
+        content_html = raw
+        schema_json = ""
 
-Section 2 — USP / Value Proposition (150–200 words)
-<section id="usp">
-  <h2>[Single sentence combining: exact match keyword + persuasion/outcome + 1–2 entities]</h2>
-  FIRST H2 FORMULA: Must be a complete sentence (not a fragment) that includes the primary keyword, a persuasive outcome or differentiator, and 1–2 entities. (e.g. "When Anaheim Homeowners Need an Emergency Plumber Fast, [Brand] Delivers Same-Day Repairs Across Orange County")
-  [Min 3 differentiators with mechanisms. One contrast statement. One proof signal.]
-</section>
+    # Build combined cost breakdown using analysis cost from the cached serp_analysis
+    ac = (body.serp_analysis or {}).get("analysis_cost", {})
+    claude_cost = token_rec["cost_usd"]
+    cost_breakdown = {
+        "dataforseo":           ac.get("dataforseo", 0),
+        "scrapeowl_pages":      ac.get("scrapeowl_pages", 0),
+        "scrapeowl":            ac.get("scrapeowl", 0),
+        "google_nlp_chars":     ac.get("google_nlp_chars", 0),
+        "google_nlp":           ac.get("google_nlp", 0),
+        "claude_model":         token_rec["model"],
+        "claude_input_tokens":  token_rec["input_tokens"],
+        "claude_output_tokens": token_rec["output_tokens"],
+        "claude":               round(claude_cost, 6),
+        "total":                round(ac.get("subtotal", 0) + claude_cost, 6),
+    }
 
-Section 3 — Special Offers (omit this section if no offer data provided)
-<section id="offers">...</section>
-
-Section 4 — CTA Block Primary (50–75 words)
-<section id="cta-primary">
-  <h2>[Action-oriented H2]</h2>
-  [Differentiated CTA — not "Contact us today". Include phone.]
-</section>
-
-Section 5 — Features and Benefits (150–200 words)
-<section id="features">
-  <h2>[Benefit-focused H2]</h2>
-  <ul>[Min 4 feature/benefit pairs — outcome-first, ICP pain points addressed]</ul>
-</section>
-
-Section 6 — Main Service Body (800–1400 words)
-<section id="services">
-  Use the COMPETITOR H2/H3 HEADINGS from the SERP data above as your structural baseline.
-  Cover every topic competitors cover, then add H2/H3 sections for topics competitors DON'T cover
-  that would more fully answer the user's implied query — this is called INFORMATION GAIN and
-  is critical for outranking competitors.
-
-  Structure rules:
-  - You may use MULTIPLE H2s within this section if the content warrants separate major topics
-  - Each H2 should represent a distinct major topic or service category
-  - Use H3s under each H2 for sub-services, use cases, or scenarios
-  - Every heading: include service/city naturally where it fits (not forced)
-  - Open with a primary service description paragraph (answer-first)
-  - Each H3: 2–4 sentences covering description, real-world scenario, differentiator, geo reference
-  - Naturally weave in competitor entities and phrases from SERP data throughout
-  - Do NOT copy competitor headings verbatim — use them to understand topic coverage, then write
-    headings that are more specific, benefit-oriented, or locally relevant
-</section>
-
-Section 7 — Testimonials (include only if reviews provided above; omit if none)
-<section id="testimonials">
-  <h2>[Social proof H2]</h2>
-  [Verbatim reviews only — first name + last initial, stars, date, full text]
-</section>
-
-Section 8 — CTA Block Secondary (50–75 words — different angle from Section 4)
-<section id="cta-secondary">...</section>
-
-Section 9 — Getting Started (150–200 words)
-<section id="getting-started">
-  <h2>[Process-focused H2]</h2>
-  <ol>[3–5 steps, plain language, close with CTA]</ol>
-</section>
-
-Section 10 — Geographic / Local SEO Section (200–300 words)
-<section id="local">
-  <h2>[City + service in heading]</h2>
-  [City + min 3 neighborhoods in sentence context (not just a list) + min 1 landmark + min 2 streets + zip codes (min 3). Use only real, verifiable geographic details. If neighborhood/landmark/street/zip data is not provided in the business data above, include only what you are certain is accurate for {city}. Do not invent or guess street names, zip codes, or landmarks. Coverage + response time.]
-</section>
-
-Section 11 — CTA Block Tertiary (50–75 words — urgency-forward)
-<section id="cta-tertiary">...</section>
-
-Section 12 — FAQ (min 6, max 10 entries — 40–80 words each)
-<section id="faq">
-  <h2>Frequently Asked Questions</h2>
-  [Must cover: availability, response time, coverage area, emergency service. Answer-first. Geographic + availability signal in each proximity FAQ.]
-</section>
-
-Section 13 — Schema (delivered AFTER </article> as a separate <script> block)
-Generate 3 schema blocks as a single JSON-LD array inside one <script type="application/ld+json"> tag:
-1. LocalBusiness (subtype from category: Plumber/HVACBusiness/Electrician etc.)
-2. Service
-3. FAQPage (auto-extracted from Section 12)
-
-HARD RULES — NEVER:
-- Start with "Welcome to [Brand]"
-- Use "We are a [city] [service] company" as first sentence
-- Write "Contact us today" as standalone CTA
-- Use generic headings ("About Us", "Our Services", "Why Choose Us")
-- Use "near me" literally in body content
-- Include placeholder text like [Insert here]
-- Fabricate reviews
-- Use vague differentiators ("trusted", "professional", "high quality") without a mechanism
-- Invent or guess phone numbers, addresses, hours, zip codes, street names, or landmarks not explicitly provided in the business data above"""
-
-            client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-            try:
-                msg = await client.messages.create(
-                    model=GENERATION_MODEL,
-                    max_tokens=8000,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-            except Exception as e:
-                yield sse({"step": "error", "message": f"Claude generation error: {e}"})
-                return
-
-            token_rec = _token_record("generate-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
-            raw = msg.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
-                raw = re.sub(r'\n?```$', '', raw)
-                raw = raw.strip()
-
-            # Extract <title> tag
-            title_match = re.search(r'<title>(.*?)</title>', raw, re.IGNORECASE | re.DOTALL)
-            page_title = title_match.group(1).strip() if title_match else ""
-            if title_match:
-                raw = raw[:title_match.start()] + raw[title_match.end():]
-                raw = raw.strip()
-
-            # Split content_html from schema_json
-            schema_split = raw.find('<script type="application/ld+json">')
-            if schema_split != -1:
-                content_html = raw[:schema_split].strip()
-                schema_json = raw[schema_split:].strip()
-            else:
-                content_html = raw
-                schema_json = ""
-
-            # Build cost breakdown from fresh scrape
-            scrapeowl_pages = len(comp_pages)
-            scrapeowl_cost = round(scrapeowl_pages * COST_SCRAPEOWL_PER_PAGE, 6)
-            google_nlp_chars = sum(len(p) for p in comp_zone_buckets["paragraphs"])
-            google_nlp_cost = round(google_nlp_chars / 1000 * COST_GOOGLE_NLP_PER_1K_CHARS, 6)
-            claude_cost = token_rec["cost_usd"]
-            cost_breakdown = {
-                "dataforseo":           COST_DATAFORSEO_PER_ANALYSIS,
-                "scrapeowl_pages":      scrapeowl_pages,
-                "scrapeowl":            scrapeowl_cost,
-                "google_nlp_chars":     google_nlp_chars,
-                "google_nlp":           google_nlp_cost,
-                "claude_model":         token_rec["model"],
-                "claude_input_tokens":  token_rec["input_tokens"],
-                "claude_output_tokens": token_rec["output_tokens"],
-                "claude":               round(claude_cost, 6),
-                "total":                round(COST_DATAFORSEO_PER_ANALYSIS + scrapeowl_cost + google_nlp_cost + claude_cost, 6),
-            }
-
-            result = {
-                "content_html": content_html,
-                "schema_json": schema_json,
-                "page_title": page_title,
-                "token_usage": token_rec,
-                "cost_breakdown": cost_breakdown,
-                "serp_analysis": fresh_serp_analysis,
-            }
-            yield sse({"step": "done", "progress": 100, "result": result})
-
-        except Exception as e:
-            logger.warning(f"generate-page error: {e}")
-            yield sse({"step": "error", "message": str(e)})
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return GeneratePageResponse(
+        content_html=content_html,
+        schema_json=schema_json,
+        page_title=page_title,
+        token_usage=token_rec,
+        cost_breakdown=cost_breakdown,
+    )
 
 
 # ── /reoptimize-page ──────────────────────────────────────────────────────────
@@ -3273,202 +2996,103 @@ class ReoptimizePageResponse(BaseModel):
     html_css_notes: List[str] = []
 
 
-@app.post('/reoptimize-page', dependencies=[Depends(verify_api_key)])
+@app.post('/reoptimize-page', response_model=ReoptimizePageResponse, dependencies=[Depends(verify_api_key)])
 @limiter.limit("5/minute")
 async def reoptimize_page(request: Request, body: ReoptimizePageRequest):
     if not ANTHROPIC_API_KEY:
         raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
 
-    async def event_stream():
-        import anthropic as _anthropic
+    import anthropic as _anthropic
+    client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-        def sse(data: dict) -> str:
-            return f"data: {json.dumps(data)}\n\n"
+    city = body.location.split(",")[0].strip()
+    serp_ctx = _serp_context(body.serp_analysis)
 
+    # Fetch existing page if URL given but no HTML
+    existing_html = body.existing_page_html or ""
+    if not existing_html and body.existing_page_url:
         try:
-            city = body.location.split(",")[0].strip()
+            async with httpx.AsyncClient() as _fc:
+                _resp = await _fc.get(body.existing_page_url, timeout=15.0,
+                                      headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"})
+                _resp.raise_for_status()
+                existing_html = _resp.text
+        except Exception as _e:
+            logger.warning(f"Could not fetch existing_page_url for reoptimize: {_e}")
+            raise HTTPException(status_code=422, detail="Could not fetch the provided page URL. Check that it is correct and publicly accessible.")
+    if not existing_html:
+        raise HTTPException(status_code=422, detail="Either existing_page_html or existing_page_url is required")
 
-            # ── Step 1: Fetch competitor URLs ────────────────────────────────
-            yield sse({"step": "fetching_serp", "message": "Fetching competitor URLs from Google…", "progress": 5})
-            async with httpx.AsyncClient() as _sc:
-                comp_urls = await fetch_serp_urls(body.keyword, body.location, _sc)
-            if not comp_urls:
-                yield sse({"step": "error", "message": "DataForSEO returned no competitor URLs"})
-                return
-            yield sse({"step": "fetching_serp_done", "message": f"Found {len(comp_urls)} competitor URLs", "progress": 15})
+    deficiency_text = "\n".join(
+        f"  Engine: {d['engine']} (score: {d['score']}/100)\n"
+        f"  Issues: {'; '.join(d.get('issues', []))}\n"
+        f"  Fixes needed: {'; '.join(d.get('recommendations', []))}"
+        for d in body.deficiencies
+    )
 
-            # ── Step 2: Scrape competitor pages ──────────────────────────────
-            yield sse({"step": "scraping", "message": f"Scraping {len(comp_urls)} competitor pages…", "progress": 20})
-            comp_pages = await scrape_urls(comp_urls)
-            if len(comp_pages) < 2:
-                yield sse({"step": "error", "message": "Could not scrape enough competitor pages"})
-                return
-            yield sse({"step": "scraping_done", "message": f"Scraped {len(comp_pages)} pages successfully", "progress": 40})
-
-            # ── Step 3: Analyze competitor signals ───────────────────────────
-            yield sse({"step": "analyzing_competitors", "message": "Extracting competitor entities and phrases…", "progress": 45})
-            comp_zone_buckets: Dict[str, List[str]] = {z: [] for z in ["title", "h1", "h2_h3", "body", "paragraphs"]}
-            for html in comp_pages:
-                zones = extract_zones(html)
-                for z in comp_zone_buckets:
-                    comp_zone_buckets[z].append(zones.get(z, ""))
-            comp_entities = await get_google_entities(comp_zone_buckets["paragraphs"])
-            comp_quadgrams = get_top_quadgrams(comp_zone_buckets["paragraphs"], body.keyword)
-            comp_related: dict = {}
-            for zone in ("title", "h1", "h2_h3", "body"):
-                comp_related[zone] = get_related_keywords_for_zone(comp_zone_buckets[zone], body.keyword)
-            fresh_serp_analysis = {
-                "google_entities": comp_entities,
-                "top_quadgrams": comp_quadgrams,
-                "related_keywords": comp_related,
-            }
-            yield sse({"step": "analyzing_competitors_done", "message": f"Found {len(comp_entities)} entities, {len(comp_quadgrams)} phrases", "progress": 55})
-
-            # ── Step 4: Fetch and analyze existing page ──────────────────────
-            yield sse({"step": "analyzing_page", "message": "Analyzing your existing page…", "progress": 60})
-            existing_html = body.existing_page_html or ""
-            if not existing_html and body.existing_page_url:
-                try:
-                    async with httpx.AsyncClient() as _fc:
-                        _resp = await _fc.get(body.existing_page_url, timeout=15.0,
-                                              headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"})
-                        _resp.raise_for_status()
-                        existing_html = _resp.text
-                except Exception as _e:
-                    yield sse({"step": "error", "message": f"Could not fetch existing page: {_e}"})
-                    return
-            if not existing_html:
-                yield sse({"step": "error", "message": "Either existing_page_html or existing_page_url is required"})
-                return
-
-            page_zones = _parse_page_zones(existing_html)
-            async with httpx.AsyncClient() as _nlp_client:
-                _page_raw_entities = await fetch_google_entities(page_zones.get("paragraphs", ""), _nlp_client)
-            yield sse({"step": "analyzing_page_done", "message": "Page analysis complete", "progress": 65})
-
-            # ── Step 5: Compute coverage gaps ────────────────────────────────
-            yield sse({"step": "computing_gaps", "message": "Identifying content gaps…", "progress": 70})
-            coverage = _compute_coverage(page_zones, fresh_serp_analysis)
-            coverage_ctx = _coverage_context(coverage)
-
-            # Build detailed gap instructions for Claude
-            missing_entities = coverage.get("missing_entities", [])
-            missing_quadgrams = coverage.get("missing_quadgrams", [])
-            zkc = coverage.get("zone_keyword_coverage", {})
-
-            gap_instructions = []
-            for zone, label in [("title", "Page title"), ("h1", "H1 heading"), ("h2_h3", "H2/H3 subheadings"), ("body", "Body text")]:
-                missing_terms = zkc.get(zone, {}).get("missing", [])
-                if missing_terms:
-                    gap_instructions.append(f"{label}: add missing competitor terms: {', '.join(t['term'] for t in missing_terms[:10])}")
-            if missing_entities:
-                ent_items = [f"{e['name']} (×{e['recommended_mentions']})" for e in missing_entities[:20]]
-                gap_instructions.append(
-                    f"Entities — add these across title, headings, and paragraphs as appropriate, "
-                    f"with the indicated mention frequency: {', '.join(ent_items)}"
-                )
-            if missing_quadgrams:
-                gap_instructions.append(f"Paragraphs — naturally incorporate these missing competitor phrases: {', '.join(q['phrase'] for q in missing_quadgrams[:15])}")
-
-            gap_text = "\n".join(f"  • {g}" for g in gap_instructions) if gap_instructions else "  • No major gaps detected"
-            yield sse({"step": "computing_gaps_done", "message": "Gap analysis complete", "progress": 72})
-
-            # ── Step 6: Rewrite with Claude ──────────────────────────────────
-            yield sse({"step": "rewriting", "message": "Rewriting page content…", "progress": 75})
-
-            serp_ctx = _serp_context(body.serp_analysis or fresh_serp_analysis)
-
-            deficiency_text = "\n".join(
-                f"  Engine: {d['engine']} (score: {d['score']}/100)\n"
-                f"  Issues: {'; '.join(d.get('issues', []))}\n"
-                f"  Fixes needed: {'; '.join(d.get('recommendations', []))}"
-                for d in body.deficiencies
-            )
-
-            prompt = f"""You are an expert local SEO content writer. Fix the SEO deficiencies in the page below by updating its text content only.
-
-BUSINESS: {body.business_name} | CATEGORY: {body.gbp_category}
+    user_prompt = f"""BUSINESS: {body.business_name} | CATEGORY: {body.gbp_category}
 KEYWORD: {body.keyword} | CITY: {city}
 PHONE: {body.phone or "[PHONE]"}
 ADDRESS: {body.address or "Not provided"}
 {serp_ctx}
 
-SCORING DEFICIENCIES TO FIX:
+DEFICIENCIES TO FIX:
 {deficiency_text}
 
-CONTENT GAP TARGETS — close these gaps by adding missing signals naturally into the page copy:
-{gap_text}
-
 EXISTING PAGE:
-{existing_html[:12000]}
+{existing_html[:12000]}"""
 
-STRICT RULES — follow exactly:
-1. TEXT ONLY: Only change text content (words between HTML tags). You may also update SEO-relevant attributes: alt, title, meta[content], og:title, og:description, aria-label, and JSON-LD schema text values.
-2. PRESERVE EVERYTHING ELSE: Do not change any element types, CSS classes, IDs, data-* attributes, href, src, or any non-content attributes. Do not add, remove, or reorder any HTML elements.
-3. Fix every deficiency listed above through word choices, phrasing, and copy — not by adding new HTML sections.
-4. Close every content gap listed under CONTENT GAP TARGETS. Entity mention counts are targets — weave them naturally across title, headings, and paragraphs as appropriate.
-5. Competitor phrases (quadgrams) go in paragraph text only — NOT in headings or the page title. Entities may appear anywhere.
-6. Do not fabricate reviews or placeholder text. Do not use "near me" literally in body copy.
+    try:
+        msg = await client.messages.create(
+            model=GENERATION_MODEL,
+            max_tokens=6000,
+            system=[{"type": "text", "text": _REOPT_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+    except Exception as e:
+        logger.exception("Claude reoptimize error")
+        raise HTTPException(status_code=502, detail="Content generation failed. Please try again.")
 
-Return your response in EXACTLY this format (do not deviate):
+    token_rec = _token_record("reoptimize-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
+    raw = msg.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
+        raw = re.sub(r'\n?```$', '', raw)
+        raw = raw.strip()
 
-<<<NOTES>>>
-List each HTML/CSS structural change that would further improve SEO but that you could NOT make because it requires adding/moving/removing elements or changing classes. Be specific (e.g. "Add an FAQ section with schema markup", "H1 tag is missing — the page title is wrapped in a <div> instead"). If none, write "None."
-<<<HTML>>>
-[Complete page HTML with ONLY text content and SEO attributes changed]"""
+    # Split on delimiter to extract notes and HTML separately
+    html_css_notes: List[str] = []
+    if "<<<HTML>>>" in raw:
+        parts = raw.split("<<<HTML>>>", 1)
+        notes_block = parts[0]
+        html_block = parts[1].strip()
+        # Extract bullet lines from the notes block (between <<<NOTES>>> and <<<HTML>>>)
+        if "<<<NOTES>>>" in notes_block:
+            notes_text = notes_block.split("<<<NOTES>>>", 1)[1].strip()
+        else:
+            notes_text = notes_block.strip()
+        if notes_text and notes_text.lower() != "none.":
+            for line in notes_text.splitlines():
+                line = line.strip().lstrip("-•*123456789. ").strip()
+                if line and line.lower() != "none.":
+                    html_css_notes.append(line)
+    else:
+        html_block = raw
 
-            _ac = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-            msg = await _ac.messages.create(
-                model=GENERATION_MODEL,
-                max_tokens=8000,
-                messages=[{"role": "user", "content": prompt}],
-            )
+    schema_split = html_block.find('<script type="application/ld+json">')
+    if schema_split != -1:
+        content_html = html_block[:schema_split].strip()
+        schema_json = html_block[schema_split:].strip()
+    else:
+        content_html = html_block
+        schema_json = None
 
-            token_rec = _token_record("reoptimize-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
-            raw = msg.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
-                raw = re.sub(r'\n?```$', '', raw)
-                raw = raw.strip()
-
-            html_css_notes: List[str] = []
-            if "<<<HTML>>>" in raw:
-                parts = raw.split("<<<HTML>>>", 1)
-                notes_block = parts[0]
-                html_block = parts[1].strip()
-                if "<<<NOTES>>>" in notes_block:
-                    notes_text = notes_block.split("<<<NOTES>>>", 1)[1].strip()
-                else:
-                    notes_text = notes_block.strip()
-                if notes_text and notes_text.lower() != "none.":
-                    for line in notes_text.splitlines():
-                        line = line.strip().lstrip("-•*123456789. ").strip()
-                        if line and line.lower() != "none.":
-                            html_css_notes.append(line)
-            else:
-                html_block = raw
-
-            schema_split = html_block.find('<script type="application/ld+json">')
-            if schema_split != -1:
-                content_html = html_block[:schema_split].strip()
-                schema_json = html_block[schema_split:].strip()
-            else:
-                content_html = html_block
-                schema_json = None
-
-            result = {
-                "content_html": content_html,
-                "schema_json": schema_json,
-                "token_usage": token_rec,
-                "html_css_notes": html_css_notes,
-            }
-            yield sse({"step": "done", "progress": 100, "result": result})
-
-        except Exception as e:
-            logger.warning(f"reoptimize-page error: {e}")
-            yield sse({"step": "error", "message": str(e)})
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return ReoptimizePageResponse(
+        content_html=content_html,
+        schema_json=schema_json,
+        token_usage=token_rec,
+        html_css_notes=html_css_notes,
+    )
 
 
 # ── /related-pages ─────────────────────────────────────────────────────────────
@@ -3604,3 +3228,515 @@ async def related_pages(request: Request, body: RelatedPagesRequest):
         total_input_tokens, total_output_tokens,
     )
     return RelatedPagesResponse(items=items, token_usage=token_rec)
+
+
+# ── /generate-social-posts ────────────────────────────────────────────────────
+
+_SOCIAL_SYSTEM_PROMPT = """You are a social media copywriter specialising in local service businesses. Given a page's content and business details, generate social media posts that drive local leads.
+
+Rules:
+- GBP / Facebook posts: max 200 words. Conversational, benefit-led, clear CTA mentioning the city.
+- Instagram posts: max 50 words. Punchy, emoji-friendly, hashtag line at the end (5–8 tags).
+- Pinterest posts: max 50 words. Descriptive, search-optimised, focus on the service benefit.
+- Vary the angle across the 5 posts per platform (e.g. urgency, social proof, education, offer, story).
+- Never fabricate reviews, prices, or guarantees not mentioned in the page content.
+- Output valid JSON only — no markdown fences, no commentary."""
+
+class SocialPostsRequest(BaseModel):
+    keyword: str
+    location: str
+    business_name: str
+    gbp_category: str
+    address: Optional[str] = None
+    page_content: str          # plain text of the generated page
+
+class SocialPostsResponse(BaseModel):
+    gbp: List[str]
+    facebook: List[str]
+    instagram: List[str]
+    pinterest: List[str]
+    token_usage: dict
+
+@app.post('/generate-social-posts', response_model=SocialPostsResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+async def generate_social_posts(request: Request, body: SocialPostsRequest):
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+
+    import anthropic as _anthropic
+    client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+    city = body.location.split(",")[0].strip()
+    page_text = body.page_content[:4000]  # cap context to keep cost low
+
+    user_prompt = f"""Business: {body.business_name}
+Category: {body.gbp_category}
+Location: {city}
+Keyword: {body.keyword}
+Address: {body.address or ""}
+
+PAGE CONTENT:
+{page_text}
+
+Generate exactly 5 posts for each of the 4 platforms. Return this JSON structure:
+{{
+  "gbp": ["post1", "post2", "post3", "post4", "post5"],
+  "facebook": ["post1", "post2", "post3", "post4", "post5"],
+  "instagram": ["post1", "post2", "post3", "post4", "post5"],
+  "pinterest": ["post1", "post2", "post3", "post4", "post5"]
+}}"""
+
+    try:
+        msg = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=3000,
+            system=[{"type": "text", "text": _SOCIAL_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+    except Exception:
+        logger.exception("Social posts generation error")
+        raise HTTPException(status_code=502, detail="Social posts generation temporarily unavailable")
+
+    token_rec = _token_record("generate-social-posts", "claude-haiku-4-5-20251001",
+                              msg.usage.input_tokens, msg.usage.output_tokens)
+    data = _parse_claude_json(msg.content[0].text)
+
+    return SocialPostsResponse(
+        gbp=data.get("gbp", []),
+        facebook=data.get("facebook", []),
+        instagram=data.get("instagram", []),
+        pinterest=data.get("pinterest", []),
+        token_usage=token_rec,
+    )
+
+
+# ── /check-rankability ────────────────────────────────────────────────────────
+
+def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in miles between two lat/lng points."""
+    import math
+    R = 3958.8  # Earth radius in miles
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _keyword_in_name(keyword: str, business_name: str) -> bool:
+    """True if 60%+ of keyword tokens appear in business name (case-insensitive)."""
+    kw_tokens = set(re.sub(r'[^a-z0-9\s]', '', keyword.lower()).split())
+    name_lower = re.sub(r'[^a-z0-9\s]', '', business_name.lower())
+    if not kw_tokens:
+        return False
+    matches = sum(1 for t in kw_tokens if t in name_lower)
+    return matches / len(kw_tokens) >= 0.6
+
+
+async def _geocode_location(location: str) -> Optional[tuple[float, float]]:
+    """Geocode a city/location string using Nominatim (free, no key)."""
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": location, "format": "json", "limit": 1},
+                headers={"User-Agent": "ShowUPLocal/1.0 (contact@showuplocal.com)"},
+            )
+            results = resp.json()
+            if results:
+                return float(results[0]["lat"]), float(results[0]["lon"])
+    except Exception as e:
+        logger.warning(f"Geocoding failed for '{location}': {e}")
+    return None
+
+
+def _rankability_score(
+    category_match: str,           # "exact" | "partial" | "none"
+    client_reviews: Optional[int], # client's own GBP review count
+    max_reviews: Optional[int],    # highest review count in map pack
+    min_reviews: Optional[int],    # lowest review count in map pack
+    distance_miles: Optional[float],
+    keyword_name_count: int,       # how many of 3 competitors have keyword in name
+    in_maps_results: bool,
+    is_sab: bool = False,
+    physical_competitor_count: int = 0,
+    total_pack_count: int = 0,
+) -> dict:
+    """Compute 0-100 rankability score with breakdown."""
+
+    # 1. Category match (35 pts)
+    cat_pts = {"exact": 35, "partial": 18, "none": 0}.get(category_match, 0)
+
+    # 2. Competition barrier — client reviews vs. pack (15 pts)
+    if client_reviews is None or min_reviews is None or max_reviews is None:
+        comp_pts = 7  # neutral when data unavailable
+    elif client_reviews >= max_reviews:
+        comp_pts = 15
+    elif client_reviews >= min_reviews:
+        comp_pts = 10
+    elif min_reviews > 0 and client_reviews >= min_reviews * 0.80:
+        comp_pts = 5   # up to 20% below lowest in pack
+    else:
+        comp_pts = 0
+
+    # 3. Distance from city center (20 pts)
+    if distance_miles is None:
+        dist_pts = 10  # neutral / unknown
+    elif distance_miles <= 5:
+        dist_pts = 20
+    elif distance_miles <= 7:
+        dist_pts = 5
+    else:
+        dist_pts = 0
+
+    # 4. Keyword in competitor names (25 pts)
+    kw_name_pts = {0: 25, 1: 10, 2: 5, 3: 0}.get(min(keyword_name_count, 3), 0)
+
+    # 5. Business website in top 10 organic (5 pts)
+    organic_pts = 5 if in_maps_results else 0
+
+    total = cat_pts + comp_pts + dist_pts + kw_name_pts + organic_pts
+
+    # SAB vs physical-dominant pack penalty (-40 pts)
+    sab_penalty = 0
+    sab_pack_mismatch = False
+    if is_sab and total_pack_count > 0:
+        physical_ratio = physical_competitor_count / total_pack_count
+        if physical_ratio >= 0.5:
+            sab_penalty = -40
+            sab_pack_mismatch = True
+
+    total = max(0, total + sab_penalty)
+
+    if total >= 70:
+        verdict = "strong"
+    elif total >= 45:
+        verdict = "moderate"
+    elif total >= 20:
+        verdict = "difficult"
+    else:
+        verdict = "very_difficult"
+
+    return {
+        "total": total,
+        "verdict": verdict,
+        "sab_pack_mismatch": sab_pack_mismatch,
+        "breakdown": {
+            "category_match": cat_pts,
+            "competition_barrier": comp_pts,
+            "distance": dist_pts,
+            "keyword_in_competitor_names": kw_name_pts,
+            "in_maps_results": organic_pts,
+            "sab_penalty": sab_penalty,
+        },
+    }
+
+
+def _infer_is_sab(address: Optional[str]) -> bool:
+    """
+    SABs don't display an address on their GBP listing, so the address field
+    is empty or null when pulled from the API. Physical locations have a
+    street address stored.
+    """
+    return not bool(address and address.strip())
+
+
+class RankabilityRequest(BaseModel):
+    keyword: str
+    location: str
+    location_code: Optional[int] = None
+    gbp_category: str
+    business_name: Optional[str] = None
+    business_address: Optional[str] = None   # used to infer SAB (empty = SAB)
+    business_review_count: Optional[int] = None  # client's own GBP review count
+    business_lat: Optional[float] = None
+    business_lng: Optional[float] = None
+    website: Optional[str] = None  # to check top-10 organic presence
+
+
+class CompetitorInfo(BaseModel):
+    name: str
+    rating: Optional[float] = None
+    review_count: Optional[int] = None
+    has_keyword_in_name: bool = False
+
+
+class RankabilityResponse(BaseModel):
+    # Score
+    score: int
+    verdict: str          # "strong" | "moderate" | "difficult" | "very_difficult"
+    score_breakdown: dict
+
+    # Map pack data
+    has_map_pack: bool
+    competitors: List[CompetitorInfo]
+    ranking_categories: List[dict]    # [{category, count}]
+
+    # Competition metrics
+    min_reviews_in_pack: Optional[int] = None
+    max_reviews_in_pack: Optional[int] = None
+    avg_reviews_in_pack: Optional[float] = None
+    avg_rating_in_pack: Optional[float] = None
+    review_gap: Optional[int] = None  # vs. weakest competitor in pack
+
+    # Category match
+    category_match: str               # "exact" | "partial" | "none"
+
+    # Distance
+    distance_miles: Optional[float] = None
+    distance_ok: bool = True
+
+    # Keyword-in-name
+    keyword_in_competitor_names: int = 0  # count of 3-pack with keyword in name
+    competitor_name_examples: List[str] = []
+
+    # Google Maps top-10 presence
+    in_maps_results: bool = False
+    maps_position: Optional[int] = None  # 1–10 if found, None otherwise
+
+    # SAB vs physical pack
+    is_sab: bool = False
+    sab_pack_mismatch: bool = False  # True when SAB faces majority-physical pack
+    physical_competitors_in_pack: int = 0
+
+    # Legacy fields for backward compat with existing frontend
+    message: str = ""
+    match_count: int = 0
+    total_results: int = 0
+
+
+DATAFORSEO_MAPS_ENDPOINT = "https://api.dataforseo.com/v3/serp/google/maps/live/regular"
+
+
+async def _fetch_maps_top10(
+    keyword: str,
+    loc_field: dict,
+    business_name: str,
+    credentials: str,
+) -> tuple[bool, int]:
+    """
+    Query DataForSEO Google Maps endpoint for top-10 results and check if
+    business_name appears. Returns (found, position) — position 0 if not found.
+    """
+    payload = [{
+        "keyword": keyword,
+        **loc_field,
+        "language_name": "English",
+        "depth": 10,
+    }]
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(
+                DATAFORSEO_MAPS_ENDPOINT,
+                headers={"Authorization": f"Basic {credentials}", "Content-Type": "application/json"},
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        for task in (data.get("tasks") or []):
+            for result in (task.get("result") or []):
+                for item in (result.get("items") or []):
+                    if item.get("type") == "maps_search":
+                        name = item.get("title", "")
+                        pos = item.get("rank_absolute") or item.get("rank_group") or 0
+                        if _keyword_in_name(business_name, name):
+                            return True, int(pos)
+    except Exception as e:
+        logger.warning(f"Maps top-10 check failed for '{keyword}': {e}")
+    return False, 0
+
+
+@app.post('/check-rankability', response_model=RankabilityResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+async def check_rankability(request: Request, body: RankabilityRequest):
+    if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
+        raise HTTPException(status_code=503, detail="DataForSEO credentials not configured")
+
+    credentials = base64.b64encode(
+        f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
+    ).decode()
+    loc_field = {"location_code": body.location_code} if body.location_code else {"location_name": body.location}
+
+    # Run SERP (organic + local_pack) and Google Maps top-10 in parallel
+    serp_payload = [{
+        "keyword": body.keyword,
+        **loc_field,
+        "language_name": "English",
+        "depth": 10,
+        "se_domain": "google.com",
+    }]
+
+    async def _fetch_serp() -> dict:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                DATAFORSEO_ENDPOINT,
+                headers={"Authorization": f"Basic {credentials}", "Content-Type": "application/json"},
+                json=serp_payload,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    maps_task = _fetch_maps_top10(body.keyword, loc_field, body.business_name or "", credentials) \
+        if body.business_name else None
+
+    if maps_task:
+        serp_data, (in_maps_results, maps_position) = await asyncio.gather(
+            _fetch_serp(), maps_task
+        )
+    else:
+        serp_data = await _fetch_serp()
+        in_maps_results, maps_position = False, 0
+
+    # Parse SERP items
+    organic_items: List[dict] = []
+    local_pack_items: List[dict] = []
+    for task in (serp_data.get("tasks") or []):
+        for result in (task.get("result") or []):
+            for item in (result.get("items") or []):
+                t = item.get("type", "")
+                if t == "organic":
+                    organic_items.append(item)
+                elif t == "local_pack":
+                    local_pack_items.append(item)
+
+    # ── Local pack analysis ────────────────────────────────────────────────────
+    has_map_pack = len(local_pack_items) > 0
+    competitors: List[CompetitorInfo] = []
+    category_counts: Dict[str, int] = {}
+    keyword_name_count = 0
+    competitor_name_examples: List[str] = []
+    physical_competitor_count = 0
+
+    for item in local_pack_items[:3]:
+        name = item.get("title", "")
+        rating = item.get("rating", {}).get("value") if isinstance(item.get("rating"), dict) else item.get("rating")
+        review_count = item.get("rating", {}).get("votes_count") if isinstance(item.get("rating"), dict) else item.get("rating_votes")
+
+        # Physical location = has a non-empty address shown in the pack
+        address_val = item.get("address") or item.get("address_info", {}) or ""
+        is_physical = bool(address_val) if isinstance(address_val, str) else bool(address_val)
+        if is_physical:
+            physical_competitor_count += 1
+
+        has_kw = _keyword_in_name(body.keyword, name)
+        if has_kw:
+            keyword_name_count += 1
+            competitor_name_examples.append(name)
+
+        # Collect categories from snippet/categories field
+        for cat in (item.get("categories") or []):
+            category_counts[cat] = category_counts.get(cat, 0) + 1
+
+        competitors.append(CompetitorInfo(
+            name=name,
+            rating=float(rating) if rating else None,
+            review_count=int(review_count) if review_count else None,
+            has_keyword_in_name=has_kw,
+        ))
+
+    ranking_categories = [{"category": k, "count": v}
+                          for k, v in sorted(category_counts.items(), key=lambda x: -x[1])]
+
+    # ── Category match ─────────────────────────────────────────────────────────
+    gbp_cat_lower = body.gbp_category.lower()
+    cat_tokens = set(re.sub(r'[^a-z0-9\s]', '', gbp_cat_lower).split())
+    match_count = sum(1 for rc in ranking_categories
+                      if gbp_cat_lower in rc["category"].lower()
+                      or rc["category"].lower() in gbp_cat_lower)
+    partial_count = sum(1 for rc in ranking_categories
+                        for t in cat_tokens
+                        if len(t) > 3 and t in rc["category"].lower())
+    if match_count > 0:
+        category_match = "exact"
+    elif partial_count > 0:
+        category_match = "partial"
+    else:
+        category_match = "none"
+
+    # ── Review metrics ─────────────────────────────────────────────────────────
+    review_counts = [c.review_count for c in competitors if c.review_count is not None]
+    ratings = [c.rating for c in competitors if c.rating is not None]
+    min_reviews = min(review_counts) if review_counts else None
+    max_reviews = max(review_counts) if review_counts else None
+    avg_reviews = round(sum(review_counts) / len(review_counts), 1) if review_counts else None
+    avg_rating = round(sum(ratings) / len(ratings), 2) if ratings else None
+
+    # ── Distance ───────────────────────────────────────────────────────────────
+    distance_miles = None
+    distance_ok = True
+    if body.business_lat and body.business_lng:
+        city_coords = await _geocode_location(body.location)
+        if city_coords:
+            distance_miles = round(_haversine_miles(
+                body.business_lat, body.business_lng,
+                city_coords[0], city_coords[1]
+            ), 1)
+            distance_ok = distance_miles <= 10.0
+
+    # ── SAB auto-detection ─────────────────────────────────────────────────────
+    is_sab = _infer_is_sab(body.business_address)
+
+    # ── Score ──────────────────────────────────────────────────────────────────
+    score_data = _rankability_score(
+        category_match=category_match,
+        client_reviews=body.business_review_count,
+        max_reviews=max_reviews,
+        min_reviews=min_reviews,
+        distance_miles=distance_miles,
+        keyword_name_count=keyword_name_count,
+        in_maps_results=in_maps_results,
+        is_sab=is_sab,
+        physical_competitor_count=physical_competitor_count,
+        total_pack_count=len(local_pack_items[:3]),
+    )
+
+    # ── Review gap — reviews needed to match weakest competitor ───────────────
+    review_gap = None
+    if body.business_review_count is not None and min_reviews is not None:
+        review_gap = max(0, min_reviews - body.business_review_count)
+
+    # ── Human-readable message ─────────────────────────────────────────────────
+    verdict_labels = {
+        "strong": "Strong map pack rankability",
+        "moderate": "Moderate — achievable with work",
+        "difficult": "Difficult — real barriers present",
+        "very_difficult": "Very difficult — consider a different keyword or location",
+    }
+    message = verdict_labels.get(score_data["verdict"], "")
+    if not has_map_pack:
+        message = "No map pack found for this keyword — may be a low local-intent query"
+    elif score_data.get("sab_pack_mismatch"):
+        message += f". Your service area business faces a pack dominated by {physical_competitor_count} physical location(s) — Google heavily favors proximity for this keyword"
+
+    logger.info(
+        f"Rankability '{body.keyword}' @ '{body.location}': "
+        f"score={score_data['total']} verdict={score_data['verdict']} "
+        f"cat={category_match} dist={distance_miles}mi pack={has_map_pack}"
+    )
+
+    return RankabilityResponse(
+        score=score_data["total"],
+        verdict=score_data["verdict"],
+        score_breakdown=score_data["breakdown"],
+        has_map_pack=has_map_pack,
+        competitors=competitors,
+        ranking_categories=ranking_categories,
+        min_reviews_in_pack=min_reviews,
+        max_reviews_in_pack=max_reviews,
+        avg_reviews_in_pack=avg_reviews,
+        avg_rating_in_pack=avg_rating,
+        review_gap=review_gap,
+        category_match=category_match,
+        distance_miles=distance_miles,
+        distance_ok=distance_ok,
+        keyword_in_competitor_names=keyword_name_count,
+        competitor_name_examples=competitor_name_examples,
+        in_maps_results=in_maps_results,
+        maps_position=maps_position if in_maps_results else None,
+        is_sab=is_sab,
+        sab_pack_mismatch=score_data.get("sab_pack_mismatch", False),
+        physical_competitors_in_pack=physical_competitor_count,
+        message=message,
+        match_count=match_count,
+        total_results=len(local_pack_items),
+    )

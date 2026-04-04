@@ -6,9 +6,14 @@ import {
   Plus,
   ChevronLeft,
   Zap,
-  ClipboardList
+  ClipboardList,
+  Store,
+  Facebook,
+  Instagram,
+  Pin,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useCredits } from "@/hooks/useCredits";
 
 interface SidebarProps {
   activeItem: string;
@@ -25,7 +30,22 @@ const navItems = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
+const comingSoonItems = [
+  { id: "gbp-posts",       label: "GBP Posts",       icon: Store },
+  { id: "facebook-posts",  label: "Facebook Posts",  icon: Facebook },
+  { id: "instagram-posts", label: "Instagram Posts", icon: Instagram },
+  { id: "pinterest-posts", label: "Pinterest Posts", icon: Pin },
+];
+
 const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarProps) => {
+  const { data: credits } = useCredits();
+  const balance = credits?.balance ?? null;
+  const monthly = credits?.monthlyBalance ?? null;
+  const bonus = credits?.bonusCredits ?? 0;
+  const perMonth = credits?.perMonth ?? 60;
+  const pct = monthly !== null ? Math.min(100, Math.round((monthly / perMonth) * 100)) : null;
+  const low = balance !== null && balance <= 5;
+
   return (
     <aside
       className={cn(
@@ -81,7 +101,69 @@ const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarPro
             </button>
           );
         })}
+
+        {/* Coming soon items */}
+        {comingSoonItems.map((item) => {
+          const Icon = item.icon;
+          return (
+            <div
+              key={item.id}
+              title={collapsed ? `${item.label} — Coming Soon` : undefined}
+              className={cn(
+                "w-full flex items-center gap-3 rounded-lg text-sm font-medium cursor-not-allowed opacity-50",
+                collapsed ? "justify-center p-2" : "px-3 py-2.5",
+              )}
+            >
+              <Icon className="w-4 h-4 flex-shrink-0" />
+              {!collapsed && (
+                <>
+                  <span className="flex-1 text-left">{item.label}</span>
+                  <span className="text-[10px] font-semibold uppercase tracking-wide bg-sidebar-border text-sidebar-foreground/60 px-1.5 py-0.5 rounded">
+                    Soon
+                  </span>
+                </>
+              )}
+            </div>
+          );
+        })}
       </nav>
+
+      {/* Credit balance */}
+      {!collapsed && balance !== null && (
+        <div className="px-3 pb-3">
+          <div className="rounded-lg bg-sidebar-accent/40 px-3 py-2.5">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-xs font-medium text-sidebar-foreground/70">Credits</span>
+              <span className={cn("text-xs font-semibold tabular-nums", low ? "text-red-400" : "text-sidebar-accent-foreground")}>
+                {monthly} / {perMonth}
+                {bonus > 0 && <span className="text-primary ml-1">+{bonus}</span>}
+              </span>
+            </div>
+            <div className="h-1.5 rounded-full bg-sidebar-border overflow-hidden">
+              <div
+                className={cn("h-full rounded-full transition-all", low ? "bg-red-400" : "bg-sidebar-primary")}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            {bonus > 0 && (
+              <p className="text-xs text-primary mt-1.5">{bonus} bonus credit{bonus !== 1 ? "s" : ""}</p>
+            )}
+            {low && !bonus && (
+              <p className="text-xs text-red-400 mt-1.5">Credits running low</p>
+            )}
+            {low && bonus > 0 && (
+              <p className="text-xs text-amber-400 mt-1.5">Monthly credits low — using bonus</p>
+            )}
+          </div>
+        </div>
+      )}
+      {collapsed && balance !== null && (
+        <div className="px-3 pb-3 flex justify-center">
+          <div className={cn("text-xs font-bold tabular-nums", low ? "text-red-400" : "text-sidebar-foreground/60")}>
+            {balance}
+          </div>
+        </div>
+      )}
 
       {/* Collapse toggle */}
       <div className="px-3 pb-4">
@@ -97,3 +179,4 @@ const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarPro
 };
 
 export default AppSidebar;
+

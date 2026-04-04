@@ -102,7 +102,7 @@ export default function SettingsView({ session }: { session: Session }) {
 
   useEffect(() => {
     supabase
-      .from("team_members" as any)
+      .from("team_members")
       .select("id, email, name, created_at")
       .eq("owner_user_id", session.user.id)
       .order("created_at")
@@ -128,15 +128,15 @@ export default function SettingsView({ session }: { session: Session }) {
       return;
     }
     setAddingMember(true);
-    const { data, error } = await (supabase
-      .from("team_members" as any)
+    const { data, error } = await supabase
+      .from("team_members")
       .insert({ owner_user_id: session.user.id, email, name })
       .select("id, email, name, created_at")
-      .single() as any);
+      .single();
     setAddingMember(false);
     if (error) {
       toast({ title: "Failed to add team member", description: error.message, variant: "destructive" });
-    } else {
+    } else if (data) {
       setTeamMembers(prev => [...prev, data as TeamMember]);
       setInviteName("");
       setInviteEmail("");
@@ -146,10 +146,10 @@ export default function SettingsView({ session }: { session: Session }) {
 
   const handleRemoveMember = async (id: string) => {
     setRemovingId(id);
-    const { error } = await (supabase
-      .from("team_members" as any)
+    const { error } = await supabase
+      .from("team_members")
       .delete()
-      .eq("id", id) as any);
+      .eq("id", id);
     setRemovingId(null);
     if (error) {
       toast({ title: "Failed to remove member", variant: "destructive" });

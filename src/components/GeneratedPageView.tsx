@@ -1,53 +1,25 @@
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { Copy, Check, Save, Loader2, ExternalLink, Download, Mail, CheckCircle2, X } from "lucide-react";
+import { Copy, Check, Save, Loader2, ExternalLink, Download } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { nlp } from "@/lib/nlp-client";
+import { StepIndicator } from "@/components/StepIndicator";
+import { useInvalidateSavedPages } from "@/hooks/useSavedPages";
+import type { RelatedPageItem } from "@/lib/nlp-types";
+import DOMPurify from 'dompurify';
 
-const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "";
-const API_KEY = import.meta.env.VITE_NLP_API_KEY ?? "";
-
-function StepIndicator({ current }: { current: 1 | 2 | 3 }) {
-  const steps = ["Add business", "Generate page", "Add to website"];
-  return (
-    <div className="flex items-center">
-      {steps.map((label, i) => {
-        const n = (i + 1) as 1 | 2 | 3;
-        const done = n < current;
-        const active = n === current;
-        return (
-          <div key={n} className="flex items-center flex-1 last:flex-none">
-            <div className={`flex items-center gap-1.5 shrink-0 ${active ? "text-foreground" : done ? "text-muted-foreground" : "text-muted-foreground/35"}`}>
-              <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 ${
-                done ? "bg-green-500 text-white" :
-                active ? "bg-accent text-accent-foreground" :
-                "border-2 border-border"
-              }`}>
-                {done ? "✓" : n}
-              </div>
-              <span className="text-xs whitespace-nowrap">{label}</span>
-            </div>
-            {i < steps.length - 1 && (
-              <div className={`flex-1 h-px mx-3 ${done ? "bg-green-500/30" : "bg-border"}`} />
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
+import type { TokenUsage, CostBreakdown } from "@/lib/nlp-types";
 
 interface Props {
   keyword: string;
   location: string;
   mode: "generate" | "reoptimize";
-  isNew?: boolean;
-  isOnboarding?: boolean;
   contentHtml: string;
   schemaJson: string;
   pageTitle: string;
   htmlCssNotes?: string[];
-  tokenUsage: Record<string, any>;
-  costBreakdown?: Record<string, any>;
+  tokenUsage: Partial<TokenUsage>;
+  costBreakdown?: Partial<CostBreakdown>;
   businessId: string;
   businessName: string;
   website?: string;
@@ -56,18 +28,6 @@ interface Props {
   onBack: () => void;
   onNewPage: () => void;
   onRelatedAction?: (action: { mode: "reoptimize" | "new"; keyword: string; existingUrl?: string }) => void;
-}
-
-interface RelatedPageItem {
-  keyword: string;
-  group: "parents" | "siblings" | "children";
-  status: "found" | "missing";
-  url?: string;
-  page_title?: string;
-  composite_score?: number;
-  composite_status?: string;
-  engine_scores?: Record<string, any>;
-  deficiencies?: Array<{ engine: string; issue: string; fix: string }>;
 }
 
 type RelatedSelection = Record<string, "reoptimize" | "new" | null>;
@@ -91,10 +51,11 @@ function scoreBadge(score?: number, status?: string) {
 
 export default function GeneratedPageView({
   keyword, location, mode, contentHtml, schemaJson, pageTitle, htmlCssNotes,
-  tokenUsage, costBreakdown, isNew = false, isOnboarding = false,
+  tokenUsage, costBreakdown,
   businessId, businessName, website, gbpCategory, address,
   onBack, onNewPage, onRelatedAction,
 }: Props) {
+  const invalidateSavedPages = useInvalidateSavedPages();
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const [copiedHtml, setCopiedHtml] = useState(false);
   const [copiedSchema, setCopiedSchema] = useState(false);
@@ -103,11 +64,15 @@ export default function GeneratedPageView({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState("");
-  const [activeTab, setActiveTab] = useState<"preview" | "raw-text" | "html" | "schema" | "related">("preview");
+  const [activeTab, setActiveTab] = useState<"preview" | "raw-text" | "html" | "schema" | "social" | "related">("preview");
   // Related pages state
   const [relatedLoading, setRelatedLoading] = useState(false);
   const [relatedItems, setRelatedItems] = useState<RelatedPageItem[] | null>(null);
   const [relatedError, setRelatedError] = useState("");
+  // Social posts state
+  const [socialPosts, setSocialPosts] = useState<{ gbp: string[]; facebook: string[]; instagram: string[]; pinterest: string[] } | null>(null);
+  const [socialLoading, setSocialLoading] = useState(false);
+  const [copiedPost, setCopiedPost] = useState<string | null>(null);
   const [selections, setSelections] = useState<RelatedSelection>({});
 
   const copyHtml = async () => {
@@ -144,67 +109,6 @@ export default function GeneratedPageView({
     setTimeout(() => setCopiedSchema(false), 2000);
   };
 
-  const downloadHtml = () => {
-    const schemaTag = schemaJson
-      ? `\n  <script type="application/ld+json">${schemaJson}<\/script>`
-      : "";
-    const fullHtml = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${pageTitle}</title>${schemaTag}
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 860px; margin: 0 auto; padding: 2rem 1.5rem; color: #1a1a1a; line-height: 1.7; }
-    h1 { font-size: 2rem; font-weight: 700; line-height: 1.2; margin-bottom: 1rem; }
-    h2 { font-size: 1.5rem; font-weight: 600; margin-top: 2.5rem; margin-bottom: 0.75rem; }
-    h3 { font-size: 1.2rem; font-weight: 600; margin-top: 1.75rem; margin-bottom: 0.5rem; }
-    p { margin: 0.875rem 0; }
-    ul, ol { margin: 0.875rem 0; padding-left: 1.5rem; }
-    li { margin: 0.4rem 0; }
-    strong { font-weight: 600; }
-    a { color: #2563eb; }
-    @media (max-width: 640px) { body { padding: 1rem; } h1 { font-size: 1.6rem; } }
-  </style>
-</head>
-<body>
-${contentHtml}
-</body>
-</html>`;
-    const blob = new Blob([fullHtml], { type: "text/html" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${keyword.replace(/\s+/g, "-").toLowerCase()}.html`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  const sendToDeveloper = () => {
-    const slug = keyword.replace(/\s+/g, "-").toLowerCase();
-    const city = location.split(",")[0].trim();
-    const subject = encodeURIComponent(`New SEO page to add to the website — ${keyword} in ${city}`);
-    const body = encodeURIComponent(
-`Hi,
-
-I used a tool called ShowUP Local to create a new SEO-optimised page for our website.
-
-Please add this as a new page. A good URL would be something like:
-/services/${slug}
-
-Page title: ${pageTitle}
-Target keyword: ${keyword}
-Location: ${location}
-
-I'm attaching the HTML file — please upload it or paste the content into a new page in our CMS.
-${schemaJson ? "\nThe HTML file also includes JSON-LD schema markup in the <head> which helps Google understand the page. Please make sure that's included too.\n" : ""}
-Let me know if you have any questions!`
-    );
-    window.location.href = `mailto:?subject=${subject}&body=${body}`;
-  };
-
   const savePage = async () => {
     setSaving(true);
     setSaveError("");
@@ -220,8 +124,9 @@ Let me know if you have any questions!`
       });
       if (error) throw error;
       setSaved(true);
+      invalidateSavedPages(); // refresh saved pages list + dashboard stats
     } catch (e: any) {
-      setSaveError(e.message || "Save failed");
+      setSaveError((e as Error).message || "Save failed");
     } finally {
       setSaving(false);
     }
@@ -232,38 +137,75 @@ Let me know if you have any questions!`
     setRelatedError("");
     setRelatedItems(null);
     try {
-      const resp = await fetch(`${NLP_SERVICE_URL}/related-pages`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(API_KEY ? { "X-API-Key": API_KEY } : {}),
-        },
-        body: JSON.stringify({
-          keyword,
-          location,
-          business_name: businessName,
-          gbp_category: gbpCategory,
-          address,
-          website: website || null,
-        }),
+      const data = await nlp.relatedPages({
+        keyword,
+        location,
+        business_name: businessName,
+        gbp_category: gbpCategory,
+        address,
+        website: website || null,
       });
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-        throw new Error(err.detail || "Request failed");
-      }
-      const data = await resp.json();
       setRelatedItems(data.items ?? []);
     } catch (e: any) {
-      setRelatedError(e.message || "Failed to load related pages");
+      setRelatedError((e as Error).message || "Failed to load related pages");
     } finally {
       setRelatedLoading(false);
     }
   };
 
-  // Start fetching related pages in the background as soon as the component mounts
+  // Start fetching related pages + social posts in the background on mount
   useEffect(() => {
     fetchRelatedPages();
+    fetchSocialPosts();
   }, []);
+
+  const fetchSocialPosts = async () => {
+    if (socialLoading || socialPosts) return;
+    setSocialLoading(true);
+    try {
+      const pageText = new DOMParser()
+        .parseFromString(contentHtml, "text/html")
+        .body.innerText;
+      const data = await nlp.generateSocialPosts({
+        keyword,
+        location,
+        business_name: businessName,
+        gbp_category: gbpCategory,
+        address,
+        page_content: pageText,
+      });
+      setSocialPosts({ gbp: data.gbp, facebook: data.facebook, instagram: data.instagram, pinterest: data.pinterest });
+    } catch {
+      // Non-fatal — social tab will show a retry button
+    } finally {
+      setSocialLoading(false);
+    }
+  };
+
+  const copyPost = async (text: string, id: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopiedPost(id);
+    setTimeout(() => setCopiedPost(null), 2000);
+  };
+
+  const downloadSocialPosts = () => {
+    if (!socialPosts) return;
+    const platforms = [
+      { label: "GBP Posts", posts: socialPosts.gbp },
+      { label: "Facebook Posts", posts: socialPosts.facebook },
+      { label: "Instagram Posts", posts: socialPosts.instagram },
+      { label: "Pinterest Posts", posts: socialPosts.pinterest },
+    ];
+    const text = platforms.map(({ label, posts }) =>
+      `${label.toUpperCase()}\n${"─".repeat(40)}\n${posts.map((p, i) => `${i + 1}. ${p}`).join("\n\n")}`
+    ).join("\n\n\n");
+    const blob = new Blob([text], { type: "text/plain" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${keyword.replace(/\s+/g, "-")}-social-posts.txt`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
 
   // Also re-fetch if user manually retries from the related tab
   // (fetchRelatedPages is called directly from the Retry button)
@@ -301,9 +243,6 @@ Let me know if you have any questions!`
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
-      {isOnboarding && isNew && (
-        <StepIndicator current={3} />
-      )}
       <div>
         <button onClick={onBack} className="text-sm text-muted-foreground hover:text-foreground mb-2 transition-colors">
           ← Back
@@ -340,60 +279,15 @@ Let me know if you have any questions!`
         </div>
       </div>
 
-      {/* Celebration banner — shown only for freshly generated pages */}
-      {isNew && !bannerDismissed && (
-        <div className="bg-green-500/10 border border-green-500/25 rounded-xl px-5 py-4 flex items-start gap-4">
-          <CheckCircle2 className="w-5 h-5 text-green-500 shrink-0 mt-0.5" />
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-semibold text-foreground">
-              {mode === "reoptimize" ? "Your page has been reoptimized." : "Your page is ready to publish."}
-            </p>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              ~{wordCount} words
-              {schemaJson ? " · Local schema markup included" : ""}
-              {" · "}{location.split(",")[0]}
-            </p>
-            <div className="flex items-center gap-4 mt-3">
-              <button
-                onClick={() => setActiveTab("preview")}
-                className="text-xs font-medium text-accent hover:opacity-80 transition-opacity"
-              >
-                Preview it →
-              </button>
-              <button
-                onClick={downloadHtml}
-                className="text-xs font-medium text-accent hover:opacity-80 transition-opacity"
-              >
-                Download HTML →
-              </button>
-              <button
-                onClick={savePage}
-                disabled={saving || saved}
-                className="text-xs font-medium text-accent hover:opacity-80 transition-opacity disabled:opacity-40"
-              >
-                {saved ? "Saved ✓" : "Save to ShowUP →"}
-              </button>
-            </div>
-          </div>
-          <button
-            onClick={() => setBannerDismissed(true)}
-            className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
-            aria-label="Dismiss"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      )}
-
       {/* Cost breakdown panel */}
       {showCostBreakdown && (
         <div className="bg-muted/40 border border-border rounded-xl px-5 py-4 text-xs space-y-1.5">
           <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Cost Breakdown (estimates)</p>
           {[
-            { label: "DataForSEO SERP fetch", value: costBreakdown?.dataforseo },
-            { label: `ScrapeOwl (${costBreakdown?.scrapeowl_pages ?? 0} pages)`, value: costBreakdown?.scrapeowl },
-            { label: `Google NLP (${((costBreakdown?.google_nlp_chars ?? 0) / 1000).toFixed(0)}k chars)`, value: costBreakdown?.google_nlp },
-            { label: `Claude ${costBreakdown?.claude_model?.includes("haiku") ? "Haiku" : "Sonnet"} (${costBreakdown?.claude_input_tokens ?? 0}+${costBreakdown?.claude_output_tokens ?? 0} tokens)`, value: costBreakdown?.claude },
+            { label: "Search data", value: costBreakdown?.dataforseo },
+            { label: `Page analysis (${costBreakdown?.scrapeowl_pages ?? 0} pages)`, value: costBreakdown?.scrapeowl },
+            { label: `Content analysis (${((costBreakdown?.google_nlp_chars ?? 0) / 1000).toFixed(0)}k chars)`, value: costBreakdown?.google_nlp },
+            { label: `${costBreakdown?.claude_model?.includes("haiku") ? "Keyword research" : "Page generation"} (${costBreakdown?.claude_input_tokens ?? 0}+${costBreakdown?.claude_output_tokens ?? 0} tokens)`, value: costBreakdown?.claude },
           ].map(({ label, value }) =>
             value != null ? (
               <div key={label} className="flex justify-between text-muted-foreground">
@@ -412,7 +306,7 @@ Let me know if you have any questions!`
 
       {/* Tabs */}
       <div className="flex gap-2 border-b border-border flex-wrap">
-        {(["preview", "raw-text", "html", "schema", "related"] as const).map(tab => (
+        {(["preview", "raw-text", "html", "schema", "social", "related"] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -425,7 +319,9 @@ Let me know if you have any questions!`
             {tab === "schema" ? "JSON-LD Schema"
               : tab === "related" ? "Related Pages"
               : tab === "raw-text" ? "Raw Text"
-              : tab.charAt(0).toUpperCase() + tab.slice(1)}
+              : tab === "social"
+                ? <span className="flex items-center gap-1.5">Social Posts {socialLoading && <Loader2 className="w-3 h-3 animate-spin" />}</span>
+                : tab.charAt(0).toUpperCase() + tab.slice(1)}
           </button>
         ))}
       </div>
@@ -439,14 +335,12 @@ Let me know if you have any questions!`
               <span className="text-sm text-foreground">{pageTitle}</span>
             </div>
           )}
-          <div className="rounded-xl border border-border overflow-hidden bg-white">
-            <iframe
-              srcDoc={`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:800px;margin:0 auto;padding:2rem 1.5rem;color:#1a1a1a;line-height:1.75}h1{font-size:1.875rem;font-weight:700;line-height:1.2;margin-bottom:1rem}h2{font-size:1.375rem;font-weight:600;margin-top:2.5rem;margin-bottom:0.75rem}h3{font-size:1.15rem;font-weight:600;margin-top:1.75rem;margin-bottom:0.5rem}p{margin:0.875rem 0}ul,ol{margin:0.875rem 0;padding-left:1.5rem}li{margin:0.4rem 0}strong{font-weight:600}a{color:#2563eb}</style></head><body>${contentHtml}</body></html>`}
-              style={{ width: "100%", height: "680px", border: "none", display: "block" }}
-              sandbox="allow-same-origin"
-              title="Page preview"
-            />
-          </div>
+          <div
+            className="bg-card rounded-xl border border-border p-8 prose prose-sm max-w-none
+                       prose-headings:text-foreground prose-p:text-foreground prose-li:text-foreground
+                       prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg"
+            dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(contentHtml.replace(/<\/p>\s*<p/g, '</p><br><br><p')) }}
+          />
           {/* HTML/CSS improvement notes — reoptimize only */}
           {mode === "reoptimize" && htmlCssNotes && htmlCssNotes.length > 0 && (
             <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-5 space-y-3">
@@ -486,11 +380,7 @@ Let me know if you have any questions!`
                        prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg
                        prose-headings:font-bold prose-strong:font-bold
                        select-all cursor-text"
-            dangerouslySetInnerHTML={{
-              __html: contentHtml
-                .replace(/\s*style="[^"]*"/gi, '')
-                .replace(/\s*class="[^"]*"/gi, '')
-            }}
+            dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(contentHtml) }}
           />
         </div>
       )}
@@ -525,6 +415,64 @@ Let me know if you have any questions!`
             </>
           ) : (
             <p className="text-sm text-muted-foreground">No schema was generated for this page.</p>
+          )}
+        </div>
+      )}
+
+      {/* Social Posts tab */}
+      {activeTab === "social" && (
+        <div className="space-y-6">
+          {socialLoading && (
+            <div className="flex flex-col items-center justify-center py-12 gap-3 text-muted-foreground">
+              <Loader2 className="w-6 h-6 animate-spin" />
+              <p className="text-sm">Generating 20 social posts…</p>
+            </div>
+          )}
+          {!socialLoading && !socialPosts && (
+            <div className="flex flex-col items-center justify-center py-12 gap-3 text-muted-foreground">
+              <p className="text-sm">Social posts could not be generated.</p>
+              <Button variant="outline" size="sm" onClick={fetchSocialPosts}>Retry</Button>
+            </div>
+          )}
+          {socialPosts && (
+            <>
+              <div className="flex justify-end">
+                <Button variant="outline" size="sm" onClick={downloadSocialPosts}>
+                  <Download className="w-4 h-4 mr-1.5" /> Download All
+                </Button>
+              </div>
+              {([
+                { key: "gbp",       label: "GBP Posts",       wordLimit: "≤200 words" },
+                { key: "facebook",  label: "Facebook Posts",  wordLimit: "≤200 words" },
+                { key: "instagram", label: "Instagram Posts", wordLimit: "≤50 words" },
+                { key: "pinterest", label: "Pinterest Posts", wordLimit: "≤50 words" },
+              ] as const).map(({ key, label, wordLimit }) => (
+                <div key={key} className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-semibold text-foreground">{label}</h3>
+                    <span className="text-xs text-muted-foreground">{wordLimit}</span>
+                  </div>
+                  <div className="space-y-2">
+                    {socialPosts[key].map((post, i) => {
+                      const id = `${key}-${i}`;
+                      return (
+                        <div key={id} className="bg-card rounded-lg border border-border p-4 flex gap-3">
+                          <span className="text-xs font-semibold text-muted-foreground w-4 shrink-0 mt-0.5">{i + 1}</span>
+                          <p className="text-sm text-foreground flex-1 whitespace-pre-wrap">{post}</p>
+                          <button
+                            onClick={() => copyPost(post, id)}
+                            className="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+                            title="Copy"
+                          >
+                            {copiedPost === id ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </>
           )}
         </div>
       )}
@@ -655,63 +603,25 @@ Let me know if you have any questions!`
         </div>
       )}
 
-      {/* Add to your site */}
-      <div className="bg-card rounded-xl border border-border overflow-hidden">
-        <div className="px-5 py-4 border-b border-border">
-          <p className="text-sm font-semibold text-foreground">Add this page to your website</p>
-          <p className="text-xs text-muted-foreground mt-0.5">Choose how you want to use this content.</p>
-        </div>
-        <div className="p-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <button
-            onClick={sendToDeveloper}
-            className="flex flex-col items-center gap-2 rounded-lg border border-border bg-muted/30 hover:bg-muted/60 px-3 py-4 text-center transition-colors group"
-          >
-            <Mail className="w-5 h-5 text-accent group-hover:scale-105 transition-transform" />
-            <span className="text-xs font-medium text-foreground leading-tight">Email my<br/>developer</span>
-          </button>
-          <button
-            onClick={downloadHtml}
-            className="flex flex-col items-center gap-2 rounded-lg border border-border bg-muted/30 hover:bg-muted/60 px-3 py-4 text-center transition-colors group"
-          >
-            <Download className="w-5 h-5 text-accent group-hover:scale-105 transition-transform" />
-            <span className="text-xs font-medium text-foreground leading-tight">Download<br/>HTML file</span>
-          </button>
-          <button
-            onClick={copyRichText}
-            className="flex flex-col items-center gap-2 rounded-lg border border-border bg-muted/30 hover:bg-muted/60 px-3 py-4 text-center transition-colors group"
-          >
-            {copiedRichText
-              ? <Check className="w-5 h-5 text-green-500" />
-              : <Copy className="w-5 h-5 text-accent group-hover:scale-105 transition-transform" />}
-            <span className="text-xs font-medium text-foreground leading-tight">Copy formatted<br/>text</span>
-          </button>
-          <button
-            onClick={copyHtml}
-            className="flex flex-col items-center gap-2 rounded-lg border border-border bg-muted/30 hover:bg-muted/60 px-3 py-4 text-center transition-colors group"
-          >
-            {copiedHtml
-              ? <Check className="w-5 h-5 text-green-500" />
-              : <Copy className="w-5 h-5 text-accent group-hover:scale-105 transition-transform" />}
-            <span className="text-xs font-medium text-foreground leading-tight">Copy<br/>HTML code</span>
-          </button>
-        </div>
-
-      </div>
-
-      {/* Save + navigation */}
-      <div className="bg-card rounded-xl border border-border p-5 space-y-3">
+      {/* Actions */}
+      <div className="bg-card rounded-xl border border-border p-6 space-y-3">
         {saveError && (
           <div className="bg-destructive/10 border border-destructive/20 rounded-lg px-4 py-3 text-sm text-destructive">{saveError}</div>
         )}
-        <Button
-          className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold"
-          onClick={savePage}
-          disabled={saving || saved}
-        >
-          {saving ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Saving…</>
-            : saved ? <><Check className="w-4 h-4 mr-2" /> Saved to ShowUP</>
-            : <><Save className="w-4 h-4 mr-2" /> Save Page</>}
-        </Button>
+        <div className="flex gap-3">
+          <Button
+            className="flex-1 bg-accent text-accent-foreground hover:opacity-90 font-semibold"
+            onClick={savePage}
+            disabled={saving || saved}
+          >
+            {saving ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Saving…</>
+              : saved ? <><Check className="w-4 h-4 mr-2" /> Saved</>
+              : <><Save className="w-4 h-4 mr-2" /> Save Page</>}
+          </Button>
+          <Button variant="outline" onClick={copyHtml} className="flex-1">
+            {copiedHtml ? <><Check className="w-4 h-4 mr-1" /> Copied</> : <><Copy className="w-4 h-4 mr-1" /> Copy HTML</>}
+          </Button>
+        </div>
         <button onClick={onNewPage} className="w-full text-sm text-muted-foreground hover:text-foreground transition-colors text-center">
           ← Start new keyword analysis
         </button>

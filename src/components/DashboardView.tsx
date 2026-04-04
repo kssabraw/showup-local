@@ -1,36 +1,12 @@
-import { useEffect, useState } from "react";
 import { FileText, MapPin, TrendingUp, Plus, ArrowRight } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
+import { useDashboardStats } from "@/hooks/useDashboardStats";
 
 interface Props {
   onNavigate: (item: string) => void;
 }
 
-interface Stats {
-  locations: number;
-  totalContent: number;
-  avgScore: number | null;
-}
-
 const DashboardView = ({ onNavigate }: Props) => {
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const load = async () => {
-      const [{ count: locations }, { count: totalContent }, { data: scored }] = await Promise.all([
-        supabase.from("business_profiles").select("id", { count: "exact", head: true }),
-        supabase.from("generated_pages").select("id", { count: "exact", head: true }),
-        supabase.from("generated_pages").select("composite_score").not("composite_score", "is", null),
-      ]);
-      const avgScore = scored && scored.length > 0
-        ? Math.round(scored.reduce((sum, p) => sum + (p.composite_score as number), 0) / scored.length)
-        : null;
-      setStats({ locations: locations ?? 0, totalContent: totalContent ?? 0, avgScore });
-      setLoading(false);
-    };
-    load();
-  }, []);
+  const { data: stats, isLoading: loading } = useDashboardStats();
 
   const isEmpty = !loading && stats?.locations === 0;
 
