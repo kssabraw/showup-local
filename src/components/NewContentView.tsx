@@ -60,7 +60,37 @@ interface SavedPage {
   created_at: string;
 }
 
-const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialLocation }: { onBack: () => void; defaultLocation?: string; initialKeyword?: string; initialLocation?: string }) => {
+function StepIndicator({ current }: { current: 1 | 2 | 3 }) {
+  const steps = ["Add business", "Generate page", "Add to website"];
+  return (
+    <div className="flex items-center">
+      {steps.map((label, i) => {
+        const n = (i + 1) as 1 | 2 | 3;
+        const done = n < current;
+        const active = n === current;
+        return (
+          <div key={n} className="flex items-center flex-1 last:flex-none">
+            <div className={`flex items-center gap-1.5 shrink-0 ${active ? "text-foreground" : done ? "text-muted-foreground" : "text-muted-foreground/35"}`}>
+              <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 ${
+                done ? "bg-green-500 text-white" :
+                active ? "bg-accent text-accent-foreground" :
+                "border-2 border-border"
+              }`}>
+                {done ? "✓" : n}
+              </div>
+              <span className="text-xs whitespace-nowrap">{label}</span>
+            </div>
+            {i < steps.length - 1 && (
+              <div className={`flex-1 h-px mx-3 ${done ? "bg-green-500/30" : "bg-border"}`} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialLocation, initialBusinessId, isOnboarding = false }: { onBack: () => void; defaultLocation?: string; initialKeyword?: string; initialLocation?: string; initialBusinessId?: string; isOnboarding?: boolean }) => {
   const [businesses, setBusinesses] = useState<BusinessProfile[]>([]);
   const [selectedBusinessId, setSelectedBusinessId] = useState("");
   const [keyword, setKeyword] = useState(initialKeyword ?? "");
@@ -102,6 +132,13 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const locationContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { fetchBusinesses(); fetchSavedPages(); }, []);
+
+  // Pre-select business when coming from onboarding flow
+  useEffect(() => {
+    if (initialBusinessId && businesses.length > 0 && !selectedBusinessId) {
+      setSelectedBusinessId(initialBusinessId);
+    }
+  }, [businesses, initialBusinessId]);
 
   useEffect(() => {
     if (view.kind === "form") fetchSavedPages();
@@ -805,6 +842,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         location={location}
         mode={view.mode}
         isNew={view.isNew}
+        isOnboarding={isOnboarding}
         contentHtml={view.contentHtml}
         schemaJson={view.schemaJson}
         pageTitle={view.pageTitle}
@@ -844,10 +882,24 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         <button onClick={onBack} className="text-sm text-muted-foreground hover:text-foreground mb-2 transition-colors">
           ← Back to Dashboard
         </button>
-        <h1 className="text-2xl font-display font-bold text-foreground">Content</h1>
-        <p className="text-muted-foreground text-sm mt-1">
-          Generate optimized local SEO pages for your business.
-        </p>
+        {isOnboarding ? (
+          <>
+            <StepIndicator current={2} />
+            <h1 className="text-2xl font-display font-bold text-foreground mt-4">
+              What service do you want to rank for?
+            </h1>
+            <p className="text-muted-foreground text-sm mt-1">
+              Your business is saved. Enter a service keyword below and we'll build your first page.
+            </p>
+          </>
+        ) : (
+          <>
+            <h1 className="text-2xl font-display font-bold text-foreground">Content</h1>
+            <p className="text-muted-foreground text-sm mt-1">
+              Generate optimized local SEO pages for your business.
+            </p>
+          </>
+        )}
       </div>
 
       <div className="bg-card rounded-xl border border-border p-6 space-y-5">

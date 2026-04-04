@@ -6,11 +6,42 @@ import { supabase } from "@/integrations/supabase/client";
 const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "";
 const API_KEY = import.meta.env.VITE_NLP_API_KEY ?? "";
 
+function StepIndicator({ current }: { current: 1 | 2 | 3 }) {
+  const steps = ["Add business", "Generate page", "Add to website"];
+  return (
+    <div className="flex items-center">
+      {steps.map((label, i) => {
+        const n = (i + 1) as 1 | 2 | 3;
+        const done = n < current;
+        const active = n === current;
+        return (
+          <div key={n} className="flex items-center flex-1 last:flex-none">
+            <div className={`flex items-center gap-1.5 shrink-0 ${active ? "text-foreground" : done ? "text-muted-foreground" : "text-muted-foreground/35"}`}>
+              <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 ${
+                done ? "bg-green-500 text-white" :
+                active ? "bg-accent text-accent-foreground" :
+                "border-2 border-border"
+              }`}>
+                {done ? "✓" : n}
+              </div>
+              <span className="text-xs whitespace-nowrap">{label}</span>
+            </div>
+            {i < steps.length - 1 && (
+              <div className={`flex-1 h-px mx-3 ${done ? "bg-green-500/30" : "bg-border"}`} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 interface Props {
   keyword: string;
   location: string;
   mode: "generate" | "reoptimize";
   isNew?: boolean;
+  isOnboarding?: boolean;
   contentHtml: string;
   schemaJson: string;
   pageTitle: string;
@@ -60,7 +91,7 @@ function scoreBadge(score?: number, status?: string) {
 
 export default function GeneratedPageView({
   keyword, location, mode, contentHtml, schemaJson, pageTitle, htmlCssNotes,
-  tokenUsage, costBreakdown, isNew = false,
+  tokenUsage, costBreakdown, isNew = false, isOnboarding = false,
   businessId, businessName, website, gbpCategory, address,
   onBack, onNewPage, onRelatedAction,
 }: Props) {
@@ -270,6 +301,9 @@ Let me know if you have any questions!`
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
+      {isOnboarding && isNew && (
+        <StepIndicator current={3} />
+      )}
       <div>
         <button onClick={onBack} className="text-sm text-muted-foreground hover:text-foreground mb-2 transition-colors">
           ← Back

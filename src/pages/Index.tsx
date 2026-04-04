@@ -23,6 +23,7 @@ const Index = () => {
   const [selectedLocationId, setSelectedLocationId] = useState<string | null>(null);
   const [planningKeyword, setPlanningKeyword] = useState("");
   const [planningLocation, setPlanningLocation] = useState("");
+  const [onboardingBusinessId, setOnboardingBusinessId] = useState<string | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -79,9 +80,9 @@ const Index = () => {
         .eq("gbp_place_id", business.place_id)
         .single();
       if (saved?.id) {
-        setSelectedLocationId(saved.id);
+        setOnboardingBusinessId(saved.id);
       }
-      setActiveItem("locations");
+      setActiveItem("content");
 
       // Trigger background analysis if the business has a website
       if (business.website) {
@@ -186,9 +187,11 @@ const Index = () => {
           )}
           {activeItem === "content" && (
             <NewContentView
-              onBack={() => setActiveItem("dashboard")}
+              onBack={() => { setOnboardingBusinessId(null); setActiveItem("dashboard"); }}
               initialKeyword={planningKeyword}
               initialLocation={planningLocation}
+              initialBusinessId={onboardingBusinessId ?? undefined}
+              isOnboarding={!!onboardingBusinessId}
             />
           )}
           {activeItem === "locations" && !selectedLocationId && (
