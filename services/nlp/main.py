@@ -152,8 +152,9 @@ SERP_RESULT_COUNT = 20
 # API cost estimates (USD) — used for per-generation cost breakdown display
 # DataForSEO organic SERP live/advanced: ~$0.0025 per task
 COST_DATAFORSEO_PER_ANALYSIS  = 0.0025
-# ScrapeOwl with premium_proxies: ~$0.0075 per page
+# ScrapeOwl without JS: ~$0.0075/page; with JS render: ~$0.015/page
 COST_SCRAPEOWL_PER_PAGE       = 0.0075
+COST_SCRAPEOWL_PER_PAGE_JS    = 0.0150
 # Google Natural Language API entity analysis: $0.001 per 1,000 chars
 COST_GOOGLE_NLP_PER_1K_CHARS  = 0.001
 
@@ -287,24 +288,27 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
 
 # ── Step 2: ScrapeOwl — fetch raw HTML for each URL ──────────────────────────
 
-async def scrape_url(url: str, client: httpx.AsyncClient) -> Optional[str]:
+async def _scrape_one(url: str, client: httpx.AsyncClient, render_js: bool = False) -> Optional[str]:
     """
-    Fetches raw HTML via ScrapeOwl v1 API with premium proxies.
-    Returns None on failure so the pipeline continues with remaining pages.
+    Single ScrapeOwl request. render_js=True costs ~2× but handles JS-heavy sites.
+    Returns None on failure.
     """
     try:
-        payload = json.dumps({
+        payload: dict = {
             "api_key": SCRAPEOWL_API_KEY,
             "url": url,
             "premium_proxies": True,
             "country": "us",
             "json_response": True,
-        })
+        }
+        if render_js:
+            payload["render_js"] = True
+            payload["wait_for_selector"] = "body"   # wait until body is present
         response = await client.post(
             SCRAPEOWL_ENDPOINT,
-            content=payload,
+            content=json.dumps(payload),
             headers={"Content-Type": "application/json"},
-            timeout=30.0,
+            timeout=45.0,
         )
         if response.status_code != 200:
             logger.warning(f"ScrapeOwl HTTP {response.status_code} for {url}: {response.text[:200]}")
@@ -312,32 +316,61 @@ async def scrape_url(url: str, client: httpx.AsyncClient) -> Optional[str]:
         data = response.json()
         html = data.get("html") or ""
         if len(html.strip()) < 200:
-            logger.warning(f"Thin content ({len(html)} chars) for {url}")
+            logger.warning(f"Thin content ({len(html)} chars) for {url} (render_js={render_js})")
             return None
         return html
     except Exception as e:
-        logger.warning(f"Scrape error for {url}: {type(e).__name__}: {e}")
+        logger.warning(f"Scrape error for {url} (render_js={render_js}): {type(e).__name__}: {e}")
         return None
 
 
-async def scrape_urls(urls: List[str]) -> List[str]:
+async def scrape_urls(urls: List[str]) -> tuple[List[str], dict]:
     """
-    Scrapes all URLs concurrently via ScrapeOwl.
-    Returns only non-empty HTML strings — failed pages are silently dropped.
-    Limits concurrency to 10 to stay within ScrapeOwl's concurrent request cap.
+    Hybrid two-pass scraper:
+      Pass 1 — render_js=False (fast, cheap) for all URLs concurrently.
+      Pass 2 — render_js=True  (JS rendering) only for URLs that failed/returned thin HTML.
+
+    Returns (pages, cost_info) where pages contains only non-empty HTML strings.
+    cost_info breaks down pages scraped at each tier for billing.
     """
     sem = asyncio.Semaphore(10)
 
-    async def scrape_with_sem(url: str, client: httpx.AsyncClient) -> Optional[str]:
+    async def attempt(url: str, render_js: bool) -> Optional[str]:
         async with sem:
-            return await scrape_url(url, client)
+            return await _scrape_one(url, client, render_js=render_js)
 
     async with httpx.AsyncClient() as client:
-        results = await asyncio.gather(*[scrape_with_sem(url, client) for url in urls])
+        # Pass 1: no JS
+        pass1 = await asyncio.gather(*[attempt(url, False) for url in urls])
+        failed_urls = [url for url, html in zip(urls, pass1) if not html]
 
-    pages = [html for html in results if html]
-    logger.info(f"Successfully scraped {len(pages)}/{len(urls)} pages")
-    return pages
+        # Pass 2: retry failures with JS rendering
+        pass2: List[Optional[str]] = []
+        if failed_urls:
+            logger.info(f"Retrying {len(failed_urls)} failed URLs with JS rendering")
+            pass2 = await asyncio.gather(*[attempt(url, True) for url in failed_urls])
+
+    # Merge: keep pass1 results, fill gaps with pass2
+    fail_iter = iter(pass2)
+    merged: List[Optional[str]] = []
+    for html in pass1:
+        if html:
+            merged.append(html)
+        else:
+            merged.append(next(fail_iter, None))
+
+    pages = [html for html in merged if html]
+    js_success = sum(1 for html in pass2 if html)
+    no_js_success = len(pages) - js_success
+    logger.info(
+        f"Scraping complete: {len(pages)}/{len(urls)} pages "
+        f"(no-JS: {no_js_success}, JS-render: {js_success}, failed: {len(urls) - len(pages)})"
+    )
+    cost_info = {
+        "no_js_pages": no_js_success,
+        "js_pages": js_success,
+    }
+    return pages, cost_info
 
 
 # ── HTML parsing ──────────────────────────────────────────────────────────────
@@ -594,8 +627,7 @@ async def _run_serp_analysis(
 ) -> AnalysisResponse:
     """
     Shared SERP analysis pipeline used by both /analyze and /score-page.
-    Returns an AnalysisResponse with related keywords, quadgrams, zone_targets,
-    competitor headings, and cost data (google_entities deferred to /generate-page).
+    Runs DataForSEO → ScrapeOwl (hybrid JS retry) → TF-IDF → quadgrams → Google NLP.
     """
     # Step 1: get URLs
     if urls:
@@ -607,8 +639,8 @@ async def _run_serp_analysis(
         if not serp_urls:
             raise HTTPException(status_code=502, detail="DataForSEO returned no usable URLs")
 
-    # Step 2: scrape
-    pages = await scrape_urls(serp_urls)
+    # Step 2: scrape (hybrid: no-JS first, retry failures with JS rendering)
+    pages, scrape_cost_info = await scrape_urls(serp_urls)
     if len(pages) < 2:
         raise HTTPException(
             status_code=502,
@@ -636,8 +668,21 @@ async def _run_serp_analysis(
         body=get_related_keywords_for_zone(zone_buckets["body"], keyword),
     )
     quadgrams = get_top_quadgrams(zone_buckets["paragraphs"], keyword)
-    # Google NLP is deferred to /generate-page (only paid when user actually generates content)
-    zone_targets = compute_zone_targets(zone_buckets, related, [])
+
+    # Step 5: Google NLP entity analysis — use paragraph text already in memory
+    google_entities: List[dict] = []
+    nlp_chars = 0
+    if GOOGLE_NLP_API_KEY:
+        para_texts = [t for t in zone_buckets["paragraphs"] if len(t) > 100][:5]
+        if para_texts:
+            try:
+                google_entities = await get_google_entities(para_texts)
+                nlp_chars = sum(min(len(t), GOOGLE_NLP_MAX_BYTES) for t in para_texts)
+                logger.info(f"Google NLP: {len(google_entities)} entities from {len(para_texts)} pages")
+            except Exception as _nlp_err:
+                logger.warning(f"Google NLP failed (non-fatal): {_nlp_err}")
+
+    zone_targets = compute_zone_targets(zone_buckets, related, google_entities)
 
     # Aggregate competitor headings by page spread
     total_pages = len(scraped_urls)
@@ -665,12 +710,21 @@ async def _run_serp_analysis(
                 "page_pct": round(count / total_pages, 2),
             })
 
-    scrapeowl_cost = round(len(scraped_urls) * COST_SCRAPEOWL_PER_PAGE, 6)
+    no_js_pages = scrape_cost_info["no_js_pages"]
+    js_pages = scrape_cost_info["js_pages"]
+    scrapeowl_cost = round(
+        no_js_pages * COST_SCRAPEOWL_PER_PAGE + js_pages * COST_SCRAPEOWL_PER_PAGE_JS, 6
+    )
+    nlp_cost = round(nlp_chars / 1000 * COST_GOOGLE_NLP_PER_1K_CHARS, 6)
     analysis_cost = {
         "dataforseo": round(COST_DATAFORSEO_PER_ANALYSIS, 6),
         "scrapeowl_pages": len(scraped_urls),
+        "scrapeowl_no_js_pages": no_js_pages,
+        "scrapeowl_js_pages": js_pages,
         "scrapeowl": scrapeowl_cost,
-        "subtotal": round(COST_DATAFORSEO_PER_ANALYSIS + scrapeowl_cost, 6),
+        "google_nlp_chars": nlp_chars,
+        "google_nlp": nlp_cost,
+        "subtotal": round(COST_DATAFORSEO_PER_ANALYSIS + scrapeowl_cost + nlp_cost, 6),
     }
 
     return AnalysisResponse(
@@ -679,7 +733,7 @@ async def _run_serp_analysis(
         serp_urls=scraped_urls,
         related_keywords=related,
         top_quadgrams=quadgrams,
-        google_entities=[],
+        google_entities=google_entities,
         zone_targets=zone_targets,
         competitor_headings=competitor_headings,
         analysis_cost=analysis_cost,
@@ -2772,45 +2826,9 @@ async def generate_page(request: Request, body: GeneratePageRequest):
 
     city = body.location.split(",")[0].strip()
 
-    # ── Lazy Google NLP ──────────────────────────────────────────────────────
-    # Entities are not fetched during /analyze (saves ~$0.25 per exploratory run).
-    # We fetch them here, only when the user actually commits to generating a page.
-    # We reuse the competitor URLs already stored in the cached analysis; fetching
-    # paragraph text via direct httpx (no ScrapeOwl cost — no JS rendering needed).
-    serp_analysis_enriched: dict = dict(body.serp_analysis or {})
-    if GOOGLE_NLP_API_KEY and not serp_analysis_enriched.get("google_entities"):
-        _nlp_urls = serp_analysis_enriched.get("serp_urls", [])[:5]
-        if _nlp_urls:
-            async def _fetch_para_text(url: str) -> str:
-                try:
-                    async with httpx.AsyncClient(follow_redirects=True, timeout=8.0) as _hc:
-                        _r = await _hc.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"})
-                        if _r.status_code == 200:
-                            _soup = BeautifulSoup(_r.text, "html.parser")
-                            return " ".join(p.get_text(strip=True) for p in _soup.find_all("p"))
-                except Exception:
-                    pass
-                return ""
-
-            _para_texts = await asyncio.gather(*[_fetch_para_text(u) for u in _nlp_urls])
-            _para_texts = [t for t in _para_texts if len(t) > 100]
-            if _para_texts:
-                try:
-                    _fetched_entities = await get_google_entities(_para_texts)
-                    if _fetched_entities:
-                        serp_analysis_enriched["google_entities"] = _fetched_entities
-                        _nlp_chars = sum(min(len(t), GOOGLE_NLP_MAX_BYTES) for t in _para_texts)
-                        _nlp_cost = round(_nlp_chars / 1000 * COST_GOOGLE_NLP_PER_1K_CHARS, 6)
-                        serp_analysis_enriched.setdefault("analysis_cost", {}).update({
-                            "google_nlp_chars": _nlp_chars,
-                            "google_nlp": _nlp_cost,
-                        })
-                        logger.info("Lazy Google NLP: fetched %d entities from %d pages", len(_fetched_entities), len(_para_texts))
-                except Exception as _nlp_err:
-                    logger.warning("Lazy Google NLP fetch failed: %s", _nlp_err)
-                    # Non-fatal — generation continues without entity hints
-
-    serp_ctx = _serp_context(serp_analysis_enriched)
+    # Google NLP entities are now fetched during /analyze, so serp_analysis
+    # passed here already contains them.
+    serp_ctx = _serp_context(body.serp_analysis)
 
     diff_text = ""
     if body.differentiators:
@@ -2932,8 +2950,8 @@ ICP: {icp}
         content_html = raw
         schema_json = ""
 
-    # Build combined cost breakdown (includes lazy Google NLP if it ran)
-    ac = serp_analysis_enriched.get("analysis_cost", {})
+    # Build combined cost breakdown using analysis cost from the cached serp_analysis
+    ac = (body.serp_analysis or {}).get("analysis_cost", {})
     claude_cost = token_rec["cost_usd"]
     cost_breakdown = {
         "dataforseo":           ac.get("dataforseo", 0),
