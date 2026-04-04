@@ -7,6 +7,7 @@ import BusinessSearchView, { type BusinessDetails } from "@/components/BusinessS
 import LocationsView from "@/components/LocationsView";
 import LocationDetailView from "@/components/LocationDetailView";
 import LoginView from "@/components/LoginView";
+import SettingsView from "@/components/SettingsView";
 import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
@@ -216,29 +217,8 @@ const Index = () => {
               }}
             />
           )}
-          {activeItem === "settings" && (
-            <div className="max-w-2xl space-y-6">
-              <div>
-                <h1 className="text-2xl font-display font-bold text-foreground">Settings</h1>
-                <p className="text-muted-foreground text-sm mt-1">Manage your ShowUP workspace.</p>
-              </div>
-              <div className="space-y-3">
-                {[
-                  { label: "API & Integrations", desc: "Connect DataForSEO, ScrapeOwl, and Google NLP credentials." },
-                  { label: "Default Location", desc: "Set a default city/region to pre-fill in content forms." },
-                  { label: "Team & Access", desc: "Invite team members and manage permissions." },
-                  { label: "Billing", desc: "View usage, token costs, and subscription details." },
-                ].map(({ label, desc }) => (
-                  <div key={label} className="bg-card border border-border rounded-xl px-5 py-4 flex items-center justify-between opacity-50 cursor-not-allowed select-none">
-                    <div>
-                      <p className="text-sm font-medium text-foreground">{label}</p>
-                      <p className="text-xs text-muted-foreground mt-0.5">{desc}</p>
-                    </div>
-                    <span className="text-xs text-muted-foreground border border-border rounded-full px-2 py-0.5 shrink-0 ml-4">Coming soon</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+          {activeItem === "settings" && session && (
+            <SettingsView session={session} />
           )}
         </div>
       </main>
