@@ -6,7 +6,8 @@ import {
   Plus,
   ChevronLeft,
   Zap,
-  ClipboardList
+  ClipboardList,
+  Store,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCredits } from "@/hooks/useCredits";
@@ -24,6 +25,10 @@ const navItems = [
   { id: "planning", label: "Planning", icon: ClipboardList },
   { id: "locations", label: "Locations", icon: MapPin },
   { id: "settings", label: "Settings", icon: Settings },
+];
+
+const comingSoonItems = [
+  { id: "gbp-posts", label: "GBP Posts", icon: Store },
 ];
 
 const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarProps) => {
@@ -86,6 +91,31 @@ const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarPro
               <Icon className="w-4 h-4 flex-shrink-0" />
               {!collapsed && item.label}
             </button>
+          );
+        })}
+
+        {/* Coming soon items */}
+        {comingSoonItems.map((item) => {
+          const Icon = item.icon;
+          return (
+            <div
+              key={item.id}
+              title={collapsed ? `${item.label} — Coming Soon` : undefined}
+              className={cn(
+                "w-full flex items-center gap-3 rounded-lg text-sm font-medium cursor-not-allowed opacity-50",
+                collapsed ? "justify-center p-2" : "px-3 py-2.5",
+              )}
+            >
+              <Icon className="w-4 h-4 flex-shrink-0" />
+              {!collapsed && (
+                <>
+                  <span className="flex-1 text-left">{item.label}</span>
+                  <span className="text-[10px] font-semibold uppercase tracking-wide bg-sidebar-border text-sidebar-foreground/60 px-1.5 py-0.5 rounded">
+                    Soon
+                  </span>
+                </>
+              )}
+            </div>
           );
         })}
       </nav>
