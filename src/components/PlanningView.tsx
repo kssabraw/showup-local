@@ -358,6 +358,9 @@ export default function PlanningView({ onCreatePage }: Props) {
                         {rank.total_results > 0 && (
                           <span className="ml-1.5 opacity-80">({rank.match_count}/{rank.total_results} map results match your category)</span>
                         )}
+                        {rank.verdict === "partial" && (
+                          <p className="mt-0.5 opacity-90">You may be able to rank with a highly optimized page, but will need to heavily include offpage signals including links, clicks, citations, and brand mentions.</p>
+                        )}
                       </div>
                     )}
                   </div>
