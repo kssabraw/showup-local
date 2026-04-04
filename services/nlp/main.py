@@ -2339,13 +2339,13 @@ async def check_rankability(request: Request, body: CheckRankabilityRequest):
     if total == 0:
         verdict = "unknown"
         message = "No map pack results found for this keyword and location."
-    elif match_count >= max(1, round(total * 0.4)):
+    elif match_count >= 7:
         verdict = "match"
         message = (
             f"Your category '{body.gbp_category}' appears in {match_count}/{total} map pack results. "
             f"Strong signal that you can rank for this keyword."
         )
-    elif match_count > 0:
+    elif match_count >= 3:
         verdict = "partial"
         message = (
             f"Your category '{body.gbp_category}' appears in {match_count}/{total} map pack results. "
