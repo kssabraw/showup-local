@@ -342,7 +342,11 @@ export default function GeneratedPageView({
                        prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg
                        prose-headings:font-bold prose-strong:font-bold
                        select-all cursor-text"
-            dangerouslySetInnerHTML={{ __html: contentHtml }}
+            dangerouslySetInnerHTML={{
+              __html: contentHtml
+                .replace(/\s*style="[^"]*"/gi, '')
+                .replace(/\s*class="[^"]*"/gi, '')
+            }}
           />
         </div>
       )}
