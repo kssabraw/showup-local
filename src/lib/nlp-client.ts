@@ -247,6 +247,15 @@ export const nlp = {
     "/generate-social-posts", body, signal,
   ),
 
+  analyzeBrandVoice: (
+    body: {
+      website_url?: string;
+      business_name: string;
+      gbp_category?: string;
+    },
+    signal?: AbortSignal,
+  ) => nlpPost<{ brand_voice: unknown }>("/analyze-brand-voice", body, signal),
+
   analyzeBusiness: (
     body: {
       website_url: string;

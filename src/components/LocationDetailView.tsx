@@ -2,9 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, RefreshCw, CheckCircle2, AlertCircle, Sparkles, Plus, Trash2, X } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
-
-const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
-const NLP_API_KEY = import.meta.env.VITE_NLP_API_KEY ?? "";
+import { nlp } from "@/lib/nlp-client";
 
 interface BusinessProfile {
   id: string;
@@ -300,30 +298,14 @@ const LocationDetailView = ({
     }
     setScanningBrandVoice(true);
     try {
-      const response = await fetch(`${NLP_SERVICE_URL}/analyze-brand-voice`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-        body: JSON.stringify({
+      const result = await nlp.analyzeBrandVoice(
+        {
           ...(website ? { website_url: website } : {}),
           business_name: b.business_name,
           gbp_category: b.gbp_category || "",
-        }),
-        signal: abortRef.current.signal,
-      });
-      if (!response.ok) {
-        const errBody = await response.json().catch(() => ({}));
-        const detail = errBody.detail || "";
-        const is4xx = response.status >= 400 && response.status < 500;
-        toast({
-          title: "Brand voice scan failed",
-          description: is4xx
-            ? detail || "There was an issue with your website. Check the URL is correct and the site is live."
-            : detail || "Something went wrong on our end. Please try again — if the problem continues, contact ShowUP support.",
-          variant: "destructive",
-        });
-        return;
-      }
-      const result = await response.json();
+        },
+        abortRef.current.signal,
+      );
       const { error } = await supabase
         .from("business_profiles")
         .update({ brand_voice: result.brand_voice })
