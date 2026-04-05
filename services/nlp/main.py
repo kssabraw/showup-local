@@ -2735,50 +2735,15 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             candidate_pool.sort(key=_slug_match_score, reverse=True)
             candidate_pool = candidate_pool[:25]
 
-            # ── Direct URL guessing (always runs for city+service keywords) ──────
-            # Generate slug permutations from keyword + location words and probe them.
-            # Runs unconditionally so pages missing from the sitemap (newly created,
-            # sitemap lag, XML omission) are still found via direct HEAD probe.
-            # Guessed hits are prepended so Haiku sees them first.
-            svc_slug = "-".join(kw_words)
-            loc_slug = "-".join(loc_words[:2]) if loc_words else ""  # e.g. "newport-beach"
-            guesses = []
-            if svc_slug and loc_slug:
-                guesses += [
-                    f"{origin}/{loc_slug}-{svc_slug}/",
-                    f"{origin}/{loc_slug}-{svc_slug}s/",
-                    f"{origin}/{svc_slug}-{loc_slug}/",
-                    f"{origin}/{svc_slug}s-{loc_slug}/",
-                ]
-            if svc_slug:
-                guesses += [f"{origin}/{svc_slug}/", f"{origin}/{svc_slug}s/"]
-            # Filter out guesses already in candidate_pool to avoid duplicates
-            guesses = [g for g in guesses if g not in candidate_pool and g.rstrip('/') not in candidate_pool]
-
-            async def _probe(u: str) -> Optional[str]:
-                try:
-                    r = await client.head(u, timeout=5.0)
-                    return u if r.status_code in (200, 301, 302) else None
-                except Exception:
-                    return None
-
-            probe_results = await asyncio.gather(*[_probe(g) for g in guesses])
-            guessed = [u for u in probe_results if u]
-            if guessed:
-                logger.info(f"find-page-for-keyword: direct-guess found {guessed}")
-                # Prepend guessed hits so they rank above sitemap-discovered candidates
-                candidate_pool = guessed + [u for u in candidate_pool if u not in guessed]
-
             # ── site: search fallback ─────────────────────────────────────────────
             # Run when the sitemap had no keyword/location slug matches — meaning
             # the page either isn't in the sitemap or uses an unexpected URL pattern.
-            # Direct guessing above covers predictable patterns; site: search covers
-            # anything else Google has indexed on the domain.
+            # Uses Google's index via DataForSEO site: query to find indexed pages.
             if not svc_matches and not loc_matches and DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD:
                 try:
                     city = (body.location or "").split(",")[0].strip()
                     site_query = f"site:{base_netloc} {body.keyword} {city}".strip()
-                    logger.info(f"find-page-for-keyword: falling back to site-search: {site_query!r}")
+                    logger.info(f"find-page-for-keyword: no sitemap slug matches — site-search: {site_query!r}")
                     credentials = base64.b64encode(
                         f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
                     ).decode()
@@ -2797,9 +2762,41 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                                         _u = _item.get("url", "")
                                         if _u and base_netloc in _u and _u not in candidate_pool:
                                             candidate_pool.append(_u)
-                        logger.info(f"find-page-for-keyword: site-search returned {len(candidate_pool)} results")
+                        logger.info(f"find-page-for-keyword: site-search added results, pool now {len(candidate_pool)}")
                 except Exception as _se:
                     logger.warning(f"find-page-for-keyword: site-search failed ({_se})")
+
+            # ── Direct URL guessing ───────────────────────────────────────────────
+            # Probe slug permutations built from keyword + location words.
+            # Runs after site: search so Google results take precedence; catches
+            # pages not yet indexed by Google or missing from the sitemap.
+            svc_slug = "-".join(kw_words)
+            loc_slug = "-".join(loc_words[:2]) if loc_words else ""  # e.g. "newport-beach"
+            guesses = []
+            if svc_slug and loc_slug:
+                guesses += [
+                    f"{origin}/{loc_slug}-{svc_slug}/",
+                    f"{origin}/{loc_slug}-{svc_slug}s/",
+                    f"{origin}/{svc_slug}-{loc_slug}/",
+                    f"{origin}/{svc_slug}s-{loc_slug}/",
+                ]
+            if svc_slug:
+                guesses += [f"{origin}/{svc_slug}/", f"{origin}/{svc_slug}s/"]
+            # Skip any URL already in the pool
+            guesses = [g for g in guesses if g not in candidate_pool and g.rstrip('/') not in candidate_pool]
+
+            async def _probe(u: str) -> Optional[str]:
+                try:
+                    r = await client.head(u, timeout=5.0)
+                    return u if r.status_code in (200, 301, 302) else None
+                except Exception:
+                    return None
+
+            probe_results = await asyncio.gather(*[_probe(g) for g in guesses])
+            guessed = [u for u in probe_results if u]
+            if guessed:
+                logger.info(f"find-page-for-keyword: direct-guess found {guessed}")
+                candidate_pool = candidate_pool + guessed
 
             # Generic fallback: if still nothing, take top 10 discovered URLs
             if not candidate_pool:
