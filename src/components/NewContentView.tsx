@@ -691,7 +691,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                           </span>
                           <Button size="sm" variant="outline" className="text-xs h-7 px-2"
                             onClick={() => handleRelatedAction({ mode: "reoptimize", keyword: item.keyword, existingUrl: item.url })}>
-                            Reoptimize
+                            Reoptimize <span className="ml-1 opacity-60 font-normal">2 credits</span>
                           </Button>
                         </div>
                       ) : (
