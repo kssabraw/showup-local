@@ -172,8 +172,8 @@ const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle, isAdmin }: S
               <span className="text-xs text-sidebar-foreground/60">Map Pack Checks</span>
               <span className="text-xs font-semibold tabular-nums text-sidebar-accent-foreground">
                 {credits?.rankabilityUsed != null
-                  ? `${(credits.rankabilityLimit ?? 50) - credits.rankabilityUsed} left`
-                  : `50 / mo`}
+                  ? `${credits.rankabilityUsed} / ${credits.rankabilityLimit ?? 50} used`
+                  : `0 / 50 used`}
               </span>
             </div>
 

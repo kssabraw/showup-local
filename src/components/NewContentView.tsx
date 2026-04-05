@@ -296,6 +296,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         gbp_place_id: b.gbp_place_id ?? undefined,
       });
       setRankability(data);
+      invalidateCredits();
     } catch (e: any) {
       if (e instanceof RankabilityLimitError) {
         setShowPackModal(true);
