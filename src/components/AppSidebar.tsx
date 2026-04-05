@@ -168,14 +168,30 @@ const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle, isAdmin }: S
             </div>
 
             {/* Map pack checks */}
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-sidebar-foreground/60">Map Pack Checks</span>
-              <span className="text-xs font-semibold tabular-nums text-sidebar-accent-foreground">
-                {credits?.rankabilityUsed != null
-                  ? `${credits.rankabilityUsed} / ${credits.rankabilityLimit ?? 50} used`
-                  : `0 / 50 used`}
-              </span>
-            </div>
+            {(() => {
+              const used = credits?.rankabilityUsed ?? 0;
+              const limit = credits?.rankabilityLimit ?? 50;
+              const remaining = limit - used;
+              const mapPct = Math.min(100, Math.round((remaining / limit) * 100));
+              const mapLow = remaining <= 5;
+              return (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs text-sidebar-foreground/60">Map Pack Checks</span>
+                    <span className={cn("text-xs font-semibold tabular-nums", mapLow ? "text-red-400" : "text-sidebar-accent-foreground")}>
+                      {remaining} / {limit}
+                    </span>
+                  </div>
+                  <div className="h-1 rounded-full bg-sidebar-border overflow-hidden">
+                    <div
+                      className={cn("h-full rounded-full transition-all", mapLow ? "bg-red-400" : "bg-sidebar-primary")}
+                      style={{ width: `${mapPct}%` }}
+                    />
+                  </div>
+                  {mapLow && <p className="text-xs text-red-400 mt-1">Running low</p>}
+                </div>
+              );
+            })()}
 
             {/* Press releases */}
             <div className="flex items-center justify-between">
