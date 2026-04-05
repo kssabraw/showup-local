@@ -50,7 +50,7 @@ type ViewState =
   | { kind: "form" }
   | { kind: "creating" }
   | { kind: "score"; pageMatch: { url: string; title: string; h1?: string }; serpAnalysis?: AnalysisResult; initialScoreResult?: ScoreResult }
-  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; tokenUsage: Partial<TokenUsage>; costBreakdown: Partial<CostBreakdown>; isNew?: boolean }
+  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; tokenUsage: Partial<TokenUsage>; costBreakdown: Partial<CostBreakdown>; isNew?: boolean; serpAnalysis?: AnalysisResult }
   | { kind: "analysis"; result: AnalysisResult };
 
 // ANALYSIS_CACHE_MAX_AGE_DAYS — cached keyword analyses older than this are ignored
@@ -441,6 +441,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             tokenUsage: genData.token_usage,
             costBreakdown: genData.cost_breakdown ?? {},
             isNew: true,
+            serpAnalysis: genData.serp_analysis ?? undefined,
           });
           return;
         }
@@ -770,6 +771,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         differentiators={selectedBusiness?.differentiators ?? undefined}
         detected_icp={selectedBusiness?.detected_icp ?? undefined}
         brand_voice={selectedBusiness?.brand_voice ?? undefined}
+        serp_analysis={view.serpAnalysis ?? undefined}
         onBack={() => setView({ kind: "form" })}
         onNewPage={() => { setView({ kind: "form" }); setKeyword(""); setCheckState({ status: "idle" }); }}
         onRelatedAction={handleRelatedAction}

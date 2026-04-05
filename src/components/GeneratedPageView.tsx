@@ -96,6 +96,7 @@ interface Props {
   differentiators?: unknown[];
   detected_icp?: unknown;
   brand_voice?: unknown;
+  serp_analysis?: unknown;
   onBack: () => void;
   onNewPage: () => void;
   onRelatedAction?: (action: { mode: "reoptimize" | "new"; keyword: string; existingUrl?: string }) => void;
@@ -124,7 +125,7 @@ export default function GeneratedPageView({
   keyword, location, mode, contentHtml, schemaJson, pageTitle, htmlCssNotes,
   tokenUsage, costBreakdown,
   businessId, businessName, website, gbpCategory, address,
-  phone, differentiators, detected_icp, brand_voice,
+  phone, differentiators, detected_icp, brand_voice, serp_analysis,
   onBack, onNewPage, onRelatedAction,
 }: Props) {
   const invalidateSavedPages = useInvalidateSavedPages();
@@ -250,6 +251,7 @@ export default function GeneratedPageView({
         differentiators,
         detected_icp,
         brand_voice,
+        serp_analysis,
       });
       setSocialPosts({ gbp: data.gbp });
     } catch {

@@ -3433,6 +3433,9 @@ Rules:
 - If brand voice instructions are provided, match that tone and style exactly.
 - If target customer profiles are provided, write to those specific pain points and motivations.
 - If differentiators are provided, weave them into posts naturally — include the mechanism, not just the claim.
+- If SEO signal data is provided (related keywords and Google entities), weave them into posts
+  naturally where they fit — do not force them in, do not list them verbatim. The goal is natural
+  language that happens to contain these terms, not keyword stuffing.
 - Output valid JSON only — no markdown fences, no commentary."""
 
 class SocialPostsRequest(BaseModel):
@@ -3446,6 +3449,7 @@ class SocialPostsRequest(BaseModel):
     differentiators: Optional[List[dict]] = None
     detected_icp: Optional[dict] = None
     brand_voice: Optional[dict] = None
+    serp_analysis: Optional[dict] = None
 
 class SocialPostsResponse(BaseModel):
     gbp: List[str]
@@ -3518,12 +3522,39 @@ async def generate_social_posts(request: Request, body: SocialPostsRequest):
                 lines.append(f"  Writer instructions: {guide}")
             brand_voice_text = "\n".join(lines)
 
+    # Build SEO signals block from serp_analysis — entities + top keywords, used naturally
+    seo_signals_text = ""
+    if body.serp_analysis:
+        entities = body.serp_analysis.get("google_entities", [])
+        rk = body.serp_analysis.get("related_keywords", {})
+        top_entities = [e["name"] for e in sorted(entities, key=lambda e: e.get("page_spread", 0), reverse=True)[:8]]
+        # Flatten related keywords across zones, deduplicate, take top terms
+        seen: set = set()
+        top_keywords = []
+        for zone in ("paragraphs", "h2_h3", "h1", "title"):
+            for t in rk.get(zone, []):
+                term = t["term"]
+                if term.lower() not in seen:
+                    seen.add(term.lower())
+                    top_keywords.append(term)
+                if len(top_keywords) >= 12:
+                    break
+            if len(top_keywords) >= 12:
+                break
+        lines = ["\nSEO SIGNALS (weave these naturally into posts where they fit — do not force or list verbatim):"]
+        if top_entities:
+            lines.append(f"  Entities: {', '.join(top_entities)}")
+        if top_keywords:
+            lines.append(f"  Keywords: {', '.join(top_keywords)}")
+        if len(lines) > 1:
+            seo_signals_text = "\n".join(lines)
+
     user_prompt = f"""Business: {body.business_name}
 Category: {body.gbp_category}
 Location: {city}
 Keyword: {body.keyword}
 Address: {body.address or ""}
-Phone: {body.phone or "not provided"}{diff_text}{icp_text}{brand_voice_text}
+Phone: {body.phone or "not provided"}{diff_text}{icp_text}{brand_voice_text}{seo_signals_text}
 
 PAGE CONTENT:
 {page_text}

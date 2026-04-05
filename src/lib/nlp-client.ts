@@ -240,6 +240,7 @@ export const nlp = {
       differentiators?: unknown[];
       detected_icp?: unknown;
       brand_voice?: unknown;
+      serp_analysis?: unknown;
     },
     signal?: AbortSignal,
   ) => nlpPost<{ gbp: string[]; token_usage: Record<string, unknown> }>(
