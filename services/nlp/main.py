@@ -3831,7 +3831,7 @@ async def check_rankability(request: Request, body: RankabilityRequest):
             distance_ok=False,
             message=(
                 f"Your business is {distance_miles} miles from {body.location} — "
-                "Google Maps heavily favors businesses within 5–10 miles of the search location. "
+                "Google Maps heavily favors businesses within 5 miles of the search location. "
                 "You are unlikely to rank in Maps for this keyword. "
                 "Target a city closer to your location or target organic rankings instead."
             ),
