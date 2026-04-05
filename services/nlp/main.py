@@ -2123,21 +2123,119 @@ HARD RULES — NEVER:
 - Use vague differentiators ("trusted", "professional", "high quality") without a mechanism
 - Invent or guess phone numbers, addresses, hours, zip codes, street names, or landmarks not explicitly provided in the business data"""
 
-_REOPT_SYSTEM_PROMPT = """You are an expert local SEO content writer. Fix the SEO deficiencies in the page provided by updating its text content only.
+_REOPT_SYSTEM_PROMPT = """You are an expert local SEO content writer. Rewrite the provided page from scratch, fixing all listed SEO deficiencies and producing a complete, publish-ready local service page.
 
-STRICT RULES — follow exactly:
-1. TEXT ONLY: Only change text content (words between HTML tags). You may also update SEO-relevant attributes: alt, title, meta[content], og:title, og:description, aria-label, and JSON-LD schema text values.
-2. PRESERVE EVERYTHING ELSE: Do not change any element types, CSS classes, IDs, data-* attributes, href, src, or any non-content attributes. Do not add, remove, or reorder any HTML elements.
-3. Fix every deficiency listed through word choices, phrasing, and copy — not by adding new HTML sections.
-4. Naturally incorporate competitor entities and phrases from SERP data where missing.
-5. Do not fabricate reviews or placeholder text. Do not use "near me" literally in body copy.
+Use the EXISTING PAGE as your reference — preserve factual details, service descriptions, and business-specific copy that is already accurate. But you are free to restructure, expand, reorder, and rewrite any section to fix the deficiencies and fully implement the 13-section spec below.
 
-Return your response in EXACTLY this format (do not deviate):
+OUTPUT FORMAT
+Return valid HTML only. No markdown. No explanations outside the HTML. Structure:
+<title>[SEE TITLE FORMULA BELOW]</title>
+<article>
+  [13 sections as specified below]
+</article>
+Then on a NEW LINE after </article>, output the JSON-LD schema block starting with <script type="application/ld+json"> (3 schema blocks in one script tag).
 
-<<<NOTES>>>
-List each HTML/CSS structural change that would further improve SEO but that you could NOT make because it requires adding/moving/removing elements or changing classes. Be specific (e.g. "Add an FAQ section with schema markup", "H1 tag is missing — the page title is wrapped in a <div> instead"). If none, write "None."
-<<<HTML>>>
-[Complete page HTML with ONLY text content and SEO attributes changed]"""
+TITLE TAG FORMULA (follow exactly — do not deviate):
+<title>[Power Word]! [Exact Match Keyword] | [Brand Name] | [Justification using entities] | [Additional persuasion + entities]</title>
+- Power Word: a single urgent/emotional word (e.g. Trusted, Fast, Expert, Certified, Local, Licensed)
+- Exact Match Keyword: the primary keyword verbatim
+- Brand Name: the business name
+- Justification: a short phrase using 1–2 Google entities that validates the claim
+- Additional persuasion: a benefit or proof point that includes 1–2 more entities
+- Total title length: 60–70 characters ideal, 80 max
+
+AEO / LLM WRITING RULES — apply throughout every section
+
+1. ANSWER-FIRST: Open every section, paragraph, and FAQ answer with a direct claim.
+2. ONE IDEA PER PARAGRAPH: Each <p> covers exactly one point. 3–5 sentences max.
+3. QUESTION-FORMAT H3s: Where natural, write H3s as questions a real searcher would type.
+4. DIRECT FAQ ANSWERS: Every FAQ answer opens with a direct yes/no or factual statement.
+5. BULLETED LISTS — use <ul> for features, services, inclusions, and what-to-expect items.
+6. NUMBERED LISTS — use <ol> for processes, steps, and how-it-works sequences.
+7. TABLES — use only when content is genuinely comparative (service tiers, response times, inclusions). Do NOT force a table where a list or prose is more natural.
+8. SPECIFIC FACTS OVER VAGUE CLAIMS — LLMs cite specificity, not generalities.
+9. ENTITY TRIPLETS in ≥3 sections: [Brand] + [service] + [city] must co-occur.
+10. SECTION LENGTH ≤300 words: split into multiple H2 subsections if needed.
+
+BRAND VOICE vs. AEO STRUCTURE — TIEBREAKER RULES
+AEO rules govern STRUCTURE (answer position, paragraph length, heading format, list usage) — non-negotiable.
+Brand voice governs EXPRESSION (word choice, tone, personality) — applies within every structural element.
+
+Section 1 — Intro / Direct Answer Block (100–150 words)
+<section id="intro">
+  <h1>[Exact Match Keyword] + [1–2 entities that reinforce location or service scope]</h1>
+  <p>[Brand] provides [service] to [city] — [primary differentiator stated in first sentence]. [2–3 sentences: service confirmation, availability, phone CTA.]</p>
+</section>
+
+Section 2 — USP / Value Proposition (150–200 words)
+<section id="usp">
+  <h2>[Complete sentence: exact match keyword + persuasive outcome + 1–2 entities]</h2>
+  [Min 3 differentiators with mechanisms. One contrast statement. One proof signal.]
+</section>
+
+Section 3 — Special Offers (omit if no offer data provided)
+<section id="offers">...</section>
+
+Section 4 — CTA Block Primary (50–75 words)
+<section id="cta-primary">
+  <h2>[Action-oriented H2]</h2>
+  [Differentiated CTA — not "Contact us today". Include phone.]
+</section>
+
+Section 5 — Features and Benefits (150–200 words)
+<section id="features">
+  <h2>[Benefit-focused H2]</h2>
+  <ul>[Min 4 feature/benefit pairs — outcome-first, ICP pain points addressed]</ul>
+</section>
+
+Section 6 — Main Service Body (800–1400 words)
+<section id="services">
+  Use competitor H2/H3 headings from SERP data as your structural baseline.
+  Cover every topic competitors cover, then add sections for topics they don't.
+  Multiple H2s allowed. H3s for sub-services, use cases, scenarios.
+  Naturally weave in competitor entities and phrases from SERP data throughout.
+</section>
+
+Section 7 — Testimonials (include only if reviews provided; omit if none)
+<section id="testimonials">
+  <h2>[Social proof H2]</h2>
+  [Verbatim reviews only — first name + last initial, stars, date, full text]
+</section>
+
+Section 8 — CTA Block Secondary (50–75 words — different angle from Section 4)
+<section id="cta-secondary">...</section>
+
+Section 9 — Getting Started (150–200 words)
+<section id="getting-started">
+  <h2>[Process-focused H2]</h2>
+  <ol>[3–5 steps, plain language, close with CTA]</ol>
+</section>
+
+Section 10 — Geographic / Local SEO Section (200–300 words)
+<section id="local">
+  <h2>[City + service in heading]</h2>
+  [City + min 3 neighborhoods in sentence context + min 1 landmark + min 2 streets + zip codes (min 3). Use only real, verifiable geographic details from the existing page or business data. Do not invent.]
+</section>
+
+Section 11 — CTA Block Tertiary (50–75 words — urgency-forward)
+<section id="cta-tertiary">...</section>
+
+Section 12 — FAQ (min 6, max 10 entries — 40–80 words each)
+<section id="faq">
+  <h2>Frequently Asked Questions</h2>
+  [Must cover: availability, response time, coverage area, emergency service. Answer-first.]
+</section>
+
+Section 13 — Schema (delivered AFTER </article> as a separate <script> block)
+3 schema blocks in one JSON-LD array: LocalBusiness, Service, FAQPage.
+
+HARD RULES — NEVER:
+- Start with "Welcome to [Brand]"
+- Use "Contact us today" as standalone CTA
+- Use generic headings ("About Us", "Our Services", "Why Choose Us")
+- Use "near me" literally in body content
+- Include placeholder text like [Insert here]
+- Fabricate reviews or invent addresses, phone numbers, or zip codes not provided"""
 
 _SCORE_SYSTEM_PROMPT = """You are an expert local SEO analyst. Score the provided page against all 7 engines below.
 
@@ -3263,18 +3361,18 @@ PHONE: {body.phone or "[PHONE]"}
 ADDRESS: {body.address or "Not provided"}
 {serp_ctx}
 
-DEFICIENCIES TO FIX:
+SEO DEFICIENCIES TO FIX (these must all be addressed in the rewrite):
 {deficiency_text}
 
-EXISTING PAGE:
+EXISTING PAGE (use as reference — preserve accurate facts, fix everything else):
 {existing_html[:12000]}"""
 
-        await q.put({"step": "progress", "progress": 40, "message": "Reoptimizing your page…"})
+        await q.put({"step": "progress", "progress": 40, "message": "Rewriting your page…"})
 
         try:
             claude_msg = await client.messages.create(
                 model=GENERATION_MODEL,
-                max_tokens=6000,
+                max_tokens=16000,
                 system=[{"type": "text", "text": _REOPT_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": user_prompt}],
             )
@@ -3289,31 +3387,17 @@ EXISTING PAGE:
             raw = re.sub(r'\n?```$', '', raw)
             raw = raw.strip()
 
-        # Split on delimiter to extract notes and HTML separately
-        html_css_notes: List[str] = []
-        if "<<<HTML>>>" in raw:
-            parts = raw.split("<<<HTML>>>", 1)
-            notes_block = parts[0]
-            html_block = parts[1].strip()
-            # Extract bullet lines from the notes block (between <<<NOTES>>> and <<<HTML>>>)
-            if "<<<NOTES>>>" in notes_block:
-                notes_text = notes_block.split("<<<NOTES>>>", 1)[1].strip()
-            else:
-                notes_text = notes_block.strip()
-            if notes_text and notes_text.lower() != "none.":
-                for line in notes_text.splitlines():
-                    line = line.strip().lstrip("-•*123456789. ").strip()
-                    if line and line.lower() != "none.":
-                        html_css_notes.append(line)
-        else:
-            html_block = raw
+        # Extract title tag if present
+        title_match = re.search(r'<title>(.*?)</title>', raw, re.IGNORECASE | re.DOTALL)
+        page_title = title_match.group(1).strip() if title_match else ""
 
-        schema_split = html_block.find('<script type="application/ld+json">')
+        # Split schema from content
+        schema_split = raw.find('<script type="application/ld+json">')
         if schema_split != -1:
-            content_html = html_block[:schema_split].strip()
-            schema_json = html_block[schema_split:].strip()
+            content_html = raw[:schema_split].strip()
+            schema_json = raw[schema_split:].strip()
         else:
-            content_html = html_block
+            content_html = raw
             schema_json = None
 
         await q.put({"step": "progress", "progress": 95, "message": "Finishing up…"})
@@ -3322,8 +3406,9 @@ EXISTING PAGE:
             "result": {
                 "content_html": content_html,
                 "schema_json": schema_json,
+                "page_title": page_title,
                 "token_usage": token_rec,
-                "html_css_notes": html_css_notes,
+                "html_css_notes": [],
             },
         })
 

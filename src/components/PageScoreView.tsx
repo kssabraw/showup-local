@@ -335,7 +335,7 @@ export default function PageScoreView({
                   title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
                 >
                   {reoptimizing
-                    ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Reoptimizing…</>
+                    ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Rewriting page…</>
                     : <>Reoptimize This Page <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span></>}
                 </Button>
                 {reoptimizing && (
