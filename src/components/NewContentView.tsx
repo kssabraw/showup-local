@@ -380,6 +380,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     abortRef.current = new AbortController();
     const signal = abortRef.current.signal;
 
+    setView({ kind: "form" });  // ensure form view is shown so the "creating" progress UI is visible
     setCheckState({ status: "creating" });
     setGenerateProgress(0);
     setGenerateStep("Starting…");
