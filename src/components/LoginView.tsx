@@ -5,12 +5,18 @@ import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
 
 const LoginView = ({ onAuth }: { onAuth: () => void }) => {
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const [mode, setMode] = useState<"signin" | "signup" | "reset">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+
+  const switchMode = (next: typeof mode) => {
+    setMode(next);
+    setError("");
+    setMessage("");
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -23,7 +29,13 @@ const LoginView = ({ onAuth }: { onAuth: () => void }) => {
         const { error } = await supabase.auth.signUp({ email, password });
         if (error) throw error;
         setMessage("Check your email to confirm your account, then sign in.");
-        setMode("signin");
+        switchMode("signin");
+      } else if (mode === "reset") {
+        const { error } = await supabase.auth.resetPasswordForEmail(email, {
+          redirectTo: `${window.location.origin}/?reset=1`,
+        });
+        if (error) throw error;
+        setMessage("Password reset email sent — check your inbox.");
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
@@ -42,7 +54,9 @@ const LoginView = ({ onAuth }: { onAuth: () => void }) => {
         <div className="text-center">
           <h1 className="text-2xl font-display font-bold text-foreground">ShowUP Local</h1>
           <p className="text-muted-foreground text-sm mt-1">
-            {mode === "signin" ? "Sign in to your account" : "Create an account"}
+            {mode === "signin" ? "Sign in to your account"
+              : mode === "signup" ? "Create an account"
+              : "Reset your password"}
           </p>
         </div>
 
@@ -59,29 +73,41 @@ const LoginView = ({ onAuth }: { onAuth: () => void }) => {
                 autoComplete="email"
               />
             </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-foreground">Password</label>
-              <Input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                required
-                autoComplete={mode === "signup" ? "new-password" : "current-password"}
-                minLength={6}
-              />
-            </div>
 
-            {error && (
-              <p className="text-sm text-destructive">{error}</p>
+            {mode !== "reset" && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-foreground">Password</label>
+                  {mode === "signin" && (
+                    <button
+                      type="button"
+                      onClick={() => switchMode("reset")}
+                      className="text-xs text-muted-foreground hover:text-accent transition-colors"
+                    >
+                      Forgot password?
+                    </button>
+                  )}
+                </div>
+                <Input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  required
+                  autoComplete={mode === "signup" ? "new-password" : "current-password"}
+                  minLength={6}
+                />
+              </div>
             )}
-            {message && (
-              <p className="text-sm text-green-600 dark:text-green-400">{message}</p>
-            )}
+
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            {message && <p className="text-sm text-green-600 dark:text-green-400">{message}</p>}
 
             <Button type="submit" className="w-full" disabled={loading}>
               {loading && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
-              {mode === "signin" ? "Sign In" : "Create Account"}
+              {mode === "signin" ? "Sign In"
+                : mode === "signup" ? "Create Account"
+                : "Send Reset Email"}
             </Button>
           </form>
 
@@ -89,21 +115,22 @@ const LoginView = ({ onAuth }: { onAuth: () => void }) => {
             {mode === "signin" ? (
               <>
                 Don't have an account?{" "}
-                <button
-                  onClick={() => { setMode("signup"); setError(""); setMessage(""); }}
-                  className="text-accent hover:underline"
-                >
+                <button onClick={() => switchMode("signup")} className="text-accent hover:underline">
                   Sign up
+                </button>
+              </>
+            ) : mode === "signup" ? (
+              <>
+                Already have an account?{" "}
+                <button onClick={() => switchMode("signin")} className="text-accent hover:underline">
+                  Sign in
                 </button>
               </>
             ) : (
               <>
-                Already have an account?{" "}
-                <button
-                  onClick={() => { setMode("signin"); setError(""); setMessage(""); }}
-                  className="text-accent hover:underline"
-                >
-                  Sign in
+                Remembered it?{" "}
+                <button onClick={() => switchMode("signin")} className="text-accent hover:underline">
+                  Back to sign in
                 </button>
               </>
             )}
@@ -115,3 +142,4 @@ const LoginView = ({ onAuth }: { onAuth: () => void }) => {
 };
 
 export default LoginView;
+

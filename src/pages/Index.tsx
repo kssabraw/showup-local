@@ -29,7 +29,12 @@ const Index = () => {
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, s) => {
+      setSession(s);
+      // When Supabase processes a password-reset link it fires PASSWORD_RECOVERY.
+      // Route straight to Settings so the user can set a new password.
+      if (event === "PASSWORD_RECOVERY") setActiveItem("settings");
+    });
     return () => subscription.unsubscribe();
   }, []);
 
