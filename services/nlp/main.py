@@ -1829,31 +1829,43 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
         pages_sampled = len(page_contents)
         logger.info(f"Brand voice: sampled {pages_sampled}/{len(selected)} pages for {url}")
 
-        # JS-rendered site fallback: retry top 5 pages via ScrapeOwl render_js=True
+        # Fallback: retry failed pages via ScrapeOwl (residential proxies bypass most bot blocks)
         if not page_contents and selected:
-            logger.info(f"Brand voice: plain HTTP yielded no text — retrying top 5 pages with ScrapeOwl JS render")
-            js_pages = selected[:5]
-            async with httpx.AsyncClient() as js_client:
-                js_htmls = await asyncio.gather(
-                    *[_scrape_one(p['url'], js_client, render_js=True) for p in js_pages],
-                    return_exceptions=True,
-                )
-            for p, html in zip(js_pages, js_htmls):
-                if not html or isinstance(html, Exception):
-                    continue
-                soup = BeautifulSoup(html, "html.parser")
-                for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
-                    tag.decompose()
-                paragraphs = [para.get_text(" ", strip=True) for para in soup.find_all("p")]
-                paragraphs = [para for para in paragraphs if len(para) > 40]
-                text = " ".join(paragraphs[:30])
-                if text.strip():
-                    page_contents.append(f"[{p.get('page_type', 'page')}] {p['url']}\n{text[:600]}")
+            async def _scrapeowl_extract(pages: List[dict], render_js: bool) -> List[str]:
+                """Scrape pages via ScrapeOwl and extract paragraph text."""
+                async with httpx.AsyncClient() as sc:
+                    htmls = await asyncio.gather(
+                        *[_scrape_one(p['url'], sc, render_js=render_js) for p in pages],
+                        return_exceptions=True,
+                    )
+                results = []
+                for p, html in zip(pages, htmls):
+                    if not html or isinstance(html, Exception):
+                        continue
+                    soup = BeautifulSoup(html, "html.parser")
+                    for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+                        tag.decompose()
+                    paragraphs = [para.get_text(" ", strip=True) for para in soup.find_all("p")]
+                    paragraphs = [para for para in paragraphs if len(para) > 40]
+                    text = " ".join(paragraphs[:30])
+                    if text.strip():
+                        results.append(f"[{p.get('page_type', 'page')}] {p['url']}\n{text[:600]}")
+                return results
+
+            # Tier 2: ScrapeOwl without JS render (residential proxies, handles Cloudflare/WAF-protected sites)
+            logger.info(f"Brand voice: plain HTTP yielded no text — retrying top 5 pages via ScrapeOwl (no JS)")
+            page_contents = await _scrapeowl_extract(selected[:5], render_js=False)
+
             if page_contents:
-                logger.info(f"Brand voice: JS render recovered {len(page_contents)} pages for {url}")
+                logger.info(f"Brand voice: ScrapeOwl (no JS) recovered {len(page_contents)} pages for {url}")
             else:
-                logger.warning(f"Brand voice: JS render also yielded no text for {url} — falling back to category inference")
-                # Fall through with empty page_contents → category inference in analyze_brand_voice_with_anthropic
+                # Tier 3: ScrapeOwl with JS render (handles React/Vue/Wix/Webflow sites)
+                logger.info(f"Brand voice: trying ScrapeOwl JS render for {url}")
+                page_contents = await _scrapeowl_extract(selected[:5], render_js=True)
+                if page_contents:
+                    logger.info(f"Brand voice: ScrapeOwl JS render recovered {len(page_contents)} pages for {url}")
+                else:
+                    logger.warning(f"Brand voice: all scraping tiers failed for {url} — falling back to category inference")
     else:
         logger.info(f"Brand voice: no website for {body.business_name} — using category inference")
 
