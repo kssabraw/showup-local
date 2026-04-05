@@ -1829,16 +1829,31 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
         pages_sampled = len(page_contents)
         logger.info(f"Brand voice: sampled {pages_sampled}/{len(selected)} pages for {url}")
 
-        if not page_contents:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "Your website was reached but no readable text content was found. "
-                    "This usually means the site is JavaScript-rendered (React, Vue, etc.) "
-                    "and requires server-side rendering to be crawlable. "
-                    "Contact ShowUP support for assistance."
+        # JS-rendered site fallback: retry top 5 pages via ScrapeOwl render_js=True
+        if not page_contents and selected:
+            logger.info(f"Brand voice: plain HTTP yielded no text — retrying top 5 pages with ScrapeOwl JS render")
+            js_pages = selected[:5]
+            async with httpx.AsyncClient() as js_client:
+                js_htmls = await asyncio.gather(
+                    *[_scrape_one(p['url'], js_client, render_js=True) for p in js_pages],
+                    return_exceptions=True,
                 )
-            )
+            for p, html in zip(js_pages, js_htmls):
+                if not html or isinstance(html, Exception):
+                    continue
+                soup = BeautifulSoup(html, "html.parser")
+                for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+                    tag.decompose()
+                paragraphs = [para.get_text(" ", strip=True) for para in soup.find_all("p")]
+                paragraphs = [para for para in paragraphs if len(para) > 40]
+                text = " ".join(paragraphs[:30])
+                if text.strip():
+                    page_contents.append(f"[{p.get('page_type', 'page')}] {p['url']}\n{text[:600]}")
+            if page_contents:
+                logger.info(f"Brand voice: JS render recovered {len(page_contents)} pages for {url}")
+            else:
+                logger.warning(f"Brand voice: JS render also yielded no text for {url} — falling back to category inference")
+                # Fall through with empty page_contents → category inference in analyze_brand_voice_with_anthropic
     else:
         logger.info(f"Brand voice: no website for {body.business_name} — using category inference")
 
