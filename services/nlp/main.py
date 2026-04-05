@@ -1914,6 +1914,61 @@ TITLE TAG FORMULA (follow exactly — do not deviate):
 - Additional persuasion: a benefit or proof point that includes 1–2 more entities (e.g. "Same-Day Response, No Overtime Fees")
 - Total title length: 60–70 characters ideal, 80 max
 
+AEO / LLM WRITING RULES — apply throughout every section
+
+These rules make content retrievable by AI assistants (ChatGPT, Gemini, Perplexity) and
+optimised for Answer Engine Optimisation. Follow all of them in every section.
+
+1. ANSWER-FIRST: Open every section, paragraph, and FAQ answer with a direct claim.
+   State the conclusion before the explanation.
+   ✗ Bad:  "Tree service is a complex process that requires professional expertise..."
+   ✓ Good: "[Brand] removes trees same-day in Anaheim — including emergency situations."
+
+2. ONE IDEA PER PARAGRAPH: Each <p> covers exactly one point. 3–5 sentences max.
+   Wall-of-text paragraphs are not cited by LLMs. Short, focused paragraphs are.
+
+3. QUESTION-FORMAT H3s: Where natural, write H3s as questions a real searcher would type.
+   e.g. "Do you offer emergency tree removal in Anaheim?"
+        "How much does tree trimming cost in Orange County?"
+   LLMs use these as retrieval anchors — they match them against user queries directly.
+
+4. DIRECT FAQ ANSWERS: Every FAQ answer opens with a direct yes/no or factual statement.
+   ✗ Bad:  "That's a great question. It depends on..."
+   ✓ Good: "Yes, [Brand] offers 24/7 emergency tree removal in Anaheim and surrounding cities."
+
+5. BULLETED LISTS — use <ul> for features, services, inclusions, and what-to-expect items:
+   - Each bullet is a complete, self-contained statement (no sentence fragments)
+   - Lead with the outcome or benefit, not the feature name
+   - 1–2 lines per bullet maximum
+   - Minimum 3 bullets, maximum 8 per list
+   - ✗ Bad bullet:  "Fast service"
+   - ✓ Good bullet: "Same-day response — crews dispatched within 2 hours for Anaheim emergencies"
+
+6. NUMBERED LISTS — use <ol> for processes, steps, and how-it-works sequences:
+   - Each step begins with an action verb
+   - Include what the customer does AND what [Brand] does at each step
+   - 3–5 steps is ideal; never exceed 7
+
+7. TABLES — use <table><thead><tbody> for comparisons, tiers, coverage areas, or response times:
+   - Column headers must be specific (never "Option A / Option B")
+   - Include at least one locally-relevant column where possible (e.g. city/area, response time)
+   - Keep to 2–4 columns; never exceed 6
+   - Good table uses: service tier comparison, response time by area, what's included vs excluded,
+     pricing ranges by job type, before/after process comparison
+   - Every table must have a preceding <p> sentence introducing what it shows
+
+8. SPECIFIC FACTS OVER VAGUE CLAIMS — LLMs cite specificity, not generalities:
+   ✗ "We respond quickly."              → ✓ "Crews arrive within 2–4 hours for Anaheim emergencies."
+   ✗ "Serving the local area."          → ✓ "Serving Anaheim, Anaheim Hills, Yorba Linda & Orange County."
+   ✗ "Competitive pricing."             → ✓ "Free estimates — no trip fee within a 15-mile radius."
+
+9. ENTITY TRIPLETS in ≥3 sections: [Brand] + [service] + [city] must co-occur in the
+   intro, the main services body, the local section, and the FAQ. This establishes the
+   entity relationship in LLM retrieval.
+
+10. SECTION LENGTH ≤300 words: LLMs extract from dense sections poorly. If a topic needs
+    more depth, split it into multiple H2 subsections rather than lengthening one section.
+
 MANDATORY 13-SECTION STRUCTURE
 
 Section 1 — Intro / Direct Answer Block (100–150 words)
@@ -2039,7 +2094,7 @@ SCORING CRITERIA — score each engine 0–100:
 
 4. icp_alignment (weight 10%): detect ICP from keyword modifier (emergency→urgent tone; commercial→B2B tone; general→professional/reliable); CTA tone matches ICP (e.g. emergency ICP requires urgency/fear-based CTA, not generic "call for a free estimate"); pain points addressed; emotional register of copy matches searcher intent.
 
-5. aeo_llm_retrieval (weight 10%): answer-first formatting (direct claim before explanation); FAQ with ≥4 entries; each section ≤300 words; Q&A heading structure; specific operational details (not generic filler).
+5. aeo_llm_retrieval (weight 10%): answer-first formatting (direct claim before explanation); FAQ with ≥4 entries, each opening with a direct yes/no or factual statement; question-format H3s where appropriate; each section ≤300 words; ≥1 bulleted list with outcome-first bullets; ≥1 numbered list for a process or steps; ≥1 table for comparison/tiers/coverage; specific operational facts (numbers, timeframes, named places) rather than generic filler.
 
 6. geographic_legitimacy (weight 10%): city in title+H1+opening ¶; ≥2 neighborhood references in sentence context; ≥1 landmark reference; ≥3 zip codes in visible content; geo signals in ≥3 page sections.
 
