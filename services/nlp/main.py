@@ -3518,6 +3518,7 @@ class RankabilityRequest(BaseModel):
     business_lat: Optional[float] = None
     business_lng: Optional[float] = None
     website: Optional[str] = None  # to check top-10 organic presence
+    sab_city: Optional[str] = None  # SAB only: city where GBP is physically located
 
 
 class CompetitorInfo(BaseModel):
@@ -3766,20 +3767,31 @@ async def check_rankability(request: Request, body: RankabilityRequest):
     avg_reviews = round(sum(review_counts) / len(review_counts), 1) if review_counts else None
     avg_rating = round(sum(ratings) / len(ratings), 2) if ratings else None
 
-    # ── Distance ───────────────────────────────────────────────────────────────
-    distance_miles = None
-    distance_ok = True
-    if body.business_lat and body.business_lng:
-        city_coords = await _geocode_location(body.location)
-        if city_coords:
-            distance_miles = round(_haversine_miles(
-                body.business_lat, body.business_lng,
-                city_coords[0], city_coords[1]
-            ), 1)
-            distance_ok = distance_miles <= 10.0
-
     # ── SAB auto-detection ─────────────────────────────────────────────────────
     is_sab = _infer_is_sab(body.business_address)
+
+    # ── Distance ───────────────────────────────────────────────────────────────
+    # Physical business: measure from their lat/lng to the target city center.
+    # SAB: measure from the center of their registered city to the target city center
+    #      (they hide their address, so we use sab_city supplied by the user).
+    distance_miles = None
+    distance_ok = True
+    target_coords = await _geocode_location(body.location)
+    if target_coords:
+        if is_sab and body.sab_city:
+            origin_coords = await _geocode_location(body.sab_city)
+            if origin_coords:
+                distance_miles = round(_haversine_miles(
+                    origin_coords[0], origin_coords[1],
+                    target_coords[0], target_coords[1]
+                ), 1)
+                distance_ok = distance_miles <= 10.0
+        elif not is_sab and body.business_lat and body.business_lng:
+            distance_miles = round(_haversine_miles(
+                body.business_lat, body.business_lng,
+                target_coords[0], target_coords[1]
+            ), 1)
+            distance_ok = distance_miles <= 10.0
 
     # ── Score ──────────────────────────────────────────────────────────────────
     score_data = _rankability_score(

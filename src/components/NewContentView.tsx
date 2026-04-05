@@ -76,6 +76,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const [relatedPages, setRelatedPages] = useState<Array<{ keyword: string; group: string; status: string; url?: string; composite_score?: number }> | null>(null);
   const [rankability, setRankability] = useState<RankabilityResult | null>(null);
   const [rankabilityLoading, setRankabilityLoading] = useState(false);
+  const [sabCity, setSabCity] = useState("");
   const [showPackModal, setShowPackModal] = useState(false);
   const [showCreditModal, setShowCreditModal] = useState(false);
   const [relatedLoading, setRelatedLoading] = useState(false);
@@ -212,6 +213,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     setRankabilityLoading(true);
     setRankability(null);
     try {
+      const isSab = !b.address?.trim();
       const data = await nlp.checkRankability({
         keyword: keyword.trim(),
         location: location.trim(),
@@ -223,6 +225,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         business_lat: b.latitude ?? null,
         business_lng: b.longitude ?? null,
         website: b.website,
+        sab_city: isSab && sabCity.trim() ? sabCity.trim() : undefined,
       });
       setRankability(data);
     } catch (e: any) {
@@ -1162,7 +1165,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                   {[
                     { label: "Category match", key: "category_match", max: 35 },
                     { label: "Competition barrier", key: "competition_barrier", max: 15 },
-                    { label: "Distance from city center", key: "distance", max: 20 },
+                    { label: "Distance to target city", key: "distance", max: 20 },
                     { label: "Keyword in competitor names", key: "keyword_in_competitor_names", max: 25 },
                     { label: "Appears in Google Maps", key: "in_maps_results", max: 5 },
                   ].map(({ label, key, max }) => {
@@ -1225,10 +1228,10 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                     <p className="text-amber-600">⚠ No map pack found — low local intent keyword</p>
                   )}
                   {rankability.distance_miles != null && !rankability.distance_ok && (
-                    <p className="text-red-600">✗ {rankability.distance_miles} mi from city center — proximity disadvantage</p>
+                    <p className="text-red-600">✗ {rankability.distance_miles} mi from target city — proximity disadvantage</p>
                   )}
                   {rankability.distance_miles != null && rankability.distance_ok && (
-                    <p className="text-green-700">✓ {rankability.distance_miles} mi from city center — good proximity</p>
+                    <p className="text-green-700">✓ {rankability.distance_miles} mi from target city — good proximity</p>
                   )}
                   {rankability.keyword_in_competitor_names > 0 && (
                     <p className="text-amber-600">⚠ {rankability.keyword_in_competitor_names} competitor(s) have keyword in name: {rankability.competitor_name_examples.join(", ")}</p>
@@ -1248,6 +1251,20 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             {rankability && rankability.verdict === "unknown" && (
               <div className="px-3 py-2.5 rounded-lg text-xs border bg-muted/50 text-muted-foreground">
                 {rankability.message}
+              </div>
+            )}
+            {selectedBusiness && !selectedBusiness.address?.trim() && (
+              <div className="space-y-1">
+                <p className="text-xs text-muted-foreground">
+                  Service area business detected — enter the city where your GBP is registered to calculate proximity score:
+                </p>
+                <input
+                  type="text"
+                  placeholder="e.g. Anaheim, CA"
+                  value={sabCity}
+                  onChange={e => setSabCity(e.target.value)}
+                  className="w-full text-sm border border-input rounded-md px-3 py-1.5 bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+                />
               </div>
             )}
             <div className="flex items-center gap-2">

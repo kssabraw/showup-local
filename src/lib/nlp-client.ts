@@ -222,6 +222,7 @@ export const nlp = {
       business_lat?: number | null;
       business_lng?: number | null;
       website?: string | null;
+      sab_city?: string;
     },
     signal?: AbortSignal,
   ) => nlpPost<RankabilityResult>("/check-rankability", body, signal),
