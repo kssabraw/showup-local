@@ -691,7 +691,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                           </span>
                           <Button size="sm" variant="outline" className="text-xs h-7 px-2"
                             onClick={() => handleRelatedAction({ mode: "reoptimize", keyword: item.keyword, existingUrl: item.url })}>
-                            Score <span className="ml-1 opacity-60 font-normal">2 credits</span>
+                            Score <span className="ml-1 opacity-60 font-normal">1 credit</span>
                           </Button>
                         </div>
                       ) : (
@@ -1001,11 +1001,11 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
               <Button
                 className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
                 onClick={() => runScoreForPage(checkState.page)}
-                disabled={(credits?.balance ?? 0) < 2}
-                title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
+                disabled={(credits?.balance ?? 0) < 1}
+                title={(credits?.balance ?? 0) < 1 ? "Insufficient credits" : undefined}
               >
                 Score This Page
-                <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span>
+                <span className="ml-2 text-xs opacity-70 font-normal">1 credit</span>
               </Button>
             )}
             {checkState.advisory?.suggestNew && (
@@ -1013,11 +1013,11 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                 variant="outline"
                 className="w-full font-medium"
                 onClick={() => runScoreForPage(checkState.page)}
-                disabled={(credits?.balance ?? 0) < 2}
-                title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
+                disabled={(credits?.balance ?? 0) < 1}
+                title={(credits?.balance ?? 0) < 1 ? "Insufficient credits" : undefined}
               >
                 Score existing page anyway
-                <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span>
+                <span className="ml-2 text-xs opacity-70 font-normal">1 credit</span>
               </Button>
             )}
             <div className="flex gap-2">
@@ -1075,7 +1075,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                   className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent" />
                 <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score</Button>
               </div>
-              <p className="text-xs text-muted-foreground">Scoring costs 2 credits</p>
+              <p className="text-xs text-muted-foreground">Scoring costs 1 credit</p>
             </div>
             {checkState.page.isBlogPost && (
               <div className="flex items-center gap-2 px-3 py-2 bg-orange-500/10 border border-orange-500/20 rounded-lg text-xs text-orange-600">
@@ -1128,11 +1128,11 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             <Button
               className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
               onClick={handleCreateNewPage}
-              disabled={(credits?.balance ?? 0) < 1}
-              title={(credits?.balance ?? 0) < 1 ? "Insufficient credits" : undefined}
+              disabled={(credits?.balance ?? 0) < 2}
+              title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
             >
               <Sparkles className="w-4 h-4 mr-2" /> Create New Page
-              <span className="ml-2 text-xs opacity-70 font-normal">1 credit</span>
+              <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span>
             </Button>
 
             <div className="space-y-1">
@@ -1143,7 +1143,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                   className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent" />
                 <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score</Button>
               </div>
-              <p className="text-xs text-muted-foreground">Scoring costs 2 credits</p>
+              <p className="text-xs text-muted-foreground">Scoring costs 1 credit</p>
             </div>
 
             {relatedPagePanel}

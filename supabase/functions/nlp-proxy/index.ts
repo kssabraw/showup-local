@@ -16,14 +16,14 @@ const corsHeaders = {
 // Credits charged per endpoint (0 = free)
 const ENDPOINT_CREDITS: Record<string, number> = {
   "/analyze":         2,
-  "/score-page":      2,
-  "/generate-page":   1,
-  "/reoptimize-page": 1,
+  "/score-page":      1,
+  "/generate-page":   2,
+  "/reoptimize-page": 2,
 };
 
 const ENDPOINT_DESCRIPTIONS: Record<string, string> = {
-  "/analyze":         "Competitor analysis + scoring",
-  "/score-page":      "Competitor analysis + scoring",
+  "/analyze":         "Competitor analysis",
+  "/score-page":      "Page scoring",
   "/generate-page":   "New page creation",
   "/reoptimize-page": "Page reoptimization",
 };
