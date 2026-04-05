@@ -1291,16 +1291,25 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                   <div className="px-3 pb-1">
                     <p className="text-muted-foreground mb-1.5 font-medium">Map pack competitors</p>
                     <div className="space-y-1">
-                      {rankability.competitors.map((c, i) => (
-                        <div key={i} className="flex items-center justify-between bg-muted/50 rounded px-2 py-1">
-                          <span className="truncate flex-1 font-medium">{c.name}</span>
+                      {rankability.competitors.map((c, i) => {
+                        const pos = i + 1;
+                        const isClient = rankability.in_maps_results && pos === rankability.maps_position;
+                        const rowClass = isClient
+                          ? pos <= 3
+                            ? "flex items-center justify-between bg-green-500/15 border border-green-500/30 rounded px-2 py-1"
+                            : "flex items-center justify-between bg-amber-500/15 border border-amber-500/30 rounded px-2 py-1"
+                          : "flex items-center justify-between bg-muted/50 rounded px-2 py-1";
+                        return (
+                        <div key={i} className={rowClass}>
+                          <span className={`truncate flex-1 font-medium ${isClient ? (pos <= 3 ? "text-green-700" : "text-amber-700") : ""}`}>{c.name}</span>
                           <div className="flex items-center gap-2 ml-2 flex-shrink-0 text-muted-foreground">
                             {c.review_count != null && <span>{c.review_count} reviews</span>}
                             {c.rating != null && <span>★ {c.rating}</span>}
                             {c.has_keyword_in_name && <span className="text-amber-600 font-semibold">KW</span>}
                           </div>
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                     {rankability.min_reviews_in_pack != null && (
                       <div className="text-muted-foreground mt-1.5 space-y-0.5">
