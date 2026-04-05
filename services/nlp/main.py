@@ -2735,35 +2735,39 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             candidate_pool.sort(key=_slug_match_score, reverse=True)
             candidate_pool = candidate_pool[:25]
 
-            # ── Direct URL guessing (runs if sitemap found nothing useful) ─────────
-            # Generate slug permutations from service + location words and probe them.
-            # Catches cases where sitemap discovery fails entirely.
-            if not svc_matches and not loc_matches:
-                svc_slug = "-".join(kw_words)
-                loc_slug = "-".join(loc_words[:2]) if loc_words else ""  # e.g. "newport-beach"
-                guesses = []
-                if svc_slug and loc_slug:
-                    guesses += [
-                        f"{origin}/{loc_slug}-{svc_slug}/",
-                        f"{origin}/{loc_slug}-{svc_slug}s/",
-                        f"{origin}/{svc_slug}-{loc_slug}/",
-                        f"{origin}/{svc_slug}s-{loc_slug}/",
-                    ]
-                if svc_slug:
-                    guesses += [f"{origin}/{svc_slug}/", f"{origin}/{svc_slug}s/"]
+            # ── Direct URL guessing (always runs for city+service keywords) ──────
+            # Generate slug permutations from keyword + location words and probe them.
+            # Runs unconditionally so pages missing from the sitemap (newly created,
+            # sitemap lag, XML omission) are still found via direct HEAD probe.
+            # Guessed hits are prepended so Haiku sees them first.
+            svc_slug = "-".join(kw_words)
+            loc_slug = "-".join(loc_words[:2]) if loc_words else ""  # e.g. "newport-beach"
+            guesses = []
+            if svc_slug and loc_slug:
+                guesses += [
+                    f"{origin}/{loc_slug}-{svc_slug}/",
+                    f"{origin}/{loc_slug}-{svc_slug}s/",
+                    f"{origin}/{svc_slug}-{loc_slug}/",
+                    f"{origin}/{svc_slug}s-{loc_slug}/",
+                ]
+            if svc_slug:
+                guesses += [f"{origin}/{svc_slug}/", f"{origin}/{svc_slug}s/"]
+            # Filter out guesses already in candidate_pool to avoid duplicates
+            guesses = [g for g in guesses if g not in candidate_pool and g.rstrip('/') not in candidate_pool]
 
-                async def _probe(u: str) -> Optional[str]:
-                    try:
-                        r = await client.head(u, timeout=5.0)
-                        return u if r.status_code in (200, 301, 302) else None
-                    except Exception:
-                        return None
+            async def _probe(u: str) -> Optional[str]:
+                try:
+                    r = await client.head(u, timeout=5.0)
+                    return u if r.status_code in (200, 301, 302) else None
+                except Exception:
+                    return None
 
-                probe_results = await asyncio.gather(*[_probe(g) for g in guesses])
-                guessed = [u for u in probe_results if u]
-                if guessed:
-                    logger.info(f"find-page-for-keyword: direct-guess found {guessed}")
-                    candidate_pool = guessed + candidate_pool
+            probe_results = await asyncio.gather(*[_probe(g) for g in guesses])
+            guessed = [u for u in probe_results if u]
+            if guessed:
+                logger.info(f"find-page-for-keyword: direct-guess found {guessed}")
+                # Prepend guessed hits so they rank above sitemap-discovered candidates
+                candidate_pool = guessed + [u for u in candidate_pool if u not in guessed]
 
             # ── site: search fallback ─────────────────────────────────────────────
             # If all sitemap + guessing attempts found nothing, query Google via
