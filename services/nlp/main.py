@@ -3221,32 +3221,17 @@ async def related_pages(request: Request, body: RelatedPagesRequest):
                 except Exception:
                     pass
 
-            # Step 3: For each keyword, find matching page + score concurrently
+            # Step 3: For each keyword, find matching page (no auto-scoring — user scores explicitly)
             async def _process_keyword(kw: str, group: str) -> RelatedPageItem:
-                nonlocal total_input_tokens, total_output_tokens
                 found = await _find_page_for_keyword_reuse(kw, discovered_urls, http_client)
                 if found:
-                    try:
-                        score_dict, score_tok = await _score_page_for_related(
-                            kw, body.location, found["url"],
-                            body.business_name, body.gbp_category, body.address, haiku_client,
-                        )
-                        total_input_tokens += score_tok.get("input_tokens", 0)
-                        total_output_tokens += score_tok.get("output_tokens", 0)
-                        return RelatedPageItem(
-                            keyword=kw,
-                            group=group,
-                            status="found",
-                            url=found["url"],
-                            page_title=found.get("title"),
-                            composite_score=score_dict["composite_score"],
-                            composite_status=score_dict["composite_status"],
-                            engine_scores=score_dict["engine_scores"],
-                            deficiencies=score_dict["deficiencies"],
-                        )
-                    except Exception:
-                        return RelatedPageItem(keyword=kw, group=group, status="found",
-                                               url=found["url"], page_title=found.get("title"))
+                    return RelatedPageItem(
+                        keyword=kw,
+                        group=group,
+                        status="found",
+                        url=found["url"],
+                        page_title=found.get("title"),
+                    )
                 else:
                     return RelatedPageItem(keyword=kw, group=group, status="missing")
 

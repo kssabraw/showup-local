@@ -624,14 +624,9 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                       </div>
                       {item.status === "found" ? (
                         <div className="flex items-center gap-2 shrink-0">
-                          {item.composite_score > 0 && (
-                            <span className={`text-xs ${item.composite_score >= 80 ? "text-green-500" : item.composite_score >= 60 ? "text-amber-500" : "text-red-500"}`}>
-                              Score: <span className="font-semibold">{item.composite_score}</span>
-                            </span>
-                          )}
                           <Button size="sm" variant="outline" className="text-xs h-7 px-2"
                             onClick={() => handleRelatedAction({ mode: "reoptimize", keyword: item.keyword, existingUrl: item.url })}>
-                            {item.composite_score > 0 ? "Reoptimize →" : "Score →"}
+                            Score →
                           </Button>
                         </div>
                       ) : (
