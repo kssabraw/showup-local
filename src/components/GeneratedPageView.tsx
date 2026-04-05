@@ -11,12 +11,70 @@ import DOMPurify from 'dompurify';
 import type { TokenUsage, CostBreakdown } from "@/lib/nlp-types";
 
 function formatHtml(html: string): string {
-  const block = 'p|h[1-6]|div|ul|ol|li|br|hr|section|article|header|footer|nav|main|aside|table|thead|tbody|tr|td|th|blockquote|pre|figure|figcaption|script|style';
-  return html
-    .replace(new RegExp(`</(${block})>`, 'gi'), '</$1>\n')
-    .replace(new RegExp(`(\\n?)(<(?:${block})[^>]*>)`, 'gi'), '\n$2')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  const INDENT = '  ';
+
+  const BLOCK = new Set([
+    'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'ul', 'ol', 'li', 'dl', 'dt', 'dd',
+    'div', 'section', 'article', 'header', 'footer', 'nav', 'main', 'aside',
+    'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th',
+    'blockquote', 'pre', 'figure', 'figcaption', 'script', 'style',
+    'form', 'fieldset', 'details', 'summary',
+  ]);
+
+  // These get a blank line prepended to visually separate sections
+  const SPACER = new Set([
+    'section', 'article', 'header', 'footer', 'nav', 'main', 'aside',
+    'div', 'table', 'ul', 'ol', 'blockquote', 'figure',
+    'h1', 'h2', 'h3',
+  ]);
+
+  const VOID = new Set([
+    'br', 'hr', 'img', 'input', 'link', 'meta',
+    'area', 'base', 'col', 'embed', 'param', 'source', 'track', 'wbr',
+  ]);
+
+  function serialize(node: Node, depth: number): string {
+    // Text node
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = (node.textContent ?? '').replace(/\s+/g, ' ').trim();
+      return text ? INDENT.repeat(depth) + text : '';
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+    const el = node as Element;
+    const tag = el.tagName.toLowerCase();
+    const attrs = Array.from(el.attributes).map(a => ` ${a.name}="${a.value}"`).join('');
+    const pad = INDENT.repeat(depth);
+    const spacer = SPACER.has(tag) ? '\n' : '';
+
+    // Void elements — no children, no closing tag
+    if (VOID.has(tag)) return `${spacer}${pad}<${tag}${attrs}>`;
+
+    const children = Array.from(el.childNodes);
+    const hasBlockChild = children.some(
+      c => c.nodeType === Node.ELEMENT_NODE && BLOCK.has((c as Element).tagName.toLowerCase())
+    );
+
+    // No block children → keep content on one line (preserves inline formatting)
+    if (!hasBlockChild) {
+      const inner = el.innerHTML.replace(/\s+/g, ' ').trim();
+      return `${spacer}${pad}<${tag}${attrs}>${inner}</${tag}>`;
+    }
+
+    // Block children → indent each child on its own line
+    const childLines = children
+      .map(c => serialize(c, depth + 1))
+      .filter(s => s.trim() !== '');
+    return `${spacer}${pad}<${tag}${attrs}>\n${childLines.join('\n')}\n${pad}</${tag}>`;
+  }
+
+  const doc = new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html');
+  const lines = Array.from(doc.body.childNodes)
+    .map(n => serialize(n, 0))
+    .filter(s => s.trim() !== '');
+
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 interface Props {
