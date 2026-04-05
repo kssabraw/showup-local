@@ -3509,13 +3509,15 @@ def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> floa
 
 
 def _keyword_in_name(keyword: str, business_name: str) -> bool:
-    """True if 60%+ of keyword tokens appear in business name (case-insensitive)."""
+    """True if ALL keyword tokens appear in business name (case-insensitive).
+    Requires 100% match so that e.g. 'tree service' doesn't flag a competitor
+    for the keyword 'emergency tree service' — the modifier matters.
+    """
     kw_tokens = set(re.sub(r'[^a-z0-9\s]', '', keyword.lower()).split())
     name_lower = re.sub(r'[^a-z0-9\s]', '', business_name.lower())
     if not kw_tokens:
         return False
-    matches = sum(1 for t in kw_tokens if t in name_lower)
-    return matches / len(kw_tokens) >= 0.6
+    return all(t in name_lower for t in kw_tokens)
 
 
 async def _geocode_location(location: str) -> Optional[tuple[float, float]]:
