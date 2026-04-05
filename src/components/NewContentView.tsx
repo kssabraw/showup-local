@@ -66,6 +66,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const [checkState, setCheckState] = useState<CheckState>({ status: "idle" });
   const [view, setView] = useState<ViewState>({ kind: "form" });
   const [generateProgress, setGenerateProgress] = useState(0);
+  const [contentTab, setContentTab] = useState<"new" | "saved">("new");
   const [generateStep, setGenerateStep] = useState("");
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -648,7 +649,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         )}
         {bulkDone > 0 && !bulkCreating && (
           <div className="px-4 py-3 border-t border-border">
-            <p className="text-xs text-green-600 font-medium">{bulkDone} page{bulkDone > 1 ? "s" : ""} created and saved — view them in Saved Pages below.</p>
+            <p className="text-xs text-green-600 font-medium">{bulkDone} page{bulkDone > 1 ? "s" : ""} created and saved — <button type="button" onClick={() => setContentTab("saved")} className="underline hover:no-underline">view in Saved Pages</button>.</p>
           </div>
         )}
       </div>
@@ -786,6 +787,29 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           </>
         )}
       </div>
+
+      {/* Tab switcher — only shown outside onboarding */}
+      {!isOnboarding && (
+        <div className="flex gap-1 bg-muted/40 rounded-lg p-1 w-fit">
+          {(["new", "saved"] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setContentTab(tab)}
+              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                contentTab === tab
+                  ? "bg-card text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {tab === "new" ? "New Page" : "Saved Pages"}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {contentTab === "saved" && !isOnboarding ? (
+        <SavedPagesList businesses={businesses} onOpen={(page) => { openSavedPage(page); setContentTab("new"); }} />
+      ) : (
 
       <div className="bg-card rounded-xl border border-border p-6 space-y-5">
         <h2 className="text-base font-semibold text-foreground">What Service And Area Do You Want To Rank For?</h2>
@@ -1249,11 +1273,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         )}
       </div>
 
-      {/* ── Saved Pages ── */}
-      <SavedPagesList
-        businesses={businesses}
-        onOpen={openSavedPage}
-      />
+      )} {/* end contentTab === "new" conditional */}
     </div>
     </>
   );
