@@ -1393,11 +1393,9 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
               <Button
                 className="flex-1 bg-accent text-accent-foreground hover:opacity-90 font-semibold"
                 onClick={handleCheckSite}
-                disabled={!canCheck || (credits !== undefined && (credits?.balance ?? 0) < 2)}
-                title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
+                disabled={!canCheck}
               >
                 <FileSearch className="w-4 h-4 mr-2" /> Check My Site
-                <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span>
               </Button>
             </div>
           </div>
