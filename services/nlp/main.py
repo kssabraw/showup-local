@@ -2766,8 +2766,8 @@ async def score_page(request: Request, body: ScorePageRequest):
             inline_serp = await _run_serp_analysis(body.keyword, body.location, body.location_code)
             serp_analysis_dict = inline_serp.model_dump()
         except Exception as _serp_err:
-            logger.warning(f"score-page: inline SERP analysis failed ({_serp_err}), continuing without it")
-            serp_analysis_dict = {}
+            logger.warning(f"score-page: inline SERP analysis failed ({_serp_err})")
+            raise HTTPException(status_code=503, detail="Could not fetch competitor data. Please try again in a moment.")
 
     from bs4 import BeautifulSoup as _BS
     page_html = body.page_content
@@ -2786,19 +2786,30 @@ async def score_page(request: Request, body: ScorePageRequest):
 
     user_prompt = _build_score_prompt(body.business_name, body.gbp_category, body.keyword, city, body.address, serp_ctx, page_text)
 
-    try:
-        msg = await client.messages.create(
-            model=SCORE_MODEL,
-            max_tokens=2000,
-            system=[{"type": "text", "text": _SCORE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-    except Exception as e:
-        logger.exception("Claude scoring error")
-        raise HTTPException(status_code=502, detail="Scoring service temporarily unavailable")
+    scores = None
+    token_rec = None
+    for attempt in range(2):
+        try:
+            msg = await client.messages.create(
+                model=SCORE_MODEL,
+                max_tokens=2000,
+                system=[{"type": "text", "text": _SCORE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+            token_rec = _token_record("score-page", SCORE_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
+            parsed = _parse_claude_json(msg.content[0].text)
+            if parsed:
+                scores = parsed
+                break
+            logger.warning(f"score-page: Claude returned empty/invalid JSON on attempt {attempt + 1}, {'retrying' if attempt == 0 else 'giving up'}")
+        except Exception as e:
+            logger.exception(f"Claude scoring error on attempt {attempt + 1}")
+            if attempt == 1:
+                raise HTTPException(status_code=502, detail="Scoring service temporarily unavailable. Please try again.")
 
-    token_rec = _token_record("score-page", SCORE_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
-    scores = _parse_claude_json(msg.content[0].text)
+    if not scores:
+        raise HTTPException(status_code=502, detail="Scoring service returned an invalid response. Please try again.")
+
     composite, status = _composite_from_scores(scores)
 
     return ScorePageResponse(

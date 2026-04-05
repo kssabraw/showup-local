@@ -184,6 +184,19 @@ serve(async (req: Request) => {
       duplex: "half",
     });
 
+    // Refund credits if the NLP service returned a server error
+    if (nlpResponse.status >= 500 && creditsRequired > 0) {
+      await adminClient.rpc("refund_credits", {
+        p_user_id: user.id,
+        p_amount:  creditsRequired,
+        p_endpoint: endpoint,
+      }).then(() => {
+        console.log(`Refunded ${creditsRequired} credits to ${user.id} after ${nlpResponse.status} on ${endpoint}`);
+      }).catch((err: unknown) => {
+        console.error("Credit refund failed:", err);
+      });
+    }
+
     // Forward the response (including streaming SSE responses)
     const responseHeaders = new Headers(corsHeaders);
     const contentType = nlpResponse.headers.get("Content-Type");
