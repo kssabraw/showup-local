@@ -48,6 +48,7 @@ import type { ScoreResult, TokenUsage, CostBreakdown } from "@/lib/nlp-types";
 
 type ViewState =
   | { kind: "form" }
+  | { kind: "creating" }
   | { kind: "score"; pageMatch: { url: string; title: string; h1?: string }; serpAnalysis?: AnalysisResult; initialScoreResult?: ScoreResult }
   | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; tokenUsage: Partial<TokenUsage>; costBreakdown: Partial<CostBreakdown>; isNew?: boolean }
   | { kind: "analysis"; result: AnalysisResult };
@@ -380,14 +381,17 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     abortRef.current = new AbortController();
     const signal = abortRef.current.signal;
 
-    setView({ kind: "form" });  // ensure form view is shown so the "creating" progress UI is visible
+    // kwOverride may arrive as a MouseEvent if called directly as an onClick handler — ignore it
+    const safeKwOverride = typeof kwOverride === "string" ? kwOverride : undefined;
+
+    setView({ kind: "creating" });
     setCheckState({ status: "creating" });
     setGenerateProgress(0);
     setGenerateStep("Starting…");
     setElapsedSeconds(0);
     setError("");
     elapsedRef.current = setInterval(() => setElapsedSeconds(s => s + 1), 1000);
-    const kw = kwOverride ?? keyword;
+    const kw = safeKwOverride ?? keyword;
     const b = businesses.find(b => b.id === selectedBusinessId)!;
     try {
       const stream = nlpStream<import("@/lib/nlp-types").GeneratePageResult>(
@@ -447,6 +451,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
       if (e instanceof InsufficientCreditsError) { setShowCreditModal(true); setCheckState({ status: "idle" }); return; }
       setError((e as Error).message || "Something went wrong");
       setCheckState({ status: "not_found" });
+      setView({ kind: "form" });
     } finally {
       setLoadingLabel("");
       if (elapsedRef.current) { clearInterval(elapsedRef.current); elapsedRef.current = null; }
@@ -664,6 +669,62 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   })() : null;
 
   // ── Sub-view routing ───────────────────────────────────────────────────────
+  if (view.kind === "creating") {
+    const steps = [
+      { label: "Fetching top Google results",          detail: "DataForSEO organic SERP",                                     done: generateProgress >= 40, active: generateProgress < 40 },
+      { label: "Scraping & analysing competitor pages", detail: "Reading competitor pages to find patterns and topics",         done: generateProgress >= 65, active: generateProgress >= 15 && generateProgress < 65 },
+      { label: "Generating page with Claude",           detail: "13-section structure + JSON-LD schema",                       done: generateProgress >= 100, active: generateProgress >= 65 },
+    ];
+    const mins = Math.floor(elapsedSeconds / 60);
+    const secs = elapsedSeconds % 60;
+    const elapsed = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+    return (
+      <div className="max-w-2xl mx-auto space-y-6">
+        <div>
+          <h1 className="text-2xl font-display font-bold text-foreground">Creating Your Page</h1>
+          <p className="text-muted-foreground text-sm mt-1">Hang tight — this usually takes 60–120 seconds.</p>
+        </div>
+        <div className="bg-card border border-border rounded-xl px-6 py-6 space-y-4">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span className="font-medium">Building your page… <span className="tabular-nums">{elapsed}</span></span>
+            <span className="opacity-70">Usually 60–120 seconds</span>
+          </div>
+          <div className="space-y-3">
+            {steps.map((step, i) => (
+              <div key={i} className="flex items-start gap-3">
+                <div className="mt-0.5 shrink-0">
+                  {step.done ? (
+                    <div className="w-4 h-4 rounded-full bg-green-500 flex items-center justify-center">
+                      <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 10 10"><path d="M2 5l2.5 2.5L8 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                    </div>
+                  ) : step.active ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-accent" />
+                  ) : (
+                    <div className="w-4 h-4 rounded-full border border-border" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className={`text-sm ${step.active ? "text-foreground font-medium" : step.done ? "text-muted-foreground line-through" : "text-muted-foreground"}`}>
+                    {step.label}
+                  </p>
+                  {step.active && <p className="text-xs text-muted-foreground mt-0.5">{step.detail}</p>}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden">
+            <div className="h-full bg-accent rounded-full transition-all duration-500" style={{ width: `${generateProgress}%` }} />
+          </div>
+          {generateStep && <p className="text-xs text-muted-foreground text-center">{generateStep}</p>}
+          <button onClick={cancelOperation} className="text-xs text-muted-foreground hover:text-destructive transition-colors">
+            Cancel
+          </button>
+        </div>
+        {error && <div className="bg-destructive/10 border border-destructive/20 rounded-lg px-4 py-3 text-sm text-destructive">{error}</div>}
+      </div>
+    );
+  }
+
   if (view.kind === "score") {
     return (
       <PageScoreView
