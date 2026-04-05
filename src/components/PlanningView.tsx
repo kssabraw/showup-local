@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Loader2, Search, Plus, ExternalLink } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { nlp, nlpStream } from "@/lib/nlp-client";
+import { LocationAutocomplete } from "@/components/LocationAutocomplete";
 
 interface Business {
   id: string;
@@ -49,7 +50,8 @@ export default function PlanningView({ onCreatePage }: Props) {
   const [businessesLoaded, setBusinessesLoaded] = useState(false);
   const [selectedBusinessId, setSelectedBusinessId] = useState("");
   const [keyword, setKeyword] = useState("");
-  const [location, setLocation] = useState("");
+  const [location, setLocation] = useState("");       // committed/validated
+  const [locationInput, setLocationInput] = useState(""); // raw input text
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [progressMsg, setProgressMsg] = useState("");
@@ -181,21 +183,21 @@ export default function PlanningView({ onCreatePage }: Props) {
               disabled={scanning}
             />
           </div>
-          <div className="space-y-1.5">
-            <Label>Location <span className="text-destructive">*</span></Label>
-            <Input
-              placeholder="e.g. Newport Beach, CA"
-              value={location}
-              onChange={e => setLocation(e.target.value)}
-              disabled={scanning}
-            />
-          </div>
+          <LocationAutocomplete
+            label="Location"
+            value={location}
+            inputValue={locationInput}
+            onSelect={(loc) => { setLocation(loc.name); setLocationInput(loc.name); }}
+            onInputChange={(raw) => { setLocationInput(raw); setLocation(""); }}
+            onClear={() => { setLocation(""); setLocationInput(""); }}
+            disabled={scanning}
+          />
         </div>
 
         <Button
           className="w-full"
           onClick={handleScan}
-          disabled={scanning || !selectedBusiness?.website || !keyword.trim() || !location.trim()}
+          disabled={scanning || !selectedBusiness?.website || !keyword.trim() || !location}
         >
           {scanning
             ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Scanning…</>
