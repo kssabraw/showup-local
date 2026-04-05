@@ -39,10 +39,7 @@ export function useMarkRead() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await supabase
-        .from("notifications" as any)
-        .update({ read: true })
-        .eq("id", id);
+      const { error } = await supabase.rpc("mark_notification_read" as any, { p_id: id });
       if (error) throw error;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: NOTIFICATIONS_KEY }),
@@ -53,10 +50,7 @@ export function useMarkAllRead() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async () => {
-      const { error } = await supabase
-        .from("notifications" as any)
-        .update({ read: true })
-        .eq("read", false);
+      const { error } = await supabase.rpc("mark_all_notifications_read" as any);
       if (error) throw error;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: NOTIFICATIONS_KEY }),
