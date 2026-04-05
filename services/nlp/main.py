@@ -2770,9 +2770,11 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                 candidate_pool = guessed + [u for u in candidate_pool if u not in guessed]
 
             # ── site: search fallback ─────────────────────────────────────────────
-            # If all sitemap + guessing attempts found nothing, query Google via
-            # DataForSEO with  site:{domain} {keyword} {city}  and use the results.
-            if not candidate_pool and DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD:
+            # Run when the sitemap had no keyword/location slug matches — meaning
+            # the page either isn't in the sitemap or uses an unexpected URL pattern.
+            # Direct guessing above covers predictable patterns; site: search covers
+            # anything else Google has indexed on the domain.
+            if not svc_matches and not loc_matches and DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD:
                 try:
                     city = (body.location or "").split(",")[0].strip()
                     site_query = f"site:{base_netloc} {body.keyword} {city}".strip()
