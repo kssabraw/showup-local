@@ -1693,7 +1693,7 @@ Return a JSON object with exactly this structure:
             u_rec = msg_rec.usage
             logger.info(f"Brand voice (no-site recommended) — input: {u_rec.input_tokens}, output: {u_rec.output_tokens}")
             recommended_voice = _parse(msg_rec)
-            current_voice = {}
+            current_voice = None  # No website — current voice cannot be analyzed
         except Exception as e:
             logger.error(f"Brand voice no-site recommended error: {e}")
             raise
@@ -1817,11 +1817,8 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
         if not url.startswith(('http://', 'https://')):
             url = f"https://{url}"
 
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=15.0,
-            headers=CRAWL_HEADERS,
-        ) as client:
+        # Probe the site first to catch dead links / 4xx errors
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15.0, headers=CRAWL_HEADERS) as client:
             try:
                 probe = await client.get(url, timeout=10.0)
                 if probe.status_code >= 400:
@@ -1837,44 +1834,42 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
                 )
 
             selected = await _crawl_pages_for_brand_voice(url, client, max_pages=25)
-            texts = await asyncio.gather(*[_fetch_page_text(p['url'], client) for p in selected])
 
-        page_contents = [
-            f"[{p.get('page_type', 'page')}] {p['url']}\n{text[:600]}"
-            for p, text in zip(selected, texts)
-            if text.strip()
-        ]
-        pages_sampled = len(page_contents)
-        logger.info(f"Brand voice: sampled {pages_sampled}/{len(selected)} pages for {url}")
-
-        # JS-rendered fallback — if plain HTTP found nothing, retry top pages via ScrapeOwl
-        if not page_contents and SCRAPEOWL_API_KEY:
-            logger.info(f"Brand voice: plain scrape yielded no content for {url} — retrying top 5 pages with ScrapeOwl JS render")
-            async with httpx.AsyncClient(timeout=60.0) as so_client:
-                js_pages = selected[:5]
-                js_texts = await asyncio.gather(
-                    *[_scrape_one(p['url'], so_client, render_js=True) for p in js_pages],
+        async def _scrapeowl_extract(pages: List[dict], render_js: bool) -> List[str]:
+            """Fetch pages via ScrapeOwl and extract paragraph text."""
+            async with httpx.AsyncClient() as sc:
+                htmls = await asyncio.gather(
+                    *[_scrape_one(p['url'], sc, render_js=render_js) for p in pages],
                     return_exceptions=True,
                 )
-            for p, raw_html in zip(js_pages, js_texts):
-                if not isinstance(raw_html, str) or not raw_html:
+            results = []
+            for p, html in zip(pages, htmls):
+                if not html or isinstance(html, Exception):
                     continue
-                soup = BeautifulSoup(raw_html, "html.parser")
+                soup = BeautifulSoup(html, "html.parser")
                 for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
                     tag.decompose()
-                paras = [t.get_text(" ", strip=True) for t in soup.find_all("p")]
-                paras = [t for t in paras if len(t) > 40]
-                text = " ".join(paras[:30])
+                paragraphs = [para.get_text(" ", strip=True) for para in soup.find_all("p")]
+                paragraphs = [para for para in paragraphs if len(para) > 40]
+                text = " ".join(paragraphs[:30])
                 if text.strip():
-                    page_contents.append(f"[{p.get('page_type', 'page')}] {p['url']}\n{text[:600]}")
-            pages_sampled = len(page_contents)
-            logger.info(f"Brand voice JS fallback: {pages_sampled} pages with content")
+                    results.append(f"[{p.get('page_type', 'page')}] {p['url']}\n{text[:600]}")
+            return results
 
-        if not page_contents:
-            # Both plain HTTP and ScrapeOwl JS render yielded nothing —
-            # fall back to category-based inference rather than hard-failing
-            logger.warning(f"Brand voice: no content found for {url} after JS fallback — using category inference")
-            pages_sampled = 0
+        # Tier 1: ScrapeOwl without JS (residential proxies, handles Cloudflare/WAF-protected sites)
+        logger.info(f"Brand voice: scraping {len(selected)} pages via ScrapeOwl for {url}")
+        page_contents = await _scrapeowl_extract(selected, render_js=False)
+        pages_sampled = len(page_contents)
+        logger.info(f"Brand voice: got {pages_sampled}/{len(selected)} pages (no JS) for {url}")
+
+        if not page_contents and selected:
+            # Tier 2: ScrapeOwl with JS render (handles React/Vue/Wix/Webflow sites)
+            logger.info(f"Brand voice: no text from tier 1 — retrying top 5 pages with JS render")
+            page_contents = await _scrapeowl_extract(selected[:5], render_js=True)
+            if page_contents:
+                logger.info(f"Brand voice: JS render recovered {len(page_contents)} pages for {url}")
+            else:
+                logger.warning(f"Brand voice: all scraping tiers failed for {url} — falling back to category inference")
     else:
         logger.info(f"Brand voice: no website for {body.business_name} — using category inference")
 
