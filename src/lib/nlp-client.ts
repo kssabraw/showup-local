@@ -223,6 +223,7 @@ export const nlp = {
       business_lng?: number | null;
       website?: string | null;
       sab_city?: string;
+      gbp_place_id?: string;
     },
     signal?: AbortSignal,
   ) => nlpPost<RankabilityResult>("/check-rankability", body, signal),

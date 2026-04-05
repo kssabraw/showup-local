@@ -212,6 +212,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         business_lng: b.longitude ?? null,
         website: b.website,
         sab_city: isSab && sabCity.trim() ? sabCity.trim() : undefined,
+        gbp_place_id: b.gbp_place_id ?? undefined,
       });
       setRankability(data);
     } catch (e: any) {

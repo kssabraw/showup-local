@@ -3519,6 +3519,7 @@ class RankabilityRequest(BaseModel):
     business_lng: Optional[float] = None
     website: Optional[str] = None  # to check top-10 organic presence
     sab_city: Optional[str] = None  # SAB only: city where GBP is physically located
+    gbp_place_id: Optional[str] = None  # GBP place_id for exact Maps match
 
 
 class CompetitorInfo(BaseModel):
@@ -3580,13 +3581,16 @@ async def _fetch_maps_top10(
     loc_field: dict,
     business_name: str,
     credentials: str,
+    place_id: Optional[str] = None,
 ) -> tuple[bool, int, list[dict]]:
     """
     Query DataForSEO Google Maps endpoint for top-10 results.
     Returns (business_found, position, maps_items).
-    - business_found: True if business_name appears in top-10
-    - position: rank (0 if not found)
+    - business_found: True if client business appears in top-10
+    - position: rank_group (1–10) if found, 0 otherwise
     - maps_items: full list of maps_search items for competitor/category analysis
+
+    Match priority: place_id (exact) → business_name (fuzzy, high threshold)
     """
     payload = [{
         "keyword": keyword,
@@ -3610,10 +3614,17 @@ async def _fetch_maps_top10(
                     if item.get("type") == "maps_search":
                         maps_items.append(item)
         for item in maps_items:
-            name = item.get("title", "")
             pos = item.get("rank_group") or item.get("rank_absolute") or 0
-            if business_name and _keyword_in_name(business_name, name):
+            # Prefer exact place_id match
+            if place_id and item.get("place_id") == place_id:
                 return True, int(pos), maps_items
+            # Fallback: require ALL significant tokens (len >= 5) to appear in result name
+            if business_name and not place_id:
+                name = item.get("title", "")
+                sig_tokens = [t for t in re.sub(r'[^a-z0-9\s]', '', business_name.lower()).split() if len(t) >= 5]
+                name_norm = re.sub(r'[^a-z0-9\s]', '', name.lower())
+                if sig_tokens and all(t in name_norm for t in sig_tokens):
+                    return True, int(pos), maps_items
         return False, 0, maps_items
     except Exception as e:
         logger.warning(f"Maps top-10 check failed for '{keyword}': {e}")
@@ -3652,7 +3663,7 @@ async def check_rankability(request: Request, body: RankabilityRequest):
 
     # Run SERP and Maps in parallel. SERP determines has_map_pack (organic signal only).
     # Maps top-10 is used for all competitor/category analysis regardless.
-    maps_task = _fetch_maps_top10(body.keyword, loc_field, body.business_name or "", credentials)
+    maps_task = _fetch_maps_top10(body.keyword, loc_field, body.business_name or "", credentials, place_id=body.gbp_place_id)
     serp_data, (in_maps_results, maps_position, maps_items) = await asyncio.gather(
         _fetch_serp(), maps_task
     )
@@ -3792,6 +3803,41 @@ async def check_rankability(request: Request, body: RankabilityRequest):
                 target_coords[0], target_coords[1]
             ), 1)
             distance_ok = distance_miles <= 10.0
+
+    # ── Distance hard fail ─────────────────────────────────────────────────────
+    # >10 miles from the target city = effectively impossible to rank in Maps.
+    # Return immediately, same as category mismatch.
+    if distance_miles is not None and distance_miles > 10.0:
+        logger.info(
+            f"Rankability '{body.keyword}' @ '{body.location}': "
+            f"distance hard fail — {distance_miles} mi"
+        )
+        return RankabilityResponse(
+            score=0,
+            verdict="very_difficult",
+            score_breakdown={"distance": 0},
+            has_map_pack=has_map_pack,
+            competitors=competitors[:3],
+            ranking_categories=ranking_categories,
+            category_match=category_match,
+            keyword_in_competitor_names=keyword_name_count,
+            competitor_name_examples=competitor_name_examples,
+            in_maps_results=in_maps_results,
+            maps_position=maps_position if in_maps_results else None,
+            is_sab=is_sab,
+            sab_pack_mismatch=False,
+            physical_competitors_in_pack=physical_competitor_count,
+            distance_miles=distance_miles,
+            distance_ok=False,
+            message=(
+                f"Your business is {distance_miles} miles from {body.location} — "
+                "Google Maps heavily favors businesses within 5–10 miles of the search location. "
+                "You are unlikely to rank in Maps for this keyword. "
+                "Consider targeting a city closer to your location instead."
+            ),
+            match_count=match_count,
+            total_results=len(maps_items),
+        )
 
     # ── Score ──────────────────────────────────────────────────────────────────
     score_data = _rankability_score(
