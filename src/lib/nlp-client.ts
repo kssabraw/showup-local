@@ -36,6 +36,13 @@ export class InsufficientCreditsError extends Error {
   }
 }
 
+export class InsufficientPRCreditsError extends Error {
+  constructor() {
+    super("No press release credits remaining. Purchase a pack to continue.");
+    this.name = "InsufficientPRCreditsError";
+  }
+}
+
 export class RankabilityLimitError extends Error {
   readonly limit: number;
   constructor(limit = 50) {
@@ -49,6 +56,9 @@ export class RankabilityLimitError extends Error {
 
 function throwIfInsufficientCredits(res: Response, d: Record<string, unknown>) {
   if (res.status === 402) {
+    if ((d as { code?: string }).code === "INSUFFICIENT_PR_CREDITS") {
+      throw new InsufficientPRCreditsError();
+    }
     throw new InsufficientCreditsError((d.credits_required as number) ?? 1);
   }
   if (res.status === 429 && (d as { code?: string }).code === "RANKABILITY_LIMIT_REACHED") {

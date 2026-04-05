@@ -2,9 +2,10 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader2, FileText, CheckCircle, RotateCcw, Download, Send } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { nlp, purchasePressReleasePack } from "@/lib/nlp-client";
+import { nlp, purchasePressReleasePack, InsufficientPRCreditsError } from "@/lib/nlp-client";
 import { useBusinessProfiles } from "@/hooks/useBusinessProfiles";
 import { useGeneratedPages } from "@/hooks/useGeneratedPages";
+import { useCredits } from "@/hooks/useCredits";
 import {
   usePressReleases,
   usePressReleaseReports,
@@ -299,6 +300,7 @@ export default function PressReleasesView() {
   const { data: businesses = [], isLoading: businessesLoading } = useBusinessProfiles();
   const { data: pages = [], isLoading: pagesLoading } = useGeneratedPages(selectedBusinessId);
   const { data: pressReleases = [], isLoading: prsLoading } = usePressReleases(selectedBusinessId);
+  const { data: credits } = useCredits();
   const createPR = useCreatePressRelease();
 
   const selectedBusiness = businesses.find((b) => b.id === selectedBusinessId);
@@ -328,6 +330,7 @@ export default function PressReleasesView() {
   const handleGenerate = async (values: PressReleaseFormValues) => {
     if (!selectedPageId || !selectedBusinessId || !selectedPage || !selectedBusiness) return;
 
+    try {
     // Fetch analysis data for this page
     const { data: analysis } = await supabase
       .from("keyword_analyses")
@@ -375,6 +378,17 @@ export default function PressReleasesView() {
     setSelectedPageId(null);
     setShowFormModal(false);
     setReviewingPR(pr);
+    } catch (err) {
+      if (err instanceof InsufficientPRCreditsError) {
+        // Credit was already deducted server-side before the error surfaced here
+        // (shouldn't happen — the proxy rejects before generation). Re-open pack modal.
+        setShowFormModal(false);
+        setPurchaseError("You have no press release credits. Purchase a pack to continue.");
+        setShowPackModal(true);
+      } else {
+        setPurchaseError(err instanceof Error ? err.message : "Generation failed");
+      }
+    }
   };
 
   if (reviewingPR) {
@@ -391,11 +405,19 @@ export default function PressReleasesView() {
   return (
     <>
       <div className="max-w-3xl space-y-6">
-        <div>
-          <h1 className="text-2xl font-display font-bold text-foreground">Press Releases</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Generate a press release from any page and we'll syndicate it across news outlets.
-          </p>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-display font-bold text-foreground">Press Releases</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Generate a press release from any page and we'll syndicate it across news outlets.
+            </p>
+          </div>
+          <div className="shrink-0 text-right">
+            <p className="text-xs text-muted-foreground">Press release credits</p>
+            <p className={`text-lg font-bold ${(credits?.prCredits ?? 0) === 0 ? "text-destructive" : "text-foreground"}`}>
+              {credits?.prCredits ?? 0}
+            </p>
+          </div>
         </div>
 
         {/* Business selector */}

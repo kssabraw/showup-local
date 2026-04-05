@@ -7,17 +7,18 @@ export interface CreditsData {
   bonusCredits: number;
   perMonth: number;
   plan: string;
+  prCredits: number;     // press release credits (purchased separately)
 }
 
 async function fetchCredits(): Promise<CreditsData> {
   const { data: profile, error } = await supabase
     .from("user_profiles")
-    .select("credits_balance, bonus_credits, credits_per_month, plan")
+    .select("credits_balance, bonus_credits, credits_per_month, plan, pr_credits")
     .single();
 
   if (error || !profile) {
     const { data: balance } = await supabase.rpc("get_credits");
-    return { balance: balance ?? 0, monthlyBalance: balance ?? 0, bonusCredits: 0, perMonth: 60, plan: "starter" };
+    return { balance: balance ?? 0, monthlyBalance: balance ?? 0, bonusCredits: 0, perMonth: 60, plan: "starter", prCredits: 0 };
   }
 
   const monthly = profile.credits_balance ?? 0;
@@ -28,6 +29,7 @@ async function fetchCredits(): Promise<CreditsData> {
     bonusCredits:   bonus,
     perMonth:       profile.credits_per_month,
     plan:           profile.plan,
+    prCredits:      (profile as { pr_credits?: number }).pr_credits ?? 0,
   };
 }
 

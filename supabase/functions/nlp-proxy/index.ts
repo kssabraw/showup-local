@@ -111,6 +111,35 @@ serve(async (req: Request) => {
     }
   }
 
+  // ── Press release credit check ────────────────────────────────────────────────
+  // PR credits are purchased separately ($60 / $159 pack) — not subscription credits.
+  if (endpoint === "/generate-press-release") {
+    const { data: ok, error: prErr } = await adminClient.rpc("deduct_pr_credit", {
+      p_user_id: user.id,
+    });
+
+    if (prErr) {
+      console.error("PR credit deduction error:", prErr);
+      return new Response(JSON.stringify({ error: "Could not process press release credit" }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    if (!ok) {
+      return new Response(
+        JSON.stringify({
+          error: "No press release credits remaining. Purchase a pack to continue.",
+          code: "INSUFFICIENT_PR_CREDITS",
+        }),
+        {
+          status: 402,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+  }
+
   // ── Rankability monthly cap (50 checks/month, separate from credits) ─────────
   if (endpoint === "/check-rankability") {
     const { data: allowed, error: limitError } = await adminClient.rpc(
