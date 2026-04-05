@@ -1847,16 +1847,34 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
         pages_sampled = len(page_contents)
         logger.info(f"Brand voice: sampled {pages_sampled}/{len(selected)} pages for {url}")
 
-        if not page_contents:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "Your website was reached but no readable text content was found. "
-                    "This usually means the site is JavaScript-rendered (React, Vue, etc.) "
-                    "and requires server-side rendering to be crawlable. "
-                    "Contact ShowUP support for assistance."
+        # JS-rendered fallback — if plain HTTP found nothing, retry top pages via ScrapeOwl
+        if not page_contents and SCRAPEOWL_API_KEY:
+            logger.info(f"Brand voice: plain scrape yielded no content for {url} — retrying top 5 pages with ScrapeOwl JS render")
+            async with httpx.AsyncClient(timeout=60.0) as so_client:
+                js_pages = selected[:5]
+                js_texts = await asyncio.gather(
+                    *[_scrape_one(p['url'], so_client, render_js=True) for p in js_pages],
+                    return_exceptions=True,
                 )
-            )
+            for p, raw_html in zip(js_pages, js_texts):
+                if not isinstance(raw_html, str) or not raw_html:
+                    continue
+                soup = BeautifulSoup(raw_html, "html.parser")
+                for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+                    tag.decompose()
+                paras = [t.get_text(" ", strip=True) for t in soup.find_all("p")]
+                paras = [t for t in paras if len(t) > 40]
+                text = " ".join(paras[:30])
+                if text.strip():
+                    page_contents.append(f"[{p.get('page_type', 'page')}] {p['url']}\n{text[:600]}")
+            pages_sampled = len(page_contents)
+            logger.info(f"Brand voice JS fallback: {pages_sampled} pages with content")
+
+        if not page_contents:
+            # Both plain HTTP and ScrapeOwl JS render yielded nothing —
+            # fall back to category-based inference rather than hard-failing
+            logger.warning(f"Brand voice: no content found for {url} after JS fallback — using category inference")
+            pages_sampled = 0
     else:
         logger.info(f"Brand voice: no website for {body.business_name} — using category inference")
 
