@@ -2490,7 +2490,13 @@ def _serp_context(serp_analysis: Optional[dict]) -> str:
 
     top_entities = sorted(entities, key=lambda e: e["page_spread"], reverse=True)[:15] if entities else []
 
-    parts = ["COMPETITOR SIGNAL DATA — match or exceed these targets in the corresponding zones:"]
+    parts = ["""COMPETITOR SIGNAL DATA — match or exceed these targets in the corresponding zones:
+
+NOTE: Related keywords and Google entities are two separate lists derived independently.
+Related keywords come from TF-IDF analysis of competitor page text (topical relevance signal).
+Google entities come from Google's Natural Language API (entity establishment signal).
+There may be overlap — a term like "Anaheim" can appear on both lists. If it does,
+using it once counts toward both the keyword target and the entity target for that zone."""]
 
     # Show entity list once up front so per-zone instructions can reference it
     if top_entities:
