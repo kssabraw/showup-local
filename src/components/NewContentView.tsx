@@ -447,8 +447,8 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
       }
       invalidateCredits();
     } catch (e: any) {
-      if ((e as Error).name === "AbortError") return;
-      if (e instanceof InsufficientCreditsError) { setShowCreditModal(true); setCheckState({ status: "idle" }); return; }
+      if ((e as Error).name === "AbortError") { setView({ kind: "form" }); setCheckState({ status: "idle" }); return; }
+      if (e instanceof InsufficientCreditsError) { setShowCreditModal(true); setCheckState({ status: "idle" }); setView({ kind: "form" }); return; }
       setError((e as Error).message || "Something went wrong");
       setCheckState({ status: "not_found" });
       setView({ kind: "form" });
@@ -666,9 +666,9 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   // ── Sub-view routing ───────────────────────────────────────────────────────
   if (view.kind === "creating") {
     const steps = [
-      { label: "Fetching top Google results",          detail: "DataForSEO organic SERP",                                     done: generateProgress >= 40, active: generateProgress < 40 },
+      { label: "Fetching top search results",           detail: "Pulling the top ranking pages for your keyword",              done: generateProgress >= 40, active: generateProgress < 40 },
       { label: "Scraping & analysing competitor pages", detail: "Reading competitor pages to find patterns and topics",         done: generateProgress >= 65, active: generateProgress >= 15 && generateProgress < 65 },
-      { label: "Generating page with Claude",           detail: "13-section structure + JSON-LD schema",                       done: generateProgress >= 100, active: generateProgress >= 65 },
+      { label: "Generating page",                       detail: "13-section structure + JSON-LD schema",                       done: generateProgress >= 100, active: generateProgress >= 65 },
     ];
     const mins = Math.floor(elapsedSeconds / 60);
     const secs = elapsedSeconds % 60;
@@ -1123,8 +1123,8 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         {checkState.status === "creating" && (() => {
           const steps = [
             {
-              label: "Fetching top Google results",
-              detail: "DataForSEO organic SERP",
+              label: "Fetching top search results",
+              detail: "Pulling the top ranking pages for your keyword",
               done: generateProgress >= 40,
               active: generateProgress < 40,
             },
@@ -1135,7 +1135,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
               active: generateProgress >= 15 && generateProgress < 65,
             },
             {
-              label: "Generating page with Claude",
+              label: "Generating page",
               detail: "13-section structure + JSON-LD schema",
               done: generateProgress >= 100,
               active: generateProgress >= 65,
