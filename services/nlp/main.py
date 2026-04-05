@@ -3770,9 +3770,10 @@ async def check_rankability(request: Request, body: RankabilityRequest):
             total_results=len(maps_items),
         )
 
-    # ── Review metrics ─────────────────────────────────────────────────────────
-    review_counts = [c.review_count for c in competitors if c.review_count is not None]
-    ratings = [c.rating for c in competitors if c.rating is not None]
+    # ── Review metrics (top 3 only — mirrors the visible 3-pack) ───────────────
+    top3 = competitors[:3]
+    review_counts = [c.review_count for c in top3 if c.review_count is not None]
+    ratings = [c.rating for c in top3 if c.rating is not None]
     min_reviews = min(review_counts) if review_counts else None
     max_reviews = max(review_counts) if review_counts else None
     avg_reviews = round(sum(review_counts) / len(review_counts), 1) if review_counts else None
