@@ -205,14 +205,18 @@ function PressReleaseReview({
                   <p className="text-sm font-medium text-foreground">{report.pdf_filename}</p>
                   <p className="text-xs text-muted-foreground">{new Date(report.uploaded_at).toLocaleDateString()}</p>
                 </div>
-                <a
-                  href={report.pdf_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <button
+                  onClick={async () => {
+                    const { data, error } = await supabase.storage
+                      .from("press-release-reports")
+                      .createSignedUrl(report.pdf_url, 3600);
+                    if (error || !data?.signedUrl) return;
+                    window.open(data.signedUrl, "_blank", "noopener,noreferrer");
+                  }}
                   className="flex items-center gap-1.5 text-xs font-medium text-accent hover:opacity-80 transition-opacity"
                 >
                   <Download className="w-3.5 h-3.5" /> Download
-                </a>
+                </button>
               </div>
             ))}
           </div>

@@ -66,6 +66,7 @@ serve(async (req: Request) => {
     "/score-page", "/generate-page", "/reoptimize-page",
     "/find-page-for-keyword", "/related-pages", "/check-rankability",
     "/plan-pages", "/health", "/generate-social-posts",
+    "/generate-press-release",
   ];
   if (!allowedEndpoints.includes(endpoint)) {
     return new Response(JSON.stringify({ error: "Not found" }), {

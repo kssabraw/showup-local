@@ -221,18 +221,14 @@ export function useUploadReport() {
         .upload(path, file, { contentType: "application/pdf" });
       if (uploadErr) throw uploadErr;
 
-      const { data: { publicUrl } } = supabase.storage
-        .from("press-release-reports")
-        .getPublicUrl(path);
-
       const { data: { user: adminUser } } = await supabase.auth.getUser();
 
-      // Insert report record
+      // Store the storage path (not a public URL) — download links use signed URLs
       const { error: insertErr } = await supabase
         .from("press_release_reports" as any)
         .insert({
           press_release_id: pressReleaseId,
-          pdf_url: publicUrl,
+          pdf_url: path,
           pdf_filename: file.name,
           uploaded_by: adminUser?.id ?? null,
         });
