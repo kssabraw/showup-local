@@ -40,7 +40,6 @@ type CheckState =
   | { status: "idle" }
   | { status: "scanning" }
   | { status: "found"; page: { url: string; title: string; h1?: string; isBlogPost?: boolean }; advisory?: PageAdvisory }
-  | { status: "scoring"; page: { url: string; title: string; h1?: string; isBlogPost?: boolean } }
   | { status: "high_score"; page: { url: string; title: string; isBlogPost?: boolean }; score: number }
   | { status: "not_found" }
   | { status: "creating" };
@@ -372,48 +371,9 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     setCheckState({ status: "found", page: foundPage, advisory });
   };
 
-  const runScoreForPage = async (pageToScore: { url: string; title: string; h1?: string; isBlogPost?: boolean }) => {
-    const b = businesses.find(b => b.id === selectedBusinessId);
-    if (!b) return;
-
-    abortRef.current = new AbortController();
-    const signal = abortRef.current.signal;
-
-    setCheckState({ status: "scoring", page: pageToScore });
-    setError("");
-    try {
-      const [serpData, scoreData] = await Promise.all([
-        runAnalysisFor(keyword, location, locationCode, signal),
-        nlp.scorePage({
-          keyword: keyword.trim(),
-          location: location.trim(),
-          page_url: pageToScore.url,
-          business_name: b.business_name,
-          gbp_category: b.gbp_category,
-          address: b.address,
-        }, signal),
-      ]);
-      await saveTokenUsage(scoreData.token_usage);
-      await saveAnalysisToSupabase(serpData);
-
-      if (scoreData.composite_score >= 90) {
-        setCheckState({ status: "high_score", page: pageToScore, score: scoreData.composite_score });
-      } else {
-        setView({
-          kind: "score",
-          pageMatch: pageToScore,
-          serpAnalysis: serpData,
-          initialScoreResult: scoreData,
-        });
-        setCheckState({ status: "idle" });
-      }
-      invalidateCredits();
-    } catch (e: any) {
-      if (e.name === "AbortError") return;
-      if (e instanceof InsufficientCreditsError) { setShowCreditModal(true); setCheckState({ status: "idle" }); return; }
-      setError(e.message || "Scoring failed");
-      setCheckState({ status: "idle" });
-    }
+  const runScoreForPage = (pageToScore: { url: string; title: string; h1?: string; isBlogPost?: boolean }) => {
+    setView({ kind: "score", pageMatch: pageToScore });
+    setCheckState({ status: "idle" });
   };
 
   const handleCreateNewPage = async (kwOverride?: string) => {
@@ -577,7 +537,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     runScoreForPage({ url: u, title: u });
   };
 
-  const handleRelatedAction = async ({
+  const handleRelatedAction = ({
     mode,
     keyword: relKw,
     existingUrl,
@@ -590,44 +550,15 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     }
 
     setKeyword(relKw);
-    setView({ kind: "form" });
 
-    // mode === "reoptimize" — run analysis + score the existing page
+    // mode === "reoptimize" — navigate to score view; user scores manually from there
     if (!existingUrl) {
+      setView({ kind: "form" });
       setCheckState({ status: "not_found" });
       return;
     }
 
-    const b = businesses.find(b => b.id === selectedBusinessId);
-    if (!b) return;
-
-    setCheckState({ status: "scoring", page: { url: existingUrl, title: existingUrl } });
-    try {
-      const [serpData, scoreData] = await Promise.all([
-        runAnalysisFor(relKw, location, locationCode),
-        nlp.scorePage({
-          keyword: relKw.trim(),
-          location: location.trim(),
-          page_url: existingUrl,
-          business_name: b.business_name,
-          gbp_category: b.gbp_category,
-          address: b.address,
-        }),
-      ]);
-      await saveTokenUsage(scoreData.token_usage);
-      await saveAnalysisToSupabase(serpData);
-
-      setView({
-        kind: "score",
-        pageMatch: { url: existingUrl, title: existingUrl },
-        serpAnalysis: serpData,
-        initialScoreResult: scoreData,
-      });
-      setCheckState({ status: "idle" });
-    } catch (e: any) {
-      setError((e as Error).message || "Failed to load page score");
-      setCheckState({ status: "idle" });
-    }
+    setView({ kind: "score", pageMatch: { url: existingUrl, title: existingUrl } });
   };
 
   const selectedBusiness = businesses.find(b => b.id === selectedBusinessId);
@@ -687,12 +618,14 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                       </div>
                       {item.status === "found" ? (
                         <div className="flex items-center gap-2 shrink-0">
-                          <span className={`text-xs font-semibold ${item.composite_score >= 80 ? "text-green-500" : item.composite_score >= 60 ? "text-amber-500" : "text-red-500"}`}>
-                            {item.composite_score > 0 ? item.composite_score : "–"}
-                          </span>
+                          {item.composite_score > 0 && (
+                            <span className={`text-xs ${item.composite_score >= 80 ? "text-green-500" : item.composite_score >= 60 ? "text-amber-500" : "text-red-500"}`}>
+                              Score: <span className="font-semibold">{item.composite_score}</span>
+                            </span>
+                          )}
                           <Button size="sm" variant="outline" className="text-xs h-7 px-2"
                             onClick={() => handleRelatedAction({ mode: "reoptimize", keyword: item.keyword, existingUrl: item.url })}>
-                            Score <span className="ml-1 opacity-60 font-normal">1 credit</span>
+                            {item.composite_score > 0 ? "Reoptimize →" : "Score →"}
                           </Button>
                         </div>
                       ) : (
@@ -799,7 +732,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     );
   }
 
-  const isChecking = checkState.status === "scanning" || checkState.status === "scoring" || checkState.status === "found";
+  const isChecking = checkState.status === "scanning" || checkState.status === "found";
 
   // ── Main form ──────────────────────────────────────────────────────────────
   const handleCreditPurchase = async (pack: { id: "25" | "60" | "150" }) => {
@@ -1002,11 +935,8 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
               <Button
                 className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
                 onClick={() => runScoreForPage(checkState.page)}
-                disabled={(credits?.balance ?? 0) < 1}
-                title={(credits?.balance ?? 0) < 1 ? "Insufficient credits" : undefined}
               >
-                Score This Page
-                <span className="ml-2 text-xs opacity-70 font-normal">1 credit</span>
+                View & Score This Page
               </Button>
             )}
             {checkState.advisory?.suggestNew && (
@@ -1014,11 +944,8 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                 variant="outline"
                 className="w-full font-medium"
                 onClick={() => runScoreForPage(checkState.page)}
-                disabled={(credits?.balance ?? 0) < 1}
-                title={(credits?.balance ?? 0) < 1 ? "Insufficient credits" : undefined}
               >
-                Score existing page anyway
-                <span className="ml-2 text-xs opacity-70 font-normal">1 credit</span>
+                View & score existing page instead
               </Button>
             )}
             <div className="flex gap-2">
@@ -1026,7 +953,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                 onChange={e => setManualUrl(e.target.value)}
                 onKeyDown={e => e.key === "Enter" && handleScoreManualUrl()}
                 className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent" />
-              <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score <span className="ml-1 opacity-60 font-normal">2cr</span></Button>
+              <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score →</Button>
             </div>
             <button onClick={() => setCheckState({ status: "not_found" })}
               className="w-full text-xs text-muted-foreground hover:text-foreground text-center py-1 transition-colors">
@@ -1035,29 +962,6 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           </div>
         )}
 
-        {/* Scoring state */}
-        {checkState.status === "scoring" && (
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-2 px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs text-amber-600">
-              <span className="flex items-center gap-2 min-w-0">
-                <FileSearch className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">Found: <a href={checkState.page.url} target="_blank" rel="noopener noreferrer" className="underline font-medium">{checkState.page.title}</a></span>
-              </span>
-            </div>
-            {checkState.page.isBlogPost && (
-              <div className="flex items-center gap-2 px-3 py-2 bg-orange-500/10 border border-orange-500/20 rounded-lg text-xs text-orange-600">
-                <span>⚠️ This appears to be a blog post, not a service page. Consider creating a dedicated service page for this keyword.</span>
-              </div>
-            )}
-            <div className="px-4 py-3 bg-muted/30 rounded-lg space-y-2">
-              <div className="flex items-center gap-3 text-sm text-muted-foreground">
-                <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-                <span>Fetching competitor data and scoring this page… <span className="opacity-60 text-xs">(usually 20–40s)</span></span>
-              </div>
-              <button onClick={cancelOperation} className="text-xs text-muted-foreground hover:text-destructive transition-colors">Cancel</button>
-            </div>
-          </div>
-        )}
 
         {/* High score — well optimized */}
         {checkState.status === "high_score" && (

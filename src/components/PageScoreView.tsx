@@ -220,12 +220,12 @@ export default function PageScoreView({
           <Button
             className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
             onClick={runScore}
-            disabled={scoring || (credits !== undefined && (credits?.balance ?? 0) < 2)}
-            title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
+            disabled={scoring || (credits !== undefined && (credits?.balance ?? 0) < 1)}
+            title={(credits?.balance ?? 0) < 1 ? "Insufficient credits" : undefined}
           >
             {scoring
               ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{serp_analysis ? "Scoring page…" : "Analyzing competitors…"}</>
-              : <>"Score This Page" <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span></>}
+              : <>Score This Page <span className="ml-2 text-xs opacity-70 font-normal">1 credit</span></>}
           </Button>
           {scoring && (
             <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
