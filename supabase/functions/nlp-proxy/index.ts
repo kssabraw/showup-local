@@ -177,6 +177,7 @@ serve(async (req: Request) => {
       headers: {
         "Content-Type": "application/json",
         "X-API-Key": NLP_API_KEY,
+        "X-User-ID": user.id,
       },
       body: req.method !== "GET" ? req.body : undefined,
       // @ts-ignore - Deno supports duplex streaming

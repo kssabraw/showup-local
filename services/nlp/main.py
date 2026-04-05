@@ -66,10 +66,14 @@ except Exception as e:
 app = FastAPI()
 
 # ── Rate limiting ──────────────────────────────────────────────────────────────
-# Behind Railway's reverse proxy, get_remote_address returns the proxy IP, making
-# rate limits apply globally rather than per-client. Use X-Forwarded-For instead,
-# which Railway sets to the real client IP and users cannot spoof past the proxy.
+# All requests arrive via the Supabase nlp-proxy edge function, so X-Forwarded-For
+# is the Supabase server IP — useless for per-client limiting. The proxy sets
+# X-User-ID to the authenticated Supabase user ID, which we use as the rate limit
+# key so each user gets their own independent bucket.
 def _real_client_ip(request: Request) -> str:
+    user_id = request.headers.get("X-User-ID", "")
+    if user_id:
+        return user_id
     xff = request.headers.get("X-Forwarded-For", "")
     if xff:
         return xff.split(",")[0].strip()
@@ -1497,7 +1501,7 @@ Return only valid JSON, no markdown or explanation."""
 
 
 @app.post('/analyze-business', response_model=BusinessAnalysisResponse, dependencies=[Depends(verify_api_key)])
-@limiter.limit("20/minute")
+@limiter.limit("5/minute")
 async def analyze_business(request: Request, body: BusinessAnalysisRequest):
     """
     Phase 1 business setup pipeline:
@@ -1795,7 +1799,7 @@ Return a JSON object with exactly this structure:
 
 
 @app.post('/analyze-brand-voice', response_model=BrandVoiceResponse, dependencies=[Depends(verify_api_key)])
-@limiter.limit("20/minute")
+@limiter.limit("5/minute")
 async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
     """
     Brand voice pipeline:
@@ -2412,7 +2416,7 @@ class FindPageResponse(BaseModel):
     is_blog_post: bool = False
 
 @app.post('/find-page-for-keyword', response_model=FindPageResponse, dependencies=[Depends(verify_api_key)])
-@limiter.limit("20/minute")
+@limiter.limit("10/minute")
 async def find_page_for_keyword(request: Request, body: FindPageRequest):
     """
     Lightweight site scan: check if the business has a page targeting the keyword.
