@@ -1067,12 +1067,15 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                 <span className="truncate">Found: <a href={checkState.page.url} target="_blank" rel="noopener noreferrer" className="underline font-medium">{checkState.page.title}</a></span>
               </span>
             </div>
-            <div className="flex gap-2">
-              <input type="url" placeholder="Or score a specific URL…" value={manualUrl}
-                onChange={e => setManualUrl(e.target.value)}
-                onKeyDown={e => e.key === "Enter" && handleScoreManualUrl()}
-                className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent" />
-              <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score <span className="ml-1 opacity-60 font-normal">2cr</span></Button>
+            <div className="space-y-1">
+              <div className="flex gap-2">
+                <input type="url" placeholder="Or score a different URL…" value={manualUrl}
+                  onChange={e => setManualUrl(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && handleScoreManualUrl()}
+                  className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent" />
+                <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score</Button>
+              </div>
+              <p className="text-xs text-muted-foreground">Scoring costs 2 credits</p>
             </div>
             {checkState.page.isBlogPost && (
               <div className="flex items-center gap-2 px-3 py-2 bg-orange-500/10 border border-orange-500/20 rounded-lg text-xs text-orange-600">
@@ -1132,12 +1135,15 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
               <span className="ml-2 text-xs opacity-70 font-normal">1 credit</span>
             </Button>
 
-            <div className="flex gap-2">
-              <input type="url" placeholder="Or score a specific URL…" value={manualUrl}
-                onChange={e => setManualUrl(e.target.value)}
-                onKeyDown={e => e.key === "Enter" && handleScoreManualUrl()}
-                className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent" />
-              <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score <span className="ml-1 opacity-60 font-normal">2cr</span></Button>
+            <div className="space-y-1">
+              <div className="flex gap-2">
+                <input type="url" placeholder="Or score a different URL…" value={manualUrl}
+                  onChange={e => setManualUrl(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && handleScoreManualUrl()}
+                  className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent" />
+                <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score</Button>
+              </div>
+              <p className="text-xs text-muted-foreground">Scoring costs 2 credits</p>
             </div>
 
             {relatedPagePanel}
