@@ -338,7 +338,7 @@ export default function PageScoreView({
                 >
                   {reoptimizing
                     ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Reoptimizing…</>
-                    : <>"Reoptimize This Page" <span className="ml-2 text-xs opacity-70 font-normal">1 credit</span></>}
+                    : <>"Reoptimize This Page" <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span></>}
                 </Button>
                 {reoptimizing && (
                   <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
