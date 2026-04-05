@@ -3579,10 +3579,13 @@ async def _fetch_maps_top10(
     loc_field: dict,
     business_name: str,
     credentials: str,
-) -> tuple[bool, int]:
+) -> tuple[bool, int, bool]:
     """
-    Query DataForSEO Google Maps endpoint for top-10 results and check if
-    business_name appears. Returns (found, position) — position 0 if not found.
+    Query DataForSEO Google Maps endpoint for top-10 results.
+    Returns (business_found, position, has_any_results).
+    - business_found: True if business_name appears in top-10
+    - position: rank (0 if not found)
+    - has_any_results: True if the Maps pack exists at all (≥1 result returned)
     """
     payload = [{
         "keyword": keyword,
@@ -3599,17 +3602,22 @@ async def _fetch_maps_top10(
             )
             resp.raise_for_status()
             data = resp.json()
+        maps_items = []
         for task in (data.get("tasks") or []):
             for result in (task.get("result") or []):
                 for item in (result.get("items") or []):
                     if item.get("type") == "maps_search":
-                        name = item.get("title", "")
-                        pos = item.get("rank_absolute") or item.get("rank_group") or 0
-                        if _keyword_in_name(business_name, name):
-                            return True, int(pos)
+                        maps_items.append(item)
+        has_any = len(maps_items) > 0
+        for item in maps_items:
+            name = item.get("title", "")
+            pos = item.get("rank_absolute") or item.get("rank_group") or 0
+            if business_name and _keyword_in_name(business_name, name):
+                return True, int(pos), has_any
+        return False, 0, has_any
     except Exception as e:
         logger.warning(f"Maps top-10 check failed for '{keyword}': {e}")
-    return False, 0
+    return False, 0, False
 
 
 @app.post('/check-rankability', response_model=RankabilityResponse, dependencies=[Depends(verify_api_key)])
@@ -3642,16 +3650,11 @@ async def check_rankability(request: Request, body: RankabilityRequest):
             resp.raise_for_status()
             return resp.json()
 
-    maps_task = _fetch_maps_top10(body.keyword, loc_field, body.business_name or "", credentials) \
-        if body.business_name else None
-
-    if maps_task:
-        serp_data, (in_maps_results, maps_position) = await asyncio.gather(
-            _fetch_serp(), maps_task
-        )
-    else:
-        serp_data = await _fetch_serp()
-        in_maps_results, maps_position = False, 0
+    # Always run the Maps fetch — it's the authoritative source for has_map_pack
+    maps_task = _fetch_maps_top10(body.keyword, loc_field, body.business_name or "", credentials)
+    serp_data, (in_maps_results, maps_position, maps_has_results) = await asyncio.gather(
+        _fetch_serp(), maps_task
+    )
 
     # Parse SERP items
     organic_items: List[dict] = []
@@ -3666,7 +3669,9 @@ async def check_rankability(request: Request, body: RankabilityRequest):
                     local_pack_items.append(item)
 
     # ── Local pack analysis ────────────────────────────────────────────────────
-    has_map_pack = len(local_pack_items) > 0
+    # Use Maps endpoint as the authoritative source — organic SERP doesn't reliably
+    # return local_pack items due to data-center variation.
+    has_map_pack = maps_has_results or len(local_pack_items) > 0
     competitors: List[CompetitorInfo] = []
     category_counts: Dict[str, int] = {}
     keyword_name_count = 0
