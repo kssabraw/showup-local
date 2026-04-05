@@ -3611,7 +3611,7 @@ async def _fetch_maps_top10(
                         maps_items.append(item)
         for item in maps_items:
             name = item.get("title", "")
-            pos = item.get("rank_absolute") or item.get("rank_group") or 0
+            pos = item.get("rank_group") or item.get("rank_absolute") or 0
             if business_name and _keyword_in_name(business_name, name):
                 return True, int(pos), maps_items
         return False, 0, maps_items

@@ -1236,9 +1236,10 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                   {rankability.keyword_in_competitor_names > 0 && (
                     <p className="text-amber-600">⚠ {rankability.keyword_in_competitor_names} competitor(s) have keyword in name: {rankability.competitor_name_examples.join(", ")}</p>
                   )}
-                  {rankability.in_maps_results && (
-                    <p className="text-green-700">✓ Business appears at position {rankability.maps_position} in Google Maps top 10</p>
-                  )}
+                  {rankability.in_maps_results
+                    ? <p className="text-green-700">✓ Business appears at position {rankability.maps_position} in Google Maps top 10</p>
+                    : <p className="text-red-600">✗ Business not found in Google Maps top 10 for this keyword</p>
+                  }
                   {rankability.category_match === "none" && (
                     <p className="text-red-600">✗ GBP category mismatch — pack uses different categories</p>
                   )}
