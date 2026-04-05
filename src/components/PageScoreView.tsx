@@ -212,7 +212,7 @@ export default function PageScoreView({
       {!scoreResult && (
         <div className="bg-card rounded-xl border border-border p-6 space-y-4">
           <p className="text-sm text-muted-foreground">
-            Score this page against all 7 SEO engines using the competitor SERP data as benchmarks.
+            Score this page against 7 SEO benchmarks using our proprietary data processing techniques.
           </p>
           {error && (
             <div className="bg-destructive/10 border border-destructive/20 rounded-lg px-4 py-3 text-sm text-destructive">{error}</div>
