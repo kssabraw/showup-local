@@ -1949,13 +1949,23 @@ optimised for Answer Engine Optimisation. Follow all of them in every section.
    - Include what the customer does AND what [Brand] does at each step
    - 3–5 steps is ideal; never exceed 7
 
-7. TABLES — use <table><thead><tbody> for comparisons, tiers, coverage areas, or response times:
+7. TABLES — use <table><thead><tbody> only when content is genuinely comparative or multi-attribute.
+   Do NOT force a table where a list or prose is more natural.
+   USE a table when the page has data that fits 2–4 columns and ≥3 rows, such as:
+   - Service tiers (e.g. trim vs. removal vs. emergency) with price range, timeline, availability
+   - Response time by area/neighbourhood
+   - What's included vs. excluded for a service
+   - Side-by-side comparison of two or more service types
+   DO NOT use a table for:
+   - A simple list of services (use <ul> instead)
+   - FAQ entries (question/answer is not tabular)
+   - Step-by-step processes (use <ol> instead)
+   - Geographic coverage lists (use prose or <ul> instead)
+   When you do use a table:
    - Column headers must be specific (never "Option A / Option B")
-   - Include at least one locally-relevant column where possible (e.g. city/area, response time)
+   - Include a locally-relevant column where it fits naturally (e.g. city, response time)
    - Keep to 2–4 columns; never exceed 6
-   - Good table uses: service tier comparison, response time by area, what's included vs excluded,
-     pricing ranges by job type, before/after process comparison
-   - Every table must have a preceding <p> sentence introducing what it shows
+   - Precede every table with a <p> sentence introducing what it shows
 
 8. SPECIFIC FACTS OVER VAGUE CLAIMS — LLMs cite specificity, not generalities:
    ✗ "We respond quickly."              → ✓ "Crews arrive within 2–4 hours for Anaheim emergencies."
@@ -2094,7 +2104,7 @@ SCORING CRITERIA — score each engine 0–100:
 
 4. icp_alignment (weight 10%): detect ICP from keyword modifier (emergency→urgent tone; commercial→B2B tone; general→professional/reliable); CTA tone matches ICP (e.g. emergency ICP requires urgency/fear-based CTA, not generic "call for a free estimate"); pain points addressed; emotional register of copy matches searcher intent.
 
-5. aeo_llm_retrieval (weight 10%): answer-first formatting (direct claim before explanation); FAQ with ≥4 entries, each opening with a direct yes/no or factual statement; question-format H3s where appropriate; each section ≤300 words; ≥1 bulleted list with outcome-first bullets; ≥1 numbered list for a process or steps; ≥1 table for comparison/tiers/coverage; specific operational facts (numbers, timeframes, named places) rather than generic filler.
+5. aeo_llm_retrieval (weight 10%): answer-first formatting (direct claim before explanation); FAQ with ≥4 entries, each opening with a direct yes/no or factual statement; question-format H3s where appropriate; each section ≤300 words; ≥1 bulleted list with outcome-first bullets; ≥1 numbered list for a process or steps; tables used where content is genuinely comparative (service tiers, response times, inclusions) — penalise only if comparative data is present but no table was used; specific operational facts (numbers, timeframes, named places) rather than generic filler.
 
 6. geographic_legitimacy (weight 10%): city in title+H1+opening ¶; ≥2 neighborhood references in sentence context; ≥1 landmark reference; ≥3 zip codes in visible content; geo signals in ≥3 page sections.
 
