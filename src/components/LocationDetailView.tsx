@@ -867,7 +867,7 @@ const LocationDetailView = ({
       {activeTab === "Brand Voice" && (() => {
         const bv = business.brand_voice;
         // Support both new format ({ current_voice, recommended_voice, ... }) and legacy flat format
-        const isNewFormat = bv && !!bv.current_voice;
+        const isNewFormat = bv && ('recommended_voice' in bv || 'current_voice' in bv);
         const currentVoice = isNewFormat ? bv.current_voice : bv;
         const recommendedVoice = isNewFormat ? bv.recommended_voice : null;
         const recommendedAccepted: boolean | null = isNewFormat ? bv.recommended_accepted ?? null : null;
@@ -992,7 +992,13 @@ const LocationDetailView = ({
                 </p>
               )}
 
-              {bv && !editingBrandVoice && renderVoiceProfile(currentVoice)}
+              {bv && !editingBrandVoice && (
+                currentVoice && typeof currentVoice === 'object' && Object.keys(currentVoice).length > 0
+                  ? renderVoiceProfile(currentVoice)
+                  : isNewFormat
+                    ? <p className="text-sm text-muted-foreground italic py-2">No website content was found — current brand voice could not be analyzed. See Recommended Brand Voice below.</p>
+                    : null
+              )}
 
               {/* Edit mode */}
               {editingBrandVoice && brandVoiceDraft && (

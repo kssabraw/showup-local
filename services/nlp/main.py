@@ -1675,7 +1675,7 @@ Return a JSON object with exactly this structure:
             u_rec = msg_rec.usage
             logger.info(f"Brand voice (no-site recommended) — input: {u_rec.input_tokens}, output: {u_rec.output_tokens}")
             recommended_voice = _parse(msg_rec)
-            current_voice = {}
+            current_voice = None  # No website — current voice cannot be analyzed
         except Exception as e:
             logger.error(f"Brand voice no-site recommended error: {e}")
             raise
