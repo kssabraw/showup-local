@@ -391,7 +391,7 @@ export default function GeneratedPageView({
               : tab === "related" ? "Related Pages"
               : tab === "raw-text" ? "Raw Text"
               : tab === "social"
-                ? <span className="flex items-center gap-1.5">Social Posts {socialLoading && <Loader2 className="w-3 h-3 animate-spin" />}</span>
+                ? <span className="flex items-center gap-1.5">GBP Posts {socialLoading && <Loader2 className="w-3 h-3 animate-spin" />}</span>
                 : tab.charAt(0).toUpperCase() + tab.slice(1)}
           </button>
         ))}
