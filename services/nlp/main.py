@@ -2123,26 +2123,27 @@ HARD RULES — NEVER:
 - Use vague differentiators ("trusted", "professional", "high quality") without a mechanism
 - Invent or guess phone numbers, addresses, hours, zip codes, street names, or landmarks not explicitly provided in the business data"""
 
-_REOPT_SYSTEM_PROMPT = """You are an expert local SEO content writer. Fix the SEO deficiencies in the existing page by:
-1. Updating text content in existing HTML elements (words between tags, SEO attributes)
-2. Adding any entirely missing sections as new HTML appended after the existing content
+_REOPT_SYSTEM_PROMPT = """You are an expert local SEO content writer. Fix the SEO deficiencies in the existing page while keeping its design intact.
 
-RULE 1 — PRESERVE HTML STRUCTURE EXACTLY:
-Do not change any HTML tag names, CSS classes, IDs, data-* attributes, href, src, or any non-content attributes.
-Do not remove, reorder, or restructure any existing HTML elements.
-Only change: text between tags, alt text, title attributes, meta content values, og: tag content, aria-label values, and JSON-LD schema text values.
+WHAT YOU CAN CHANGE:
+- Text between existing HTML tags (rewrite copy freely)
+- SEO attributes: alt, title, meta[content], og:title, og:description, aria-label, JSON-LD schema text values
+- Add new HTML elements (paragraphs, lists, headings, sections) inserted wherever they fit most naturally in the page flow
 
-RULE 2 — ADD MISSING SECTIONS:
-If a deficiency calls for a section that doesn't exist in the page (e.g. FAQ, local geo section, schema markup),
-append it after the last existing content block using clean semantic HTML:
-  <section id="[section-id]">
-    <h2>...</h2>
-    [content]
-  </section>
-Use the same AEO writing rules below for any new sections you add.
+WHAT YOU MUST NOT CHANGE:
+- Existing HTML tag names, CSS classes, IDs, data-* attributes, href, src, or any non-content attributes
+- Do not remove or reorder any existing HTML elements
 
-AEO / LLM WRITING RULES — apply to all text changes and new sections:
-1. ANSWER-FIRST: Open every section, paragraph, and FAQ answer with a direct claim.
+PLACEMENT RULES FOR NEW CONTENT:
+- Insert new content where it reads most naturally — not always at the bottom
+- New paragraphs or lists can be added inside or after an existing relevant section
+- A missing FAQ? Insert it after the main service description, not at the very end
+- A missing local geo block? Insert it near any existing location references
+- Think about page flow: intro → services → social proof → local → FAQ → CTA
+- New elements use semantic HTML (<section>, <h2>, <ul>, <p> etc.) — the site's CSS will style them
+
+AEO / LLM WRITING RULES — apply to all text and any new content added:
+1. ANSWER-FIRST: Open every section and FAQ answer with a direct claim.
 2. ONE IDEA PER PARAGRAPH: Each <p> covers exactly one point. 3–5 sentences max.
 3. QUESTION-FORMAT H3s: Where natural, write H3s as questions a real searcher would type.
 4. DIRECT FAQ ANSWERS: Every FAQ answer opens with a direct yes/no or factual statement.
@@ -2154,13 +2155,13 @@ AEO / LLM WRITING RULES — apply to all text changes and new sections:
 10. SECTION LENGTH ≤300 words.
 
 HARD RULES — NEVER:
-- Change any CSS class, ID, or HTML attribute
+- Change any CSS class, ID, or HTML attribute on existing elements
 - Remove or reorder existing HTML elements
 - Use "near me" literally in body content
 - Fabricate reviews or invent addresses/phone numbers not provided
 - Include placeholder text like [Insert here]
 
-Return the complete page HTML with changes applied. No markdown, no explanations."""
+Return the complete page HTML with all changes applied. No markdown, no explanations."""
 
 _SCORE_SYSTEM_PROMPT = """You are an expert local SEO analyst. Score the provided page against all 7 engines below.
 
