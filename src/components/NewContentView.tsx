@@ -1016,6 +1016,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
               className="w-full text-xs text-muted-foreground hover:text-foreground text-center py-1 transition-colors">
               No page exists — create a new one instead
             </button>
+            {relatedPagePanel}
           </div>
         )}
 
