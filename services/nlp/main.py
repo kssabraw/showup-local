@@ -3669,9 +3669,7 @@ async def check_rankability(request: Request, body: RankabilityRequest):
                     local_pack_items.append(item)
 
     # ── Local pack analysis ────────────────────────────────────────────────────
-    # Use Maps endpoint as the authoritative source — organic SERP doesn't reliably
-    # return local_pack items due to data-center variation.
-    has_map_pack = maps_has_results or len(local_pack_items) > 0
+    has_map_pack = len(local_pack_items) > 0
     competitors: List[CompetitorInfo] = []
     category_counts: Dict[str, int] = {}
     keyword_name_count = 0
@@ -3774,7 +3772,9 @@ async def check_rankability(request: Request, body: RankabilityRequest):
         "very_difficult": "Very difficult — consider a different keyword or location",
     }
     message = verdict_labels.get(score_data["verdict"], "")
-    if not has_map_pack:
+    # Only report "no map pack" if neither the organic SERP nor the Maps endpoint
+    # returned any results — both being empty strongly indicates low local intent.
+    if not has_map_pack and not maps_has_results:
         message = "No map pack found for this keyword — may be a low local-intent query"
     elif score_data.get("sab_pack_mismatch"):
         message += f". Your service area business faces a pack dominated by {physical_competitor_count} physical location(s) — Google heavily favors proximity for this keyword"
