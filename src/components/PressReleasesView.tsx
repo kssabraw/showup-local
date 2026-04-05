@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader2, FileText, CheckCircle, RotateCcw, Download, Send } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { nlp } from "@/lib/nlp-client";
+import { nlp, purchasePressReleasePack } from "@/lib/nlp-client";
 import { useBusinessProfiles } from "@/hooks/useBusinessProfiles";
 import { useGeneratedPages } from "@/hooks/useGeneratedPages";
 import {
@@ -14,6 +14,7 @@ import {
   type PressRelease,
 } from "@/hooks/usePressReleases";
 import PressReleaseFormModal, { type PressReleaseFormValues } from "@/components/PressReleaseFormModal";
+import PressReleasePackModal, { type PRPackId, PR_PACKS } from "@/components/PressReleasePackModal";
 import DOMPurify from "dompurify";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -287,7 +288,9 @@ export default function PressReleasesView() {
   const [selectedBusinessId, setSelectedBusinessId] = useState<string | null>(null);
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
   const [reviewingPR, setReviewingPR] = useState<PressRelease | null>(null);
+  const [showPackModal, setShowPackModal] = useState(false);
   const [showFormModal, setShowFormModal] = useState(false);
+  const [purchaseError, setPurchaseError] = useState<string | null>(null);
 
   const { data: businesses = [], isLoading: businessesLoading } = useBusinessProfiles();
   const { data: pages = [], isLoading: pagesLoading } = useGeneratedPages(selectedBusinessId);
@@ -301,6 +304,22 @@ export default function PressReleasesView() {
   if (!selectedBusinessId && businesses.length === 1 && !businessesLoading) {
     setSelectedBusinessId(businesses[0].id);
   }
+
+  const handlePackPurchase = async (pack: typeof PR_PACKS[number]) => {
+    setPurchaseError(null);
+    try {
+      const result = await purchasePressReleasePack(pack.id);
+      if (result.checkout_url) {
+        window.location.href = result.checkout_url;
+        return;
+      }
+      // Stripe not yet configured — proceed to generation
+      setShowPackModal(false);
+      setShowFormModal(true);
+    } catch (err) {
+      setPurchaseError(err instanceof Error ? err.message : "Purchase failed");
+    }
+  };
 
   const handleGenerate = async (values: PressReleaseFormValues) => {
     if (!selectedPageId || !selectedBusinessId || !selectedPage || !selectedBusiness) return;
@@ -451,13 +470,10 @@ export default function PressReleasesView() {
                 <div className="px-6 py-4 border-t border-border bg-muted/20">
                   <Button
                     className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-5"
-                    onClick={() => setShowFormModal(true)}
+                    onClick={() => { setPurchaseError(null); setShowPackModal(true); }}
                   >
                     <Send className="w-4 h-4 mr-2" /> Generate Press Release
                   </Button>
-                  <p className="text-xs text-muted-foreground text-center mt-2">
-                    Press release syndication is a paid add-on — pricing shown at confirmation.
-                  </p>
                 </div>
               )}
             </div>
@@ -495,6 +511,21 @@ export default function PressReleasesView() {
           </>
         )}
       </div>
+
+      {/* Pack purchase modal */}
+      {showPackModal && (
+        <PressReleasePackModal
+          onClose={() => setShowPackModal(false)}
+          onPurchase={handlePackPurchase}
+        />
+      )}
+
+      {/* Error toast */}
+      {purchaseError && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-destructive text-destructive-foreground text-sm px-4 py-2 rounded-lg shadow-lg">
+          {purchaseError}
+        </div>
+      )}
 
       {/* Form modal */}
       {showFormModal && selectedPage && (
