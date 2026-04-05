@@ -2438,7 +2438,106 @@ def _serp_context(serp_analysis: Optional[dict]) -> str:
     return "\n".join(parts)
 
 
-# ── /find-page-for-keyword ────────────────────────────────────────────────────
+def _parse_page_zones(html: str) -> dict:
+    """Extract text content from each zone of an existing page."""
+    soup = BeautifulSoup(html, "html.parser")
+    title_el = soup.find("title")
+    h1_el = soup.find("h1")
+    return {
+        "title": title_el.get_text(" ", strip=True).lower() if title_el else "",
+        "h1": h1_el.get_text(" ", strip=True).lower() if h1_el else "",
+        "h2_h3": " ".join(el.get_text(" ", strip=True).lower() for el in soup.find_all(["h2", "h3"])),
+        "paragraphs": " ".join(el.get_text(" ", strip=True).lower() for el in soup.find_all("p")),
+    }
+
+
+def _reopt_serp_context(page_zones: dict, serp_analysis: Optional[dict]) -> str:
+    """
+    Build zone-by-zone delta instructions for reoptimize-page.
+    For each zone, shows which keywords/entities are already present and
+    which are still missing, with an explicit count of how many more are needed.
+    """
+    if not serp_analysis:
+        return ""
+
+    rk = serp_analysis.get("related_keywords", {})
+    zt = serp_analysis.get("zone_targets", {})
+    entities = serp_analysis.get("google_entities", [])
+    quadgrams = serp_analysis.get("top_quadgrams", [])
+
+    top_entities = sorted(entities, key=lambda e: e["page_spread"], reverse=True)[:15] if entities else []
+
+    zone_labels = [
+        ("title",      "PAGE TITLE (<title> tag)"),
+        ("h1",         "H1 HEADING"),
+        ("h2_h3",      "H2/H3 SUBHEADINGS"),
+        ("paragraphs", "PARAGRAPHS (<p> tags)"),
+    ]
+
+    parts = [
+        "COMPETITOR SIGNAL DATA — close the gap between this page and the top competitor in each zone.",
+        "",
+        "NOTE: Related keywords (TF-IDF) and Google entities (NLP API) are separate lists.",
+        "A term appearing on both lists counts toward both targets when used once.",
+    ]
+
+    for zone_key, zone_label in zone_labels:
+        terms = rk.get(zone_key, [])[:20]
+        zone_data = zt.get(zone_key, {})
+        term_target = zone_data.get("target", 0)
+        entity_target = zone_data.get("entity_target", 0)
+        if not terms and not entity_target:
+            continue
+
+        zone_text = page_zones.get(zone_key, "")
+
+        parts.append(f"\n{zone_label}:")
+
+        # Keywords delta
+        if terms and term_target:
+            present_kw = [t["term"] for t in terms if t["term"].lower() in zone_text]
+            missing_kw = [t["term"] for t in terms if t["term"].lower() not in zone_text]
+            still_need = max(0, term_target - len(present_kw))
+            if present_kw:
+                parts.append(f"  Keywords already present: {', '.join(present_kw)}")
+            if still_need > 0 and missing_kw:
+                parts.append(f"  ADD {still_need} more of these keywords: {', '.join(missing_kw[:15])}")
+            elif still_need == 0:
+                parts.append(f"  Keyword target met ({len(present_kw)}/{term_target})")
+
+        # Entities delta
+        if entity_target and top_entities:
+            present_ent = [e["name"] for e in top_entities if e["name"].lower() in zone_text]
+            missing_ent = [e["name"] for e in top_entities if e["name"].lower() not in zone_text]
+            still_need_ent = max(0, entity_target - len(present_ent))
+            if present_ent:
+                parts.append(f"  Entities already present: {', '.join(present_ent)}")
+            if still_need_ent > 0 and missing_ent:
+                parts.append(f"  ADD {still_need_ent} more of these entities: {', '.join(missing_ent[:10])}")
+            elif still_need_ent == 0:
+                parts.append(f"  Entity target met ({len(present_ent)}/{entity_target})")
+
+    # Quadgrams delta — check against full page text
+    if quadgrams:
+        full_page_text = " ".join(page_zones.values())
+        missing_qg = [q["phrase"] for q in quadgrams[:15] if q["phrase"].lower() not in full_page_text]
+        present_qg = [q["phrase"] for q in quadgrams[:15] if q["phrase"].lower() in full_page_text]
+        parts.append("\nCOMPETITOR PHRASES (4-word phrases from top-ranking pages):")
+        if present_qg:
+            parts.append(f"  Already present: {', '.join(present_qg)}")
+        if missing_qg:
+            parts.append(f"  Weave these in naturally: {', '.join(missing_qg)}")
+
+    # Competitor headings for structural reference
+    headings = serp_analysis.get("competitor_headings", [])
+    if headings:
+        h2s = [h for h in headings if h["type"] == "h2"][:8]
+        if h2s:
+            parts.append("\nCOMPETITOR H2 HEADINGS (for structural reference):")
+            for h in h2s:
+                parts.append(f"  \"{h['text']}\" ({h['page_count']} pages)")
+
+    return "\n".join(parts)
 
 class FindPageRequest(BaseModel):
     website_url: str
@@ -3082,7 +3181,6 @@ async def reoptimize_page(request: Request, body: ReoptimizePageRequest):
     async def _worker(q: asyncio.Queue):
         client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
         city = body.location.split(",")[0].strip()
-        serp_ctx = _serp_context(body.serp_analysis)
 
         await q.put({"step": "progress", "progress": 10, "message": "Fetching existing page…"})
 
@@ -3097,6 +3195,10 @@ async def reoptimize_page(request: Request, body: ReoptimizePageRequest):
                 raise Exception("Could not fetch the provided page URL. Check that it is correct and publicly accessible.")
         if not existing_html:
             raise Exception("Either existing_page_html or existing_page_url is required")
+
+        # Parse existing page zones and compute delta-based SERP context
+        page_zones = _parse_page_zones(existing_html)
+        serp_ctx = _reopt_serp_context(page_zones, body.serp_analysis)
 
         deficiency_text = "\n".join(
             f"  Engine: {d['engine']} (score: {d['score']}/100)\n"
