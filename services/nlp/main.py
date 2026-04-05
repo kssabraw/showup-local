@@ -155,7 +155,7 @@ for name, val in [
         logger.warning(f"{name} not set — related feature will be skipped")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-ZONES = ["title", "h1", "h2_h3", "body"]
+ZONES = ["title", "h1", "h2_h3", "body", "paragraphs"]
 
 RELATED_MIN_PAGE_SPREAD  = 0.49
 RELATED_MIN_SIMILARITY   = 0.1
@@ -225,6 +225,7 @@ class ZoneKeywords(BaseModel):
     h1: List[dict]
     h2_h3: List[dict]
     body: List[dict]
+    paragraphs: List[dict] = []
 
 
 class AnalysisResponse(BaseModel):
@@ -667,13 +668,13 @@ async def _run_serp_analysis(
         )
 
     # Step 3: parse zones
-    zone_buckets: Dict[str, List[str]] = {z: [] for z in ZONES + ["paragraphs"]}
+    zone_buckets: Dict[str, List[str]] = {z: [] for z in ZONES}
     h2_per_page: List[List[str]] = []
     h3_per_page: List[List[str]] = []
     scraped_urls: List[str] = []
     for url, html in zip(serp_urls, pages):
         zones = extract_zones(html)
-        for z in ZONES + ["paragraphs"]:
+        for z in ZONES:
             zone_buckets[z].append(zones[z])
         h2_per_page.append(zones.get("h2_list", []))
         h3_per_page.append(zones.get("h3_list", []))
@@ -685,6 +686,7 @@ async def _run_serp_analysis(
         h1=get_related_keywords_for_zone(zone_buckets["h1"], keyword),
         h2_h3=get_related_keywords_for_zone(zone_buckets["h2_h3"], keyword),
         body=get_related_keywords_for_zone(zone_buckets["body"], keyword),
+        paragraphs=get_related_keywords_for_zone(zone_buckets["paragraphs"], keyword),
     )
     quadgrams = get_top_quadgrams(zone_buckets["paragraphs"], keyword)
 
@@ -2261,35 +2263,28 @@ def compute_zone_targets(
     """
     For each zone, count how many of the filtered related-keyword terms appear in
     each competitor page's zone text, then return the max count as the target.
-    Also computes an entity target from the paragraph zone.
+    Also computes per-zone entity targets by counting how many Google entities
+    appear in each zone across competitor pages.
     """
     targets: Dict[str, dict] = {}
+    entity_names = {e["name"].lower() for e in google_entities} if google_entities else set()
+
     for zone_name in ZONES:
-        terms = getattr(related, zone_name)
-        if not terms:
-            targets[zone_name] = {"target": 0}
-            continue
-        term_set = {t["term"].lower() for t in terms}
-        max_count = 0
+        terms = getattr(related, zone_name, [])
+        term_set = {t["term"].lower() for t in terms} if terms else set()
+        max_term_count = 0
+        max_entity_count = 0
+
         for page_text in zone_buckets.get(zone_name, []):
             if not page_text:
                 continue
             cleaned = clean_text(page_text).lower()
-            count = sum(1 for term in term_set if term in cleaned)
-            max_count = max(max_count, count)
-        targets[zone_name] = {"target": max_count}
+            if term_set:
+                max_term_count = max(max_term_count, sum(1 for t in term_set if t in cleaned))
+            if entity_names:
+                max_entity_count = max(max_entity_count, sum(1 for e in entity_names if e in cleaned))
 
-    # Entity target: count distinct Google entities present in each page's paragraphs
-    if google_entities:
-        entity_names = {e["name"].lower() for e in google_entities}
-        max_entity_count = 0
-        for page_text in zone_buckets.get("paragraphs", []):
-            if not page_text:
-                continue
-            cleaned = clean_text(page_text).lower()
-            count = sum(1 for name in entity_names if name in cleaned)
-            max_entity_count = max(max_entity_count, count)
-        targets["entities"] = {"target": max_entity_count}
+        targets[zone_name] = {"target": max_term_count, "entity_target": max_entity_count}
 
     return targets
 
@@ -2489,32 +2484,37 @@ def _serp_context(serp_analysis: Optional[dict]) -> str:
     quadgrams = serp_analysis.get("top_quadgrams", [])
 
     zone_labels = [
-        ("title",  "PAGE TITLE (<title> tag)"),
-        ("h1",     "H1 HEADING"),
-        ("h2_h3",  "H2/H3 SUBHEADINGS"),
-        ("body",   "BODY TEXT"),
+        ("title",      "PAGE TITLE (<title> tag)"),
+        ("h1",         "H1 HEADING"),
+        ("h2_h3",      "H2/H3 SUBHEADINGS"),
+        ("body",       "BODY TEXT"),
+        ("paragraphs", "PARAGRAPHS (<p> tags)"),
     ]
+
+    top_entities = sorted(entities, key=lambda e: e["page_spread"], reverse=True)[:15] if entities else []
+    entity_names_display = {e["name"]: e["recommended_mentions"] for e in top_entities}
 
     parts = ["COMPETITOR SIGNAL DATA — match or exceed these targets in the corresponding zones:"]
 
     for zone_key, zone_label in zone_labels:
         terms = rk.get(zone_key, [])[:20]
-        target = zt.get(zone_key, {}).get("target", 0)
-        if not terms:
+        zone_data = zt.get(zone_key, {})
+        term_target = zone_data.get("target", 0)
+        entity_target = zone_data.get("entity_target", 0)
+        if not terms and not entity_target:
             continue
         parts.append(f"\n{zone_label}:")
-        if target:
-            parts.append(f"  Target: include ~{target} of these terms (best competitor used {target})")
-        parts.append(f"  Terms (ranked by relevance): {', '.join(t['term'] for t in terms)}")
+        if terms:
+            if term_target:
+                parts.append(f"  Keyword target: include ~{term_target} of these terms (best competitor used {term_target})")
+            parts.append(f"  Terms (ranked by relevance): {', '.join(t['term'] for t in terms)}")
+        if entity_target and top_entities:
+            parts.append(f"  Entity target: reference ~{entity_target} Google entities in this zone (best competitor used {entity_target})")
 
-    if entities:
-        entity_target = zt.get("entities", {}).get("target", 0)
-        parts.append(f"\nGOOGLE ENTITIES (named entities from competitor pages):")
-        if entity_target:
-            parts.append(f"  Target: reference ~{entity_target} of these in body content (best competitor used {entity_target})")
-        top_entities = sorted(entities, key=lambda e: e["page_spread"], reverse=True)[:15]
-        ent_items = [f"{e['name']} (×{e['recommended_mentions']})" for e in top_entities]
-        parts.append(f"  Entities: {', '.join(ent_items)}")
+    if top_entities:
+        parts.append(f"\nGOOGLE ENTITIES (use across zones per targets above):")
+        ent_items = [f"{name} (×{mentions})" for name, mentions in entity_names_display.items()]
+        parts.append(f"  {', '.join(ent_items)}")
 
     if quadgrams:
         parts.append(f"\nTOP COMPETITOR PHRASES (4-word phrases — use naturally in body):")
