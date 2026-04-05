@@ -30,10 +30,16 @@ interface BusinessProfile {
   detected_icp?: unknown;
 }
 
+type PageAdvisory = {
+  level: "warning" | "info";
+  message: string;
+  suggestNew: boolean;
+};
+
 type CheckState =
   | { status: "idle" }
   | { status: "scanning" }
-  | { status: "found"; page: { url: string; title: string; h1?: string; isBlogPost?: boolean } }
+  | { status: "found"; page: { url: string; title: string; h1?: string; isBlogPost?: boolean }; advisory?: PageAdvisory }
   | { status: "scoring"; page: { url: string; title: string; h1?: string; isBlogPost?: boolean } }
   | { status: "high_score"; page: { url: string; title: string; isBlogPost?: boolean }; score: number }
   | { status: "not_found" }
@@ -49,6 +55,81 @@ type ViewState =
 
 // ANALYSIS_CACHE_MAX_AGE_DAYS — cached keyword analyses older than this are ignored
 const ANALYSIS_CACHE_MAX_AGE_DAYS = 7;
+
+/** Checks whether a found page URL/title/H1 are optimized for the given keyword + location. */
+function analyzePageOptimization(
+  url: string,
+  title: string,
+  h1: string | undefined,
+  keyword: string,
+  location: string,
+): PageAdvisory | null {
+  const stopWords = new Set(["near", "the", "and", "for", "in", "of", "a", "an"]);
+  const serviceTokens = keyword.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, "")
+    .split(/\s+/)
+    .filter(t => t.length >= 3 && !stopWords.has(t));
+
+  const city = location.split(",")[0].trim();
+  const locationTokens = city.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, "")
+    .split(/\s+/)
+    .filter(t => t.length >= 3);
+
+  const isNearMe = keyword.toLowerCase().includes("near me");
+  const urlL = url.toLowerCase();
+  const titleL = title.toLowerCase();
+  const h1L = (h1 ?? "").toLowerCase();
+
+  const has = (text: string, tokens: string[]) => tokens.length > 0 && tokens.some(t => text.includes(t));
+
+  const urlHasService  = has(urlL, serviceTokens);
+  const urlHasLocation = has(urlL, locationTokens);
+  const titleHasService  = has(titleL, serviceTokens);
+  const titleHasLocation = has(titleL, locationTokens);
+  const h1HasService  = has(h1L, serviceTokens);
+  const h1HasLocation = has(h1L, locationTokens);
+
+  if (isNearMe) {
+    const allPresent = urlHasService && urlHasLocation && titleHasService && titleHasLocation && h1HasService && h1HasLocation;
+    if (!allPresent) {
+      return {
+        level: "warning",
+        message: `"Near me" queries require the service and location in the URL, title, and H1. This page is likely missing one or more of these signals.`,
+        suggestNew: !urlHasService || !urlHasLocation,
+      };
+    }
+    return null;
+  }
+
+  if (!urlHasService && !urlHasLocation) {
+    return {
+      level: "warning",
+      message: `This page's URL contains neither the service ("${keyword}") nor the location ("${city}"). It appears to be a generic page — a dedicated service + location page will perform significantly better.`,
+      suggestNew: true,
+    };
+  }
+
+  if (!urlHasService || !urlHasLocation) {
+    const missing = !urlHasService ? `service ("${keyword}")` : `location ("${city}")`;
+    const titleH1HasService  = titleHasService  || h1HasService;
+    const titleH1HasLocation = titleHasLocation || h1HasLocation;
+    if (titleH1HasService && titleH1HasLocation) {
+      return {
+        level: "info",
+        message: `The URL is missing the ${missing}, but the title and H1 include both the service and location. The page may be reoptimizable.`,
+        suggestNew: false,
+      };
+    }
+    return {
+      level: "warning",
+      message: `The URL is missing the ${missing}, and the title/H1 are also incomplete. A dedicated "${keyword} ${city}" page will rank better.`,
+      suggestNew: true,
+    };
+  }
+
+  return null;
+}
 
 const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialLocation, initialBusinessId, isOnboarding = false }: { onBack: () => void; defaultLocation?: string; initialKeyword?: string; initialLocation?: string; initialBusinessId?: string; isOnboarding?: boolean }) => {
   const { data: businesses = [], isLoading: loadingBusinesses } = useBusinessProfiles();
@@ -286,7 +367,8 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     }
 
     // Step 2: Pause — let user confirm or override the found page
-    setCheckState({ status: "found", page: foundPage });
+    const advisory = analyzePageOptimization(foundPage.url, foundPage.title, foundPage.h1, keyword.trim(), location.trim());
+    setCheckState({ status: "found", page: foundPage, advisory });
   };
 
   const runScoreForPage = async (pageToScore: { url: string; title: string; h1?: string; isBlogPost?: boolean }) => {
@@ -900,15 +982,44 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                 <span>⚠️ This appears to be a blog post, not a dedicated service page.</span>
               </div>
             )}
-            <Button
-              className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
-              onClick={() => runScoreForPage(checkState.page)}
-              disabled={(credits?.balance ?? 0) < 2}
-              title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
-            >
-              Score This Page
-              <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span>
-            </Button>
+            {checkState.advisory && (
+              <div className={`px-3 py-2.5 rounded-lg text-xs space-y-2 ${checkState.advisory.level === "warning" ? "bg-red-500/10 border border-red-500/20 text-red-700" : "bg-blue-500/10 border border-blue-500/20 text-blue-700"}`}>
+                <p>{checkState.advisory.level === "warning" ? "⚠️ " : "ℹ️ "}{checkState.advisory.message}</p>
+                {checkState.advisory.suggestNew && (
+                  <Button
+                    className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold"
+                    onClick={() => handleCreateNewPage()}
+                    size="sm"
+                  >
+                    <FilePlus className="w-3.5 h-3.5 mr-1.5" />
+                    Create a New Optimized Page
+                  </Button>
+                )}
+              </div>
+            )}
+            {(!checkState.advisory || !checkState.advisory.suggestNew) && (
+              <Button
+                className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
+                onClick={() => runScoreForPage(checkState.page)}
+                disabled={(credits?.balance ?? 0) < 2}
+                title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
+              >
+                Score This Page
+                <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span>
+              </Button>
+            )}
+            {checkState.advisory?.suggestNew && (
+              <Button
+                variant="outline"
+                className="w-full font-medium"
+                onClick={() => runScoreForPage(checkState.page)}
+                disabled={(credits?.balance ?? 0) < 2}
+                title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
+              >
+                Score existing page anyway
+                <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span>
+              </Button>
+            )}
             <div className="flex gap-2">
               <input type="url" placeholder="Or enter a different URL…" value={manualUrl}
                 onChange={e => setManualUrl(e.target.value)}
