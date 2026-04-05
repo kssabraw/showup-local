@@ -1979,7 +1979,29 @@ optimised for Answer Engine Optimisation. Follow all of them in every section.
 10. SECTION LENGTH ≤300 words: LLMs extract from dense sections poorly. If a topic needs
     more depth, split it into multiple H2 subsections rather than lengthening one section.
 
-MANDATORY 13-SECTION STRUCTURE
+BRAND VOICE vs. AEO STRUCTURE — TIEBREAKER RULES
+
+These two sets of rules rarely conflict, but when they appear to, apply this hierarchy:
+
+AEO rules govern STRUCTURE — where the answer sits, paragraph length, heading format,
+list usage. These are layout decisions and are non-negotiable regardless of brand voice.
+
+Brand voice governs EXPRESSION — word choice, tone, personality, sentence rhythm,
+vocabulary. These apply within every structural element.
+
+In practice: a warm, conversational brand still writes short paragraphs and answer-first
+openings — it just does so in its own voice, not in a clinical or generic one.
+
+THE ONE REAL CONFLICT ZONE — FAQ and section openers:
+A direct answer must always come first, but it must be written in the brand's register.
+✗ Cold brand voice applied wrongly: "Yes." (technically direct but robotic)
+✗ Warm brand voice applied wrongly: "What a great question — it really depends on..." (buries the answer)
+✓ Direct answer in brand voice:
+  - Warm/friendly brand:   "Absolutely — our crews are on call 24/7, including weekends and holidays."
+  - Professional/authoritative brand: "Yes. [Brand] provides 24/7 emergency response across Anaheim."
+  - Urgent/emergency brand: "Yes — call now and we'll dispatch a crew within the hour."
+
+The rule: lead with the answer, then let the rest of the sentence and paragraph carry the brand tone.
 
 Section 1 — Intro / Direct Answer Block (100–150 words)
 <section id="intro">
