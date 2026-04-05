@@ -22,6 +22,7 @@ logger.info(f"Files in cwd: {os.listdir('.')}")
 
 try:
     from fastapi import FastAPI, HTTPException, Depends, Security, Request
+    from fastapi.responses import StreamingResponse
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.security import APIKeyHeader
     from pydantic import BaseModel
@@ -2115,6 +2116,45 @@ def _build_deficiencies(scores: dict) -> List[dict]:
             })
     return out
 
+def _sse(data: dict) -> str:
+    """Format a dict as a Server-Sent Event line."""
+    return f"data: {json.dumps(data)}\n\n"
+
+
+async def _sse_stream(worker_coro) -> StreamingResponse:
+    """
+    Wraps an async worker coroutine in an SSE StreamingResponse.
+    The worker receives a queue and puts dicts onto it; this wrapper
+    flushes keepalive pings every 10 s while waiting, so proxy timeouts
+    don't kill the connection during long Claude calls.
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def _run():
+        try:
+            await worker_coro(queue)
+        except Exception as e:
+            await queue.put({"step": "error", "message": str(e)})
+        finally:
+            await queue.put(None)  # sentinel
+
+    async def _generate():
+        task = asyncio.create_task(_run())
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=10.0)
+                    if item is None:
+                        break
+                    yield _sse(item)
+                except asyncio.TimeoutError:
+                    yield _sse({"step": "keepalive"})
+        finally:
+            task.cancel()
+
+    return StreamingResponse(_generate(), media_type="text/event-stream")
+
+
 def _parse_claude_json(text: str) -> dict:
     text = text.strip()
     if text.startswith("```"):
@@ -2855,90 +2895,103 @@ class GeneratePageResponse(BaseModel):
     cost_breakdown: dict = {}
 
 
-@app.post('/generate-page', response_model=GeneratePageResponse, dependencies=[Depends(verify_api_key)])
+@app.post('/generate-page', dependencies=[Depends(verify_api_key)])
 @limiter.limit("5/minute")
 async def generate_page(request: Request, body: GeneratePageRequest):
     if not ANTHROPIC_API_KEY:
         raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
 
     import anthropic as _anthropic
-    client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-    city = body.location.split(",")[0].strip()
+    async def _worker(q: asyncio.Queue):
+        client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+        city = body.location.split(",")[0].strip()
 
-    # Google NLP entities are now fetched during /analyze, so serp_analysis
-    # passed here already contains them.
-    serp_ctx = _serp_context(body.serp_analysis)
+        await q.put({"step": "progress", "progress": 5, "message": "Starting…"})
 
-    diff_text = ""
-    if body.differentiators:
-        diff_text = "Differentiators (use these — include mechanism for each):\n" + \
-            "\n".join(f"  - {d.get('claim','')} (mechanism: {d.get('mechanism','')})" for d in body.differentiators)
+        # Run SERP analysis inline if not provided
+        serp_analysis_dict = body.serp_analysis
+        if not serp_analysis_dict:
+            await q.put({"step": "progress", "progress": 10, "message": "Fetching top search results…"})
+            try:
+                inline_serp = await _run_serp_analysis(body.keyword, body.location)
+                serp_analysis_dict = inline_serp.model_dump() if hasattr(inline_serp, "model_dump") else dict(inline_serp)
+                await q.put({"step": "progress", "progress": 50, "message": "Analyzing competitor pages…"})
+            except Exception as _serp_err:
+                logger.warning(f"generate-page: inline SERP analysis failed ({_serp_err})")
+                serp_analysis_dict = None
 
-    reviews_text = ""
-    if body.reviews:
-        qualifying = [r for r in body.reviews if r.get("rating", 0) >= 4][:5]
-        if qualifying:
-            reviews_text = "GBP Reviews (use verbatim in Section 7 — do NOT fabricate):\n" + \
-                "\n".join(f'  ★{r.get("rating")} — {r.get("reviewer","")}: "{r.get("text","")}" ({r.get("date","")})'
-                          for r in qualifying)
+        serp_ctx = _serp_context(serp_analysis_dict)
 
-    icp = body.icp_type or "General Homeowner"
+        diff_text = ""
+        if body.differentiators:
+            diff_text = "Differentiators (use these — include mechanism for each):\n" + \
+                "\n".join(f"  - {d.get('claim','')} (mechanism: {d.get('mechanism','')})" for d in body.differentiators)
 
-    # Build brand voice block
-    brand_voice_text = ""
-    if body.brand_voice:
-        bv = body.brand_voice
-        # Use recommended_accepted voice if user accepted one, otherwise fall back to recommended, then current
-        accepted = bv.get("recommended_accepted")
-        if accepted == "recommended":
-            voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
-        elif accepted == "current":
-            voice = bv.get("current_voice") or {}
-        else:
-            voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
-        guide = bv.get("writer_execution_guide", "")
-        if voice or guide:
-            lines = ["BRAND VOICE (match this exactly):"]
-            if voice.get("tone"):
-                lines.append(f"  Tone: {voice['tone']}")
-            if voice.get("personality"):
-                lines.append(f"  Personality: {', '.join(voice['personality'])}")
-            ws = voice.get("writing_style", {})
-            if ws:
-                lines.append(f"  Writing style: {ws.get('sentence_length','')} sentences, {ws.get('person','')} person, {ws.get('formality','')} formality")
-            vocab = voice.get("vocabulary", {})
-            if vocab.get("use"):
-                lines.append(f"  Words/phrases to use: {', '.join(vocab['use'])}")
-            if vocab.get("avoid"):
-                lines.append(f"  Words/phrases to avoid: {', '.join(vocab['avoid'])}")
-            if guide:
-                lines.append(f"  Writer instructions: {guide}")
-            brand_voice_text = "\n".join(lines)
+        reviews_text = ""
+        if body.reviews:
+            qualifying = [r for r in body.reviews if r.get("rating", 0) >= 4][:5]
+            if qualifying:
+                reviews_text = "GBP Reviews (use verbatim in Section 7 — do NOT fabricate):\n" + \
+                    "\n".join(f'  ★{r.get("rating")} — {r.get("reviewer","")}: "{r.get("text","")}" ({r.get("date","")})'
+                              for r in qualifying)
 
-    # Build ICP block
-    icp_text = ""
-    if body.detected_icp:
-        segments = body.detected_icp.get("segments", [])
-        if segments:
-            lines = ["TARGET CUSTOMER PROFILES (write to these):"]
-            for seg in segments[:3]:  # cap at 3 segments
-                name = seg.get("name", "")
-                desc = seg.get("description", "")
-                msg = seg.get("messaging", {})
-                tone = msg.get("tone", "")
-                hooks = msg.get("hooks", [])
-                pain = msg.get("trust_signals", [])
-                lines.append(f"  [{name}] {desc}")
-                if tone:
-                    lines.append(f"    Messaging tone: {tone}")
-                if hooks:
-                    lines.append(f"    Headline hooks: {'; '.join(hooks[:2])}")
-                if pain:
-                    lines.append(f"    Trust signals: {'; '.join(pain[:2])}")
-            icp_text = "\n".join(lines)
+        icp = body.icp_type or "General Homeowner"
 
-    user_prompt = f"""BUSINESS DATA
+        # Build brand voice block
+        brand_voice_text = ""
+        if body.brand_voice:
+            bv = body.brand_voice
+            # Use recommended_accepted voice if user accepted one, otherwise fall back to recommended, then current
+            accepted = bv.get("recommended_accepted")
+            if accepted == "recommended":
+                voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
+            elif accepted == "current":
+                voice = bv.get("current_voice") or {}
+            else:
+                voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
+            guide = bv.get("writer_execution_guide", "")
+            if voice or guide:
+                lines = ["BRAND VOICE (match this exactly):"]
+                if voice.get("tone"):
+                    lines.append(f"  Tone: {voice['tone']}")
+                if voice.get("personality"):
+                    lines.append(f"  Personality: {', '.join(voice['personality'])}")
+                ws = voice.get("writing_style", {})
+                if ws:
+                    lines.append(f"  Writing style: {ws.get('sentence_length','')} sentences, {ws.get('person','')} person, {ws.get('formality','')} formality")
+                vocab = voice.get("vocabulary", {})
+                if vocab.get("use"):
+                    lines.append(f"  Words/phrases to use: {', '.join(vocab['use'])}")
+                if vocab.get("avoid"):
+                    lines.append(f"  Words/phrases to avoid: {', '.join(vocab['avoid'])}")
+                if guide:
+                    lines.append(f"  Writer instructions: {guide}")
+                brand_voice_text = "\n".join(lines)
+
+        # Build ICP block
+        icp_text = ""
+        if body.detected_icp:
+            segments = body.detected_icp.get("segments", [])
+            if segments:
+                lines = ["TARGET CUSTOMER PROFILES (write to these):"]
+                for seg in segments[:3]:  # cap at 3 segments
+                    name = seg.get("name", "")
+                    desc = seg.get("description", "")
+                    msg_data = seg.get("messaging", {})
+                    tone = msg_data.get("tone", "")
+                    hooks = msg_data.get("hooks", [])
+                    pain = msg_data.get("trust_signals", [])
+                    lines.append(f"  [{name}] {desc}")
+                    if tone:
+                        lines.append(f"    Messaging tone: {tone}")
+                    if hooks:
+                        lines.append(f"    Headline hooks: {'; '.join(hooks[:2])}")
+                    if pain:
+                        lines.append(f"    Trust signals: {'; '.join(pain[:2])}")
+                icp_text = "\n".join(lines)
+
+        user_prompt = f"""BUSINESS DATA
 Name: {body.business_name}
 Category: {body.gbp_category}
 Address: {body.address}
@@ -2956,63 +3009,72 @@ ICP: {icp}
 {reviews_text}
 {serp_ctx}"""
 
-    try:
-        msg = await client.messages.create(
-            model=GENERATION_MODEL,
-            max_tokens=6000,
-            system=[{"type": "text", "text": _GEN_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-    except Exception as e:
-        logger.exception("Claude generation error")
-        raise HTTPException(status_code=502, detail="Content generation failed. Please try again.")
+        await q.put({"step": "progress", "progress": 65, "message": "Generating your page…"})
 
-    token_rec = _token_record("generate-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
-    raw = msg.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
-        raw = re.sub(r'\n?```$', '', raw)
-        raw = raw.strip()
+        try:
+            claude_msg = await client.messages.create(
+                model=GENERATION_MODEL,
+                max_tokens=6000,
+                system=[{"type": "text", "text": _GEN_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+        except Exception as e:
+            logger.exception("Claude generation error")
+            raise Exception("Content generation failed. Please try again.")
 
-    # Extract <title> tag
-    title_match = re.search(r'<title>(.*?)</title>', raw, re.IGNORECASE | re.DOTALL)
-    page_title = title_match.group(1).strip() if title_match else ""
-    if title_match:
-        raw = raw[:title_match.start()] + raw[title_match.end():]
-        raw = raw.strip()
+        token_rec = _token_record("generate-page", GENERATION_MODEL, claude_msg.usage.input_tokens, claude_msg.usage.output_tokens)
+        raw = claude_msg.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
+            raw = re.sub(r'\n?```$', '', raw)
+            raw = raw.strip()
 
-    # Split content_html from schema_json
-    schema_split = raw.find('<script type="application/ld+json">')
-    if schema_split != -1:
-        content_html = raw[:schema_split].strip()
-        schema_json = raw[schema_split:].strip()
-    else:
-        content_html = raw
-        schema_json = ""
+        # Extract <title> tag
+        title_match = re.search(r'<title>(.*?)</title>', raw, re.IGNORECASE | re.DOTALL)
+        page_title = title_match.group(1).strip() if title_match else ""
+        if title_match:
+            raw = raw[:title_match.start()] + raw[title_match.end():]
+            raw = raw.strip()
 
-    # Build combined cost breakdown using analysis cost from the cached serp_analysis
-    ac = (body.serp_analysis or {}).get("analysis_cost", {})
-    claude_cost = token_rec["cost_usd"]
-    cost_breakdown = {
-        "dataforseo":           ac.get("dataforseo", 0),
-        "scrapeowl_pages":      ac.get("scrapeowl_pages", 0),
-        "scrapeowl":            ac.get("scrapeowl", 0),
-        "google_nlp_chars":     ac.get("google_nlp_chars", 0),
-        "google_nlp":           ac.get("google_nlp", 0),
-        "claude_model":         token_rec["model"],
-        "claude_input_tokens":  token_rec["input_tokens"],
-        "claude_output_tokens": token_rec["output_tokens"],
-        "claude":               round(claude_cost, 6),
-        "total":                round(ac.get("subtotal", 0) + claude_cost, 6),
-    }
+        # Split content_html from schema_json
+        schema_split = raw.find('<script type="application/ld+json">')
+        if schema_split != -1:
+            content_html = raw[:schema_split].strip()
+            schema_json = raw[schema_split:].strip()
+        else:
+            content_html = raw
+            schema_json = ""
 
-    return GeneratePageResponse(
-        content_html=content_html,
-        schema_json=schema_json,
-        page_title=page_title,
-        token_usage=token_rec,
-        cost_breakdown=cost_breakdown,
-    )
+        # Build combined cost breakdown
+        ac = (serp_analysis_dict or {}).get("analysis_cost", {})
+        claude_cost = token_rec["cost_usd"]
+        cost_breakdown = {
+            "dataforseo":           ac.get("dataforseo", 0),
+            "scrapeowl_pages":      ac.get("scrapeowl_pages", 0),
+            "scrapeowl":            ac.get("scrapeowl", 0),
+            "google_nlp_chars":     ac.get("google_nlp_chars", 0),
+            "google_nlp":           ac.get("google_nlp", 0),
+            "claude_model":         token_rec["model"],
+            "claude_input_tokens":  token_rec["input_tokens"],
+            "claude_output_tokens": token_rec["output_tokens"],
+            "claude":               round(claude_cost, 6),
+            "total":                round(ac.get("subtotal", 0) + claude_cost, 6),
+        }
+
+        await q.put({"step": "progress", "progress": 95, "message": "Finishing up…"})
+        await q.put({
+            "step": "done",
+            "result": {
+                "content_html": content_html,
+                "schema_json": schema_json,
+                "page_title": page_title,
+                "token_usage": token_rec,
+                "cost_breakdown": cost_breakdown,
+                "serp_analysis": serp_analysis_dict,
+            },
+        })
+
+    return await _sse_stream(_worker)
 
 
 # ── /reoptimize-page ──────────────────────────────────────────────────────────
@@ -3036,38 +3098,41 @@ class ReoptimizePageResponse(BaseModel):
     html_css_notes: List[str] = []
 
 
-@app.post('/reoptimize-page', response_model=ReoptimizePageResponse, dependencies=[Depends(verify_api_key)])
+@app.post('/reoptimize-page', dependencies=[Depends(verify_api_key)])
 @limiter.limit("5/minute")
 async def reoptimize_page(request: Request, body: ReoptimizePageRequest):
     if not ANTHROPIC_API_KEY:
         raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
 
     import anthropic as _anthropic
-    client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-    city = body.location.split(",")[0].strip()
-    serp_ctx = _serp_context(body.serp_analysis)
+    async def _worker(q: asyncio.Queue):
+        client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+        city = body.location.split(",")[0].strip()
+        serp_ctx = _serp_context(body.serp_analysis)
 
-    # Fetch existing page if URL given but no HTML
-    existing_html = body.existing_page_html or ""
-    if not existing_html and body.existing_page_url:
-        async with httpx.AsyncClient() as _fc:
-            existing_html = await _scrape_one(body.existing_page_url, _fc, render_js=False)
+        await q.put({"step": "progress", "progress": 10, "message": "Fetching existing page…"})
+
+        # Fetch existing page if URL given but no HTML
+        existing_html = body.existing_page_html or ""
+        if not existing_html and body.existing_page_url:
+            async with httpx.AsyncClient() as _fc:
+                existing_html = await _scrape_one(body.existing_page_url, _fc, render_js=False)
+                if not existing_html:
+                    existing_html = await _scrape_one(body.existing_page_url, _fc, render_js=True)
             if not existing_html:
-                existing_html = await _scrape_one(body.existing_page_url, _fc, render_js=True)
+                raise Exception("Could not fetch the provided page URL. Check that it is correct and publicly accessible.")
         if not existing_html:
-            raise HTTPException(status_code=422, detail="Could not fetch the provided page URL. Check that it is correct and publicly accessible.")
-    if not existing_html:
-        raise HTTPException(status_code=422, detail="Either existing_page_html or existing_page_url is required")
+            raise Exception("Either existing_page_html or existing_page_url is required")
 
-    deficiency_text = "\n".join(
-        f"  Engine: {d['engine']} (score: {d['score']}/100)\n"
-        f"  Issues: {'; '.join(d.get('issues', []))}\n"
-        f"  Fixes needed: {'; '.join(d.get('recommendations', []))}"
-        for d in body.deficiencies
-    )
+        deficiency_text = "\n".join(
+            f"  Engine: {d['engine']} (score: {d['score']}/100)\n"
+            f"  Issues: {'; '.join(d.get('issues', []))}\n"
+            f"  Fixes needed: {'; '.join(d.get('recommendations', []))}"
+            for d in body.deficiencies
+        )
 
-    user_prompt = f"""BUSINESS: {body.business_name} | CATEGORY: {body.gbp_category}
+        user_prompt = f"""BUSINESS: {body.business_name} | CATEGORY: {body.gbp_category}
 KEYWORD: {body.keyword} | CITY: {city}
 PHONE: {body.phone or "[PHONE]"}
 ADDRESS: {body.address or "Not provided"}
@@ -3079,57 +3144,65 @@ DEFICIENCIES TO FIX:
 EXISTING PAGE:
 {existing_html[:12000]}"""
 
-    try:
-        msg = await client.messages.create(
-            model=GENERATION_MODEL,
-            max_tokens=6000,
-            system=[{"type": "text", "text": _REOPT_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-    except Exception as e:
-        logger.exception("Claude reoptimize error")
-        raise HTTPException(status_code=502, detail="Content generation failed. Please try again.")
+        await q.put({"step": "progress", "progress": 40, "message": "Reoptimizing your page…"})
 
-    token_rec = _token_record("reoptimize-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
-    raw = msg.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
-        raw = re.sub(r'\n?```$', '', raw)
-        raw = raw.strip()
+        try:
+            claude_msg = await client.messages.create(
+                model=GENERATION_MODEL,
+                max_tokens=6000,
+                system=[{"type": "text", "text": _REOPT_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+        except Exception as e:
+            logger.exception("Claude reoptimize error")
+            raise Exception("Content generation failed. Please try again.")
 
-    # Split on delimiter to extract notes and HTML separately
-    html_css_notes: List[str] = []
-    if "<<<HTML>>>" in raw:
-        parts = raw.split("<<<HTML>>>", 1)
-        notes_block = parts[0]
-        html_block = parts[1].strip()
-        # Extract bullet lines from the notes block (between <<<NOTES>>> and <<<HTML>>>)
-        if "<<<NOTES>>>" in notes_block:
-            notes_text = notes_block.split("<<<NOTES>>>", 1)[1].strip()
+        token_rec = _token_record("reoptimize-page", GENERATION_MODEL, claude_msg.usage.input_tokens, claude_msg.usage.output_tokens)
+        raw = claude_msg.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
+            raw = re.sub(r'\n?```$', '', raw)
+            raw = raw.strip()
+
+        # Split on delimiter to extract notes and HTML separately
+        html_css_notes: List[str] = []
+        if "<<<HTML>>>" in raw:
+            parts = raw.split("<<<HTML>>>", 1)
+            notes_block = parts[0]
+            html_block = parts[1].strip()
+            # Extract bullet lines from the notes block (between <<<NOTES>>> and <<<HTML>>>)
+            if "<<<NOTES>>>" in notes_block:
+                notes_text = notes_block.split("<<<NOTES>>>", 1)[1].strip()
+            else:
+                notes_text = notes_block.strip()
+            if notes_text and notes_text.lower() != "none.":
+                for line in notes_text.splitlines():
+                    line = line.strip().lstrip("-•*123456789. ").strip()
+                    if line and line.lower() != "none.":
+                        html_css_notes.append(line)
         else:
-            notes_text = notes_block.strip()
-        if notes_text and notes_text.lower() != "none.":
-            for line in notes_text.splitlines():
-                line = line.strip().lstrip("-•*123456789. ").strip()
-                if line and line.lower() != "none.":
-                    html_css_notes.append(line)
-    else:
-        html_block = raw
+            html_block = raw
 
-    schema_split = html_block.find('<script type="application/ld+json">')
-    if schema_split != -1:
-        content_html = html_block[:schema_split].strip()
-        schema_json = html_block[schema_split:].strip()
-    else:
-        content_html = html_block
-        schema_json = None
+        schema_split = html_block.find('<script type="application/ld+json">')
+        if schema_split != -1:
+            content_html = html_block[:schema_split].strip()
+            schema_json = html_block[schema_split:].strip()
+        else:
+            content_html = html_block
+            schema_json = None
 
-    return ReoptimizePageResponse(
-        content_html=content_html,
-        schema_json=schema_json,
-        token_usage=token_rec,
-        html_css_notes=html_css_notes,
-    )
+        await q.put({"step": "progress", "progress": 95, "message": "Finishing up…"})
+        await q.put({
+            "step": "done",
+            "result": {
+                "content_html": content_html,
+                "schema_json": schema_json,
+                "token_usage": token_rec,
+                "html_css_notes": html_css_notes,
+            },
+        })
+
+    return await _sse_stream(_worker)
 
 
 # ── /related-pages ─────────────────────────────────────────────────────────────

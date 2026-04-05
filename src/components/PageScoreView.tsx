@@ -162,8 +162,6 @@ export default function PageScoreView({
         abortRef.current.signal,
       );
       for await (const evt of stream) {
-        if (evt.progress !== undefined) setReoptimizeProgress(evt.progress);
-        if (evt.message) setReoptimizeStep(evt.message);
         if ("step" in evt && evt.step === "error") throw new Error(evt.message || "Reoptimize failed");
         if ("step" in evt && evt.step === "done" && evt.result) {
           await saveTokenUsage(evt.result.token_usage);
@@ -333,12 +331,12 @@ export default function PageScoreView({
                 <Button
                   className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
                   onClick={runReoptimize}
-                  disabled={reoptimizing || (credits !== undefined && (credits?.balance ?? 0) < 1)}
-                  title={(credits?.balance ?? 0) < 1 ? "Insufficient credits" : undefined}
+                  disabled={reoptimizing || (credits !== undefined && (credits?.balance ?? 0) < 2)}
+                  title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
                 >
                   {reoptimizing
                     ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Reoptimizing…</>
-                    : <>"Reoptimize This Page" <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span></>}
+                    : <>Reoptimize This Page <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span></>}
                 </Button>
                 {reoptimizing && (
                   <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
