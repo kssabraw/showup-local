@@ -2795,7 +2795,7 @@ async def score_page(request: Request, body: ScorePageRequest):
         try:
             msg = await client.messages.create(
                 model=SCORE_MODEL,
-                max_tokens=4096,
+                max_tokens=8192,
                 system=[{"type": "text", "text": _SCORE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 messages=[
                     {"role": "user", "content": user_prompt},
