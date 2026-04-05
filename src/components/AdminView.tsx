@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Loader2, Upload, CheckCircle, FileText, Clock } from "lucide-react";
+import { Loader2, Upload, CheckCircle, FileText, Clock, Send, ChevronDown, ChevronUp } from "lucide-react";
 import {
   useAllPressReleases,
   useMarkSyndicated,
@@ -24,40 +24,64 @@ const STATUS_COLOR: Record<PressRelease["status"], string> = {
 
 function PRRow({ pr }: { pr: PressRelease & { business_name?: string } }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [showDeliverForm, setShowDeliverForm] = useState(false);
+  const [message, setMessage] = useState("");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
 
   const markSyndicated = useMarkSyndicated();
   const uploadReport = useUploadReport();
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     if (file.type !== "application/pdf") {
       setUploadError("Only PDF files are accepted.");
       return;
     }
+    setSelectedFile(file);
+    setUploadError("");
+  };
+
+  const handleDeliver = async () => {
+    if (!selectedFile) { setUploadError("Please select a PDF report."); return; }
+    if (!message.trim()) { setUploadError("Please add a message for the client."); return; }
+
     setUploading(true);
     setUploadError("");
     try {
-      await uploadReport.mutateAsync({ pressReleaseId: pr.id, file });
+      await uploadReport.mutateAsync({
+        pressReleaseId: pr.id,
+        userId: pr.user_id,
+        file: selectedFile,
+        message: message.trim(),
+        keyword: pr.keyword,
+        businessName: pr.business_name ?? "",
+      });
+      setShowDeliverForm(false);
+      setMessage("");
+      setSelectedFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = "";
     } catch {
-      setUploadError("Upload failed. Please try again.");
+      setUploadError("Delivery failed. Please try again.");
     } finally {
       setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
     }
   };
 
   return (
     <div className="px-6 py-5 space-y-3">
+      {/* PR info */}
       <div className="flex items-start justify-between gap-4">
         <div className="flex-1 min-w-0">
           <p className="text-sm font-semibold text-foreground truncate">
             {pr.page_title || pr.keyword}
           </p>
           <p className="text-xs text-muted-foreground mt-0.5">
-            {pr.business_name && <span className="font-medium text-foreground/70">{pr.business_name} · </span>}
+            {pr.business_name && (
+              <span className="font-medium text-foreground/70">{pr.business_name} · </span>
+            )}
             {pr.keyword} · {pr.location.split(",")[0]}
           </p>
           <p className="text-xs text-muted-foreground mt-0.5">
@@ -70,7 +94,8 @@ function PRRow({ pr }: { pr: PressRelease & { business_name?: string } }) {
         </span>
       </div>
 
-      <div className="flex items-center gap-2">
+      {/* Actions */}
+      <div className="flex items-center gap-2 flex-wrap">
         {pr.status === "submitted" && (
           <Button
             variant="outline"
@@ -86,30 +111,83 @@ function PRRow({ pr }: { pr: PressRelease & { business_name?: string } }) {
         )}
 
         {(pr.status === "syndicated" || pr.status === "report_uploaded") && (
-          <>
-            <Button
-              variant="outline"
-              size="sm"
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShowDeliverForm((v) => !v)}
+          >
+            <Upload className="w-3.5 h-3.5 mr-1.5" />
+            {pr.status === "report_uploaded" ? "Send Another Report" : "Upload & Notify Client"}
+            {showDeliverForm
+              ? <ChevronUp className="w-3.5 h-3.5 ml-1.5" />
+              : <ChevronDown className="w-3.5 h-3.5 ml-1.5" />}
+          </Button>
+        )}
+      </div>
+
+      {/* Deliver form */}
+      {showDeliverForm && (
+        <div className="bg-muted/30 rounded-xl border border-border p-4 space-y-3">
+          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+            Deliver Report to Client
+          </p>
+
+          {/* Message */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-foreground">Message to client</label>
+            <textarea
+              className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-accent/50 resize-none"
+              rows={3}
+              placeholder="e.g. Your press release has been syndicated to 47 news outlets. See the report attached for full placement details."
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+            />
+          </div>
+
+          {/* File picker */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-foreground">Syndication report (PDF)</label>
+            <div
+              className="flex items-center gap-3 border border-dashed border-border rounded-lg px-4 py-3 cursor-pointer hover:bg-muted/40 transition-colors"
               onClick={() => fileInputRef.current?.click()}
-              disabled={uploading}
             >
-              {uploading
-                ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> Uploading…</>
-                : <><Upload className="w-3.5 h-3.5 mr-1.5" /> Upload Report</>}
-            </Button>
+              <FileText className="w-4 h-4 text-muted-foreground shrink-0" />
+              <span className="text-sm text-muted-foreground">
+                {selectedFile ? selectedFile.name : "Click to select PDF…"}
+              </span>
+            </div>
             <input
               ref={fileInputRef}
               type="file"
               accept="application/pdf"
               className="hidden"
-              onChange={handleFileChange}
+              onChange={handleFileSelect}
             />
-          </>
-        )}
-      </div>
+          </div>
 
-      {uploadError && (
-        <p className="text-xs text-destructive">{uploadError}</p>
+          {uploadError && <p className="text-xs text-destructive">{uploadError}</p>}
+
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              className="bg-accent text-accent-foreground hover:opacity-90 font-semibold"
+              onClick={handleDeliver}
+              disabled={uploading}
+            >
+              {uploading
+                ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> Sending…</>
+                : <><Send className="w-3.5 h-3.5 mr-1.5" /> Send to Client</>}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => { setShowDeliverForm(false); setMessage(""); setSelectedFile(null); setUploadError(""); }}
+              disabled={uploading}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -126,7 +204,7 @@ export default function AdminView() {
       <div>
         <h1 className="text-2xl font-display font-bold text-foreground">Admin — Press Releases</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Manage submitted press releases, mark syndications, and upload reports.
+          Manage submitted press releases, mark syndications, and deliver reports to clients.
         </p>
       </div>
 
@@ -148,7 +226,6 @@ export default function AdminView() {
             </span>
           )}
         </div>
-
         {!isLoading && submitted.length === 0 ? (
           <div className="px-6 py-8 text-center text-muted-foreground">
             <CheckCircle className="w-8 h-8 mx-auto mb-2 opacity-30" />
@@ -161,7 +238,7 @@ export default function AdminView() {
         )}
       </div>
 
-      {/* Syndicated / reports */}
+      {/* Syndicated */}
       {syndicated.length > 0 && (
         <div className="bg-card border border-border rounded-xl overflow-hidden">
           <div className="px-6 py-4 border-b border-border flex items-center gap-2">

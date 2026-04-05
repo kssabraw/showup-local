@@ -10,6 +10,7 @@ import LoginView from "@/components/LoginView";
 import SettingsView from "@/components/SettingsView";
 import PressReleasesView from "@/components/PressReleasesView";
 import AdminView from "@/components/AdminView";
+import NotificationBell from "@/components/NotificationBell";
 import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
@@ -174,6 +175,9 @@ const Index = () => {
         <header className="h-16 border-b border-border bg-card/80 backdrop-blur-sm flex items-center px-6 sticky top-0 z-40">
           <div className="flex-1" />
           <div className="flex items-center gap-3">
+            <NotificationBell
+              onNavigateToPR={() => setActiveItem("press-releases")}
+            />
             <span className="text-xs text-muted-foreground hidden sm:block">{session.user.email}</span>
             <button
               onClick={() => supabase.auth.signOut()}

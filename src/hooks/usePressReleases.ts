@@ -202,10 +202,18 @@ export function useUploadReport() {
   return useMutation({
     mutationFn: async ({
       pressReleaseId,
+      userId,
       file,
+      message,
+      keyword,
+      businessName,
     }: {
       pressReleaseId: string;
+      userId: string;
       file: File;
+      message: string;
+      keyword: string;
+      businessName: string;
     }) => {
       const path = `${pressReleaseId}/${Date.now()}-${file.name}`;
       const { error: uploadErr } = await supabase.storage
@@ -217,19 +225,20 @@ export function useUploadReport() {
         .from("press-release-reports")
         .getPublicUrl(path);
 
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { user: adminUser } } = await supabase.auth.getUser();
 
+      // Insert report record
       const { error: insertErr } = await supabase
         .from("press_release_reports" as any)
         .insert({
           press_release_id: pressReleaseId,
           pdf_url: publicUrl,
           pdf_filename: file.name,
-          uploaded_by: user?.id ?? null,
+          uploaded_by: adminUser?.id ?? null,
         });
       if (insertErr) throw insertErr;
 
-      // Update PR status to report_uploaded
+      // Update PR status
       const { error: updateErr } = await supabase
         .from("press_releases" as any)
         .update({
@@ -238,6 +247,20 @@ export function useUploadReport() {
         })
         .eq("id", pressReleaseId);
       if (updateErr) throw updateErr;
+
+      // Notify the user
+      const title = `Your press release has been syndicated${businessName ? ` — ${businessName}` : ""}`;
+      const body = message || `Your press release for "${keyword}" has been syndicated. Download your report in the Press Releases tab.`;
+      const { error: notifErr } = await supabase
+        .from("notifications" as any)
+        .insert({
+          user_id: userId,
+          created_by: adminUser?.id ?? null,
+          related_pr_id: pressReleaseId,
+          title,
+          body,
+        });
+      if (notifErr) throw notifErr;
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ALL_PRESS_RELEASES_KEY });
