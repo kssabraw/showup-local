@@ -155,7 +155,7 @@ for name, val in [
         logger.warning(f"{name} not set — related feature will be skipped")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-ZONES = ["title", "h1", "h2_h3", "body", "paragraphs"]
+ZONES = ["title", "h1", "h2_h3", "paragraphs"]
 
 RELATED_MIN_PAGE_SPREAD  = 0.49
 RELATED_MIN_SIMILARITY   = 0.1
@@ -224,7 +224,6 @@ class ZoneKeywords(BaseModel):
     title: List[dict]
     h1: List[dict]
     h2_h3: List[dict]
-    body: List[dict]
     paragraphs: List[dict] = []
 
 
@@ -685,7 +684,6 @@ async def _run_serp_analysis(
         title=get_related_keywords_for_zone(zone_buckets["title"], keyword),
         h1=get_related_keywords_for_zone(zone_buckets["h1"], keyword),
         h2_h3=get_related_keywords_for_zone(zone_buckets["h2_h3"], keyword),
-        body=get_related_keywords_for_zone(zone_buckets["body"], keyword),
         paragraphs=get_related_keywords_for_zone(zone_buckets["paragraphs"], keyword),
     )
     quadgrams = get_top_quadgrams(zone_buckets["paragraphs"], keyword)
@@ -2487,7 +2485,6 @@ def _serp_context(serp_analysis: Optional[dict]) -> str:
         ("title",      "PAGE TITLE (<title> tag)"),
         ("h1",         "H1 HEADING"),
         ("h2_h3",      "H2/H3 SUBHEADINGS"),
-        ("body",       "BODY TEXT"),
         ("paragraphs", "PARAGRAPHS (<p> tags)"),
     ]
 
