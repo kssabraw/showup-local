@@ -66,7 +66,19 @@ except Exception as e:
 app = FastAPI()
 
 # ── Rate limiting ──────────────────────────────────────────────────────────────
-limiter = Limiter(key_func=get_remote_address)
+# Behind Railway's reverse proxy, get_remote_address returns the proxy IP, making
+# rate limits apply globally rather than per-client. Use X-Forwarded-For instead,
+# which Railway sets to the real client IP and users cannot spoof past the proxy.
+def _real_client_ip(request: Request) -> str:
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    real_ip = request.headers.get("X-Real-IP", "")
+    if real_ip:
+        return real_ip.strip()
+    return get_remote_address(request)
+
+limiter = Limiter(key_func=_real_client_ip)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -114,8 +126,10 @@ NLP_API_KEY          = os.environ.get("NLP_API_KEY", "")
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 async def verify_api_key(api_key: str = Security(_api_key_header)):
-    """Validates X-API-Key header. Skipped if NLP_API_KEY env var is not set."""
-    if NLP_API_KEY and api_key != NLP_API_KEY:
+    """Validates X-API-Key header. Fails closed — rejects all requests if NLP_API_KEY is unset."""
+    if not NLP_API_KEY:
+        raise HTTPException(status_code=503, detail="Service authentication not configured")
+    if api_key != NLP_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
     return api_key
 
