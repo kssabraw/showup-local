@@ -3579,13 +3579,13 @@ async def _fetch_maps_top10(
     loc_field: dict,
     business_name: str,
     credentials: str,
-) -> tuple[bool, int, bool]:
+) -> tuple[bool, int, list[dict]]:
     """
     Query DataForSEO Google Maps endpoint for top-10 results.
-    Returns (business_found, position, has_any_results).
+    Returns (business_found, position, maps_items).
     - business_found: True if business_name appears in top-10
     - position: rank (0 if not found)
-    - has_any_results: True if the Maps pack exists at all (≥1 result returned)
+    - maps_items: full list of maps_search items for competitor/category analysis
     """
     payload = [{
         "keyword": keyword,
@@ -3608,16 +3608,15 @@ async def _fetch_maps_top10(
                 for item in (result.get("items") or []):
                     if item.get("type") == "maps_search":
                         maps_items.append(item)
-        has_any = len(maps_items) > 0
         for item in maps_items:
             name = item.get("title", "")
             pos = item.get("rank_absolute") or item.get("rank_group") or 0
             if business_name and _keyword_in_name(business_name, name):
-                return True, int(pos), has_any
-        return False, 0, has_any
+                return True, int(pos), maps_items
+        return False, 0, maps_items
     except Exception as e:
         logger.warning(f"Maps top-10 check failed for '{keyword}': {e}")
-    return False, 0, False
+    return False, 0, []
 
 
 @app.post('/check-rankability', response_model=RankabilityResponse, dependencies=[Depends(verify_api_key)])
@@ -3650,40 +3649,42 @@ async def check_rankability(request: Request, body: RankabilityRequest):
             resp.raise_for_status()
             return resp.json()
 
-    # Always run the Maps fetch — it's the authoritative source for has_map_pack
+    # Run SERP and Maps in parallel. SERP determines has_map_pack (organic signal only).
+    # Maps top-10 is used for all competitor/category analysis regardless.
     maps_task = _fetch_maps_top10(body.keyword, loc_field, body.business_name or "", credentials)
-    serp_data, (in_maps_results, maps_position, maps_has_results) = await asyncio.gather(
+    serp_data, (in_maps_results, maps_position, maps_items) = await asyncio.gather(
         _fetch_serp(), maps_task
     )
 
-    # Parse SERP items
-    organic_items: List[dict] = []
+    # Parse organic SERP — only used to determine if a local pack appears in search results
     local_pack_items: List[dict] = []
     for task in (serp_data.get("tasks") or []):
         for result in (task.get("result") or []):
             for item in (result.get("items") or []):
-                t = item.get("type", "")
-                if t == "organic":
-                    organic_items.append(item)
-                elif t == "local_pack":
+                if item.get("type") == "local_pack":
                     local_pack_items.append(item)
 
-    # ── Local pack analysis ────────────────────────────────────────────────────
+    # has_map_pack is determined solely by organic SERP (honest signal)
     has_map_pack = len(local_pack_items) > 0
+
+    # ── Competitor & category analysis from Maps top-10 ────────────────────────
+    # Maps endpoint reliably returns the top local businesses regardless of
+    # whether the organic SERP happened to render the local pack widget.
     competitors: List[CompetitorInfo] = []
     category_counts: Dict[str, int] = {}
     keyword_name_count = 0
     competitor_name_examples: List[str] = []
     physical_competitor_count = 0
 
-    for item in local_pack_items[:3]:
+    for item in maps_items[:10]:
         name = item.get("title", "")
-        rating = item.get("rating", {}).get("value") if isinstance(item.get("rating"), dict) else item.get("rating")
-        review_count = item.get("rating", {}).get("votes_count") if isinstance(item.get("rating"), dict) else item.get("rating_votes")
+        rating_obj = item.get("rating") or {}
+        rating = rating_obj.get("value") if isinstance(rating_obj, dict) else rating_obj
+        review_count = rating_obj.get("votes_count") if isinstance(rating_obj, dict) else None
 
-        # Physical location = has a non-empty address shown in the pack
-        address_val = item.get("address") or item.get("address_info", {}) or ""
-        is_physical = bool(address_val) if isinstance(address_val, str) else bool(address_val)
+        # Physical location = has a street address (not just city)
+        address_val = item.get("address", "") or ""
+        is_physical = bool(address_val)
         if is_physical:
             physical_competitor_count += 1
 
@@ -3692,8 +3693,9 @@ async def check_rankability(request: Request, body: RankabilityRequest):
             keyword_name_count += 1
             competitor_name_examples.append(name)
 
-        # Collect categories from snippet/categories field
-        for cat in (item.get("categories") or []):
+        # Maps items use singular "category" field
+        cat = item.get("category", "")
+        if cat:
             category_counts[cat] = category_counts.get(cat, 0) + 1
 
         competitors.append(CompetitorInfo(
@@ -3756,7 +3758,7 @@ async def check_rankability(request: Request, body: RankabilityRequest):
         in_maps_results=in_maps_results,
         is_sab=is_sab,
         physical_competitor_count=physical_competitor_count,
-        total_pack_count=len(local_pack_items[:3]),
+        total_pack_count=len(maps_items[:10]),
     )
 
     # ── Review gap — reviews needed to match weakest competitor ───────────────
@@ -3772,10 +3774,13 @@ async def check_rankability(request: Request, body: RankabilityRequest):
         "very_difficult": "Very difficult — consider a different keyword or location",
     }
     message = verdict_labels.get(score_data["verdict"], "")
-    # Only report "no map pack" if neither the organic SERP nor the Maps endpoint
-    # returned any results — both being empty strongly indicates low local intent.
-    if not has_map_pack and not maps_has_results:
-        message = "No map pack found for this keyword — may be a low local-intent query"
+    if not has_map_pack:
+        # Organic SERP didn't show a local pack — note it but still scored from Maps data
+        no_pack_note = " (no local pack in organic SERP for this query)" if maps_items else ""
+        if not maps_items:
+            message = "No map pack found for this keyword — may be a low local-intent query"
+        else:
+            message = verdict_labels.get(score_data["verdict"], "") + no_pack_note
     elif score_data.get("sab_pack_mismatch"):
         message += f". Your service area business faces a pack dominated by {physical_competitor_count} physical location(s) — Google heavily favors proximity for this keyword"
 
