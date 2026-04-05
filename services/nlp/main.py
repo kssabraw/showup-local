@@ -1836,7 +1836,7 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
             selected = await _crawl_pages_for_brand_voice(url, client, max_pages=25)
 
         async def _scrapeowl_extract(pages: List[dict], render_js: bool) -> List[str]:
-            """Fetch pages via ScrapeOwl and extract paragraph text."""
+            """Fetch pages via ScrapeOwl and extract text content."""
             async with httpx.AsyncClient() as sc:
                 htmls = await asyncio.gather(
                     *[_scrape_one(p['url'], sc, render_js=render_js) for p in pages],
@@ -1847,10 +1847,22 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
                 if not html or isinstance(html, Exception):
                     continue
                 soup = BeautifulSoup(html, "html.parser")
-                for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+                for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]):
                     tag.decompose()
-                paragraphs = [para.get_text(" ", strip=True) for para in soup.find_all("p")]
-                paragraphs = [para for para in paragraphs if len(para) > 40]
+                # Try <p> tags first; fall back to all block-level text if none found
+                paragraphs = [el.get_text(" ", strip=True) for el in soup.find_all("p")]
+                paragraphs = [t for t in paragraphs if len(t) > 40]
+                if not paragraphs:
+                    # Many builder sites (Duda, Wix, Squarespace) use <div>/<span> not <p>
+                    lines = soup.get_text("\n", strip=True).splitlines()
+                    seen = set()
+                    for line in lines:
+                        line = line.strip()
+                        if len(line) > 40 and line not in seen:
+                            paragraphs.append(line)
+                            seen.add(line)
+                        if len(paragraphs) >= 30:
+                            break
                 text = " ".join(paragraphs[:30])
                 if text.strip():
                     results.append(f"[{p.get('page_type', 'page')}] {p['url']}\n{text[:600]}")
