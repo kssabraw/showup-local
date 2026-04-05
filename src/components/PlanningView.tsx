@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -6,9 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge";
 import { Loader2, Search, Plus, ExternalLink } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-
-const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "";
-const NLP_API_KEY = import.meta.env.VITE_NLP_API_KEY ?? "";
+import { nlp, nlpStream } from "@/lib/nlp-client";
 
 interface Business {
   id: string;
@@ -60,7 +58,6 @@ export default function PlanningView({ onCreatePage }: Props) {
   const [current, setCurrent] = useState(0);
   const [results, setResults] = useState<PlanItem[]>([]);
   const [error, setError] = useState("");
-  const readerRef = useRef<ReadableStreamDefaultReader | null>(null);
   const [rankabilityMap, setRankabilityMap] = useState<Record<string, RankabilityResult>>({});
   const [rankabilityLoading, setRankabilityLoading] = useState<Record<string, boolean>>({});
 
@@ -89,43 +86,23 @@ export default function PlanningView({ onCreatePage }: Props) {
     setCurrent(0);
 
     try {
-      const res = await fetch(`${NLP_SERVICE_URL}/plan-pages`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-        body: JSON.stringify({
-          website_url: selectedBusiness.website,
-          keyword: keyword.trim(),
-          location: location.trim(),
-        }),
+      const stream = nlpStream<any>("/plan-pages", {
+        website_url: selectedBusiness.website,
+        keyword: keyword.trim(),
+        location: location.trim(),
       });
-      if (!res.ok || !res.body) throw new Error(`Request failed: ${res.status}`);
 
-      const reader = res.body.getReader();
-      readerRef.current = reader;
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          let evt: any;
-          try { evt = JSON.parse(line.slice(6)); } catch { continue; }
-          if (evt.progress !== undefined) setProgress(evt.progress);
-          if (evt.message) setProgressMsg(evt.message);
-          if (evt.total) setTotal(evt.total);
-          if (evt.current) setCurrent(evt.current);
-          if (evt.step === "checking_keyword") setCurrentKw(evt.message ?? "");
-          if (evt.step === "keyword_result" && evt.item) {
-            setResults(prev => [...prev, evt.item]);
-          }
-          if (evt.step === "error") throw new Error(evt.message || "Scan failed");
-          if (evt.step === "done") break;
+      for await (const evt of stream) {
+        if (evt.progress !== undefined) setProgress(evt.progress);
+        if (evt.message) setProgressMsg(evt.message);
+        if (evt.total) setTotal(evt.total);
+        if (evt.current) setCurrent(evt.current);
+        if (evt.step === "checking_keyword") setCurrentKw(evt.message ?? "");
+        if (evt.step === "keyword_result" && evt.item) {
+          setResults(prev => [...prev, evt.item]);
         }
+        if (evt.step === "error") throw new Error(evt.message || "Scan failed");
+        if (evt.step === "done") break;
       }
     } catch (e: any) {
       setError(e.message || "Scan failed");
@@ -139,13 +116,11 @@ export default function PlanningView({ onCreatePage }: Props) {
     if (!selectedBusiness?.gbp_category || !location.trim()) return;
     setRankabilityLoading(prev => ({ ...prev, [kw]: true }));
     try {
-      const res = await fetch(`${NLP_SERVICE_URL}/check-rankability`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-API-Key": NLP_API_KEY },
-        body: JSON.stringify({ keyword: kw, location: location.trim(), gbp_category: selectedBusiness.gbp_category }),
+      const data = await nlp.checkRankability({
+        keyword: kw,
+        location: location.trim(),
+        gbp_category: selectedBusiness.gbp_category,
       });
-      if (!res.ok) throw new Error();
-      const data = await res.json();
       setRankabilityMap(prev => ({ ...prev, [kw]: data }));
     } catch {
       setRankabilityMap(prev => ({ ...prev, [kw]: { verdict: "unknown", match_count: 0, total_results: 0, ranking_categories: [], message: "Could not retrieve map pack data." } }));
