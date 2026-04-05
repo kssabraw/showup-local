@@ -2120,7 +2120,11 @@ def _parse_claude_json(text: str) -> dict:
     if text.startswith("```"):
         text = re.sub(r'^```(?:json)?\s*', '', text)
         text = re.sub(r'\s*```$', '', text.strip())
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        logger.warning(f"_parse_claude_json: failed to parse JSON, returning empty dict. Raw: {text[:300]}")
+        return {}
 
 def compute_zone_targets(
     zone_buckets: Dict[str, List[str]],
@@ -2758,8 +2762,12 @@ async def score_page(request: Request, body: ScorePageRequest):
     serp_analysis_dict: Optional[dict] = body.serp_analysis
     if not serp_analysis_dict:
         logger.info(f"score-page: no serp_analysis provided — running inline SERP analysis for '{body.keyword}'")
-        inline_serp = await _run_serp_analysis(body.keyword, body.location, body.location_code)
-        serp_analysis_dict = inline_serp.model_dump()
+        try:
+            inline_serp = await _run_serp_analysis(body.keyword, body.location, body.location_code)
+            serp_analysis_dict = inline_serp.model_dump()
+        except Exception as _serp_err:
+            logger.warning(f"score-page: inline SERP analysis failed ({_serp_err}), continuing without it")
+            serp_analysis_dict = {}
 
     from bs4 import BeautifulSoup as _BS
     page_html = body.page_content
