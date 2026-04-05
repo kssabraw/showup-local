@@ -352,7 +352,7 @@ export default function PageScoreView({
                   onClick={onCreateNew}
                   disabled={reoptimizing}
                 >
-                  Create New Page Instead
+                  Create New Page Instead <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span>
                 </Button>
               </>
             ) : (
