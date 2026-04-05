@@ -2134,10 +2134,18 @@ WHAT YOU MUST NOT CHANGE:
 - Existing HTML tag names, CSS classes, IDs, data-* attributes, href, src, or any non-content attributes
 - Do not remove or reorder any existing HTML elements
 
+SERP SIGNAL TARGETS — apply these to the corresponding zones:
+The user prompt contains COMPETITOR SIGNAL DATA with per-zone keyword and entity targets.
+Follow those targets exactly:
+- PAGE TITLE: rewrite the <title> tag text to hit the keyword and entity targets for that zone
+- H1: rewrite the H1 text to hit the keyword and entity targets for that zone
+- H2/H3: rewrite existing subheadings and add new ones where needed to hit those targets
+- PARAGRAPHS: weave missing keywords, entities, and quadgram phrases naturally into paragraph text
+If the existing page is missing a zone entirely (e.g. no H1, no FAQ), add it at the most natural location.
+
 PLACEMENT RULES FOR NEW CONTENT:
 - Insert new content where it reads most naturally — not always at the bottom
-- New paragraphs or lists can be added inside or after an existing relevant section
-- A missing FAQ? Insert it after the main service description, not at the very end
+- A missing FAQ? Insert it after the main service description
 - A missing local geo block? Insert it near any existing location references
 - Think about page flow: intro → services → social proof → local → FAQ → CTA
 - New elements use semantic HTML (<section>, <h2>, <ul>, <p> etc.) — the site's CSS will style them
