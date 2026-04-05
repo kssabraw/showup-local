@@ -2489,9 +2489,21 @@ def _serp_context(serp_analysis: Optional[dict]) -> str:
     ]
 
     top_entities = sorted(entities, key=lambda e: e["page_spread"], reverse=True)[:15] if entities else []
-    entity_names_display = {e["name"]: e["recommended_mentions"] for e in top_entities}
 
     parts = ["COMPETITOR SIGNAL DATA — match or exceed these targets in the corresponding zones:"]
+
+    # Show entity list once up front so per-zone instructions can reference it
+    if top_entities:
+        ent_items = [f"{e['name']} (×{e['recommended_mentions']})" for e in top_entities]
+        parts.append(f"\nGOOGLE ENTITIES — use these across the zones per the targets below:")
+        parts.append(f"  {', '.join(ent_items)}")
+
+    zone_display = {
+        "title":      "title tag",
+        "h1":         "H1",
+        "h2_h3":      "H2 and H3 headings",
+        "paragraphs": "paragraphs",
+    }
 
     for zone_key, zone_label in zone_labels:
         terms = rk.get(zone_key, [])[:20]
@@ -2501,17 +2513,12 @@ def _serp_context(serp_analysis: Optional[dict]) -> str:
         if not terms and not entity_target:
             continue
         parts.append(f"\n{zone_label}:")
-        if terms:
-            if term_target:
-                parts.append(f"  Keyword target: include ~{term_target} of these terms (best competitor used {term_target})")
-            parts.append(f"  Terms (ranked by relevance): {', '.join(t['term'] for t in terms)}")
+        if term_target and terms:
+            parts.append(f"  Use {term_target} of these keywords in the {zone_display[zone_key]}: {', '.join(t['term'] for t in terms)}")
+        elif terms:
+            parts.append(f"  Keywords (ranked by relevance): {', '.join(t['term'] for t in terms)}")
         if entity_target and top_entities:
-            parts.append(f"  Entity target: reference ~{entity_target} Google entities in this zone (best competitor used {entity_target})")
-
-    if top_entities:
-        parts.append(f"\nGOOGLE ENTITIES (use across zones per targets above):")
-        ent_items = [f"{name} (×{mentions})" for name, mentions in entity_names_display.items()]
-        parts.append(f"  {', '.join(ent_items)}")
+            parts.append(f"  Use {entity_target} of the above entities in the {zone_display[zone_key]}")
 
     if quadgrams:
         parts.append(f"\nTOP COMPETITOR PHRASES (4-word phrases — use naturally in body):")
