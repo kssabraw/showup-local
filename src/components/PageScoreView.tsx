@@ -162,8 +162,6 @@ export default function PageScoreView({
         abortRef.current.signal,
       );
       for await (const evt of stream) {
-        if (evt.progress !== undefined) setReoptimizeProgress(evt.progress);
-        if (evt.message) setReoptimizeStep(evt.message);
         if ("step" in evt && evt.step === "error") throw new Error(evt.message || "Reoptimize failed");
         if ("step" in evt && evt.step === "done" && evt.result) {
           await saveTokenUsage(evt.result.token_usage);
@@ -212,7 +210,7 @@ export default function PageScoreView({
       {!scoreResult && (
         <div className="bg-card rounded-xl border border-border p-6 space-y-4">
           <p className="text-sm text-muted-foreground">
-            Score this page against all 7 SEO engines using the competitor SERP data as benchmarks.
+            Score this page against 7 SEO benchmarks using our proprietary data processing techniques.
           </p>
           {error && (
             <div className="bg-destructive/10 border border-destructive/20 rounded-lg px-4 py-3 text-sm text-destructive">{error}</div>
@@ -220,12 +218,12 @@ export default function PageScoreView({
           <Button
             className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
             onClick={runScore}
-            disabled={scoring || (credits !== undefined && (credits?.balance ?? 0) < 2)}
-            title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
+            disabled={scoring || (credits !== undefined && (credits?.balance ?? 0) < 1)}
+            title={(credits?.balance ?? 0) < 1 ? "Insufficient credits" : undefined}
           >
             {scoring
               ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{serp_analysis ? "Scoring page…" : "Analyzing competitors…"}</>
-              : <>"Score This Page" <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span></>}
+              : <>Score This Page <span className="ml-2 text-xs opacity-70 font-normal">1 credit</span></>}
           </Button>
           {scoring && (
             <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
@@ -333,12 +331,12 @@ export default function PageScoreView({
                 <Button
                   className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
                   onClick={runReoptimize}
-                  disabled={reoptimizing || (credits !== undefined && (credits?.balance ?? 0) < 1)}
-                  title={(credits?.balance ?? 0) < 1 ? "Insufficient credits" : undefined}
+                  disabled={reoptimizing || (credits !== undefined && (credits?.balance ?? 0) < 2)}
+                  title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
                 >
                   {reoptimizing
                     ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Reoptimizing…</>
-                    : <>"Reoptimize This Page" <span className="ml-2 text-xs opacity-70 font-normal">1 credit</span></>}
+                    : <>Reoptimize This Page <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span></>}
                 </Button>
                 {reoptimizing && (
                   <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
@@ -352,7 +350,7 @@ export default function PageScoreView({
                   onClick={onCreateNew}
                   disabled={reoptimizing}
                 >
-                  Create New Page Instead
+                  Create New Page Instead <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span>
                 </Button>
               </>
             ) : (
