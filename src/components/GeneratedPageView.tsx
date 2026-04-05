@@ -1,11 +1,11 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
-import { Copy, Check, Save, Loader2, ExternalLink, Download } from "lucide-react";
+import { Copy, Check, Save, Loader2, ExternalLink, Download, TrendingUp, ArrowRight } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { nlp } from "@/lib/nlp-client";
 import { StepIndicator } from "@/components/StepIndicator";
 import { useInvalidateSavedPages } from "@/hooks/useSavedPages";
-import type { RelatedPageItem } from "@/lib/nlp-types";
+import type { RelatedPageItem, ScoreResult } from "@/lib/nlp-types";
 import DOMPurify from 'dompurify';
 
 import type { TokenUsage, CostBreakdown } from "@/lib/nlp-types";
@@ -97,6 +97,7 @@ interface Props {
   detected_icp?: unknown;
   brand_voice?: unknown;
   serp_analysis?: unknown;
+  prevScore?: number | null;
   onBack: () => void;
   onNewPage: () => void;
   onRelatedAction?: (action: { mode: "reoptimize" | "new"; keyword: string; existingUrl?: string }) => void;
@@ -126,6 +127,7 @@ export default function GeneratedPageView({
   tokenUsage, costBreakdown,
   businessId, businessName, website, gbpCategory, address,
   phone, differentiators, detected_icp, brand_voice, serp_analysis,
+  prevScore,
   onBack, onNewPage, onRelatedAction,
 }: Props) {
   const invalidateSavedPages = useInvalidateSavedPages();
@@ -137,6 +139,32 @@ export default function GeneratedPageView({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState("");
+
+  // Auto-score the generated/reoptimized page in the background
+  const [autoScore, setAutoScore] = useState<ScoreResult | null>(null);
+  const [autoScoring, setAutoScoring] = useState(true);
+  const scoredRef = useRef(false);
+
+  useEffect(() => {
+    if (scoredRef.current) return;
+    scoredRef.current = true;
+    const pageText = new DOMParser().parseFromString(contentHtml, "text/html").body.innerText;
+    nlp.scorePage({
+      keyword,
+      location,
+      page_content: pageText,
+      business_name: businessName,
+      gbp_category: gbpCategory,
+      address,
+      serp_analysis: serp_analysis as any,
+    }).then(result => {
+      setAutoScore(result);
+    }).catch(() => {
+      // Non-fatal — score display stays hidden
+    }).finally(() => {
+      setAutoScoring(false);
+    });
+  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
   const [activeTab, setActiveTab] = useState<"preview" | "raw-text" | "html" | "schema" | "social" | "related">("preview");
   // Related pages state
   const [relatedLoading, setRelatedLoading] = useState(false);
@@ -195,6 +223,8 @@ export default function GeneratedPageView({
         page_title: pageTitle || null,
         content_html: contentHtml,
         schema_json: schemaJson || null,
+        composite_score: autoScore?.composite_score ?? null,
+        composite_status: autoScore?.composite_status ?? null,
       });
       if (error) throw error;
       setSaved(true);
@@ -349,6 +379,56 @@ export default function GeneratedPageView({
           </div>
         </div>
       </div>
+
+      {/* SEO Score banner */}
+      {autoScoring ? (
+        <div className="flex items-center gap-2 px-4 py-3 bg-muted/40 border border-border rounded-xl text-sm text-muted-foreground">
+          <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+          Scoring your page…
+        </div>
+      ) : autoScore ? (
+        <div className={`flex items-center gap-4 px-5 py-4 rounded-xl border ${
+          autoScore.composite_score >= 80 ? "bg-green-500/5 border-green-500/20" :
+          autoScore.composite_score >= 60 ? "bg-amber-500/5 border-amber-500/20" :
+          "bg-red-500/5 border-red-500/20"
+        }`}>
+          <TrendingUp className={`w-5 h-5 shrink-0 ${
+            autoScore.composite_score >= 80 ? "text-green-500" :
+            autoScore.composite_score >= 60 ? "text-amber-500" :
+            "text-red-500"
+          }`} />
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-0.5">SEO Score</p>
+            {mode === "reoptimize" && prevScore != null ? (
+              <div className="flex items-center gap-2">
+                <span className="text-xl font-display font-bold text-muted-foreground">{Math.round(prevScore)}</span>
+                <ArrowRight className="w-4 h-4 text-muted-foreground" />
+                <span className={`text-xl font-display font-bold ${
+                  autoScore.composite_score >= 80 ? "text-green-500" :
+                  autoScore.composite_score >= 60 ? "text-amber-500" :
+                  "text-red-500"
+                }`}>{Math.round(autoScore.composite_score)}</span>
+                <span className="text-sm text-muted-foreground">/ 100</span>
+                {autoScore.composite_score > prevScore && (
+                  <span className="text-xs font-medium text-green-600 bg-green-500/10 px-2 py-0.5 rounded-full">
+                    +{Math.round(autoScore.composite_score - prevScore)} pts
+                  </span>
+                )}
+              </div>
+            ) : (
+              <div className="flex items-baseline gap-1.5">
+                <span className={`text-xl font-display font-bold ${
+                  autoScore.composite_score >= 80 ? "text-green-500" :
+                  autoScore.composite_score >= 60 ? "text-amber-500" :
+                  "text-red-500"
+                }`}>{Math.round(autoScore.composite_score)}</span>
+                <span className="text-sm text-muted-foreground">/ 100</span>
+              </div>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground capitalize hidden sm:block">{autoScore.composite_status?.replace("_", " ")}</p>
+        </div>
+      ) : null}
 
       {/* Cost breakdown panel */}
       {showCostBreakdown && (

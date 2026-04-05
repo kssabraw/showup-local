@@ -50,7 +50,7 @@ type ViewState =
   | { kind: "form" }
   | { kind: "creating" }
   | { kind: "score"; pageMatch: { url: string; title: string; h1?: string }; serpAnalysis?: AnalysisResult; initialScoreResult?: ScoreResult }
-  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; tokenUsage: Partial<TokenUsage>; costBreakdown: Partial<CostBreakdown>; isNew?: boolean; serpAnalysis?: AnalysisResult }
+  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; tokenUsage: Partial<TokenUsage>; costBreakdown: Partial<CostBreakdown>; isNew?: boolean; serpAnalysis?: AnalysisResult; prevScore?: number | null }
   | { kind: "analysis"; result: AnalysisResult };
 
 // ANALYSIS_CACHE_MAX_AGE_DAYS — cached keyword analyses older than this are ignored
@@ -739,8 +739,8 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         onSerpAnalysis={saveAnalysisToSupabase}
         initialScoreResult={view.initialScoreResult}
         onBack={() => setView({ kind: "form" })}
-        onGenerated={(result, mode) =>
-          setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "", htmlCssNotes: result.html_css_notes, tokenUsage: result.token_usage, costBreakdown: result.cost_breakdown ?? {}, isNew: true })
+        onGenerated={(result, mode, prevScore) =>
+          setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "", htmlCssNotes: result.html_css_notes, tokenUsage: result.token_usage, costBreakdown: result.cost_breakdown ?? {}, isNew: true, prevScore })
         }
         onCreateNew={handleCreateNewPage}
         relatedPagePanel={relatedPagePanel}
@@ -772,6 +772,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         detected_icp={selectedBusiness?.detected_icp ?? undefined}
         brand_voice={selectedBusiness?.brand_voice ?? undefined}
         serp_analysis={view.serpAnalysis ?? undefined}
+        prevScore={view.prevScore ?? null}
         onBack={() => setView({ kind: "form" })}
         onNewPage={() => { setView({ kind: "form" }); setKeyword(""); setCheckState({ status: "idle" }); }}
         onRelatedAction={handleRelatedAction}

@@ -33,7 +33,7 @@ interface Props {
   onSerpAnalysis?: (analysis: AnalysisResult) => void;  // called when scoring ran analysis inline
   initialScoreResult?: ScoreResult;
   onBack: () => void;
-  onGenerated: (result: GeneratedResult, mode: "reoptimize") => void;
+  onGenerated: (result: GeneratedResult, mode: "reoptimize", prevScore?: number) => void;
   onCreateNew: () => void;
   relatedPagePanel?: ReactNode;
 }
@@ -166,7 +166,7 @@ export default function PageScoreView({
         if ("step" in evt && evt.step === "done" && evt.result) {
           await saveTokenUsage(evt.result.token_usage);
           invalidateCredits();
-          onGenerated(evt.result as GeneratedResult, "reoptimize");
+          onGenerated(evt.result as GeneratedResult, "reoptimize", scoreResult?.composite_score ?? undefined);
           return;
         }
       }
