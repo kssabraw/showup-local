@@ -3724,6 +3724,40 @@ async def check_rankability(request: Request, body: RankabilityRequest):
     else:
         category_match = "none"
 
+    # ── Category mismatch — hard fail ─────────────────────────────────────────
+    # If none of the Maps top-10 businesses share the client's GBP category,
+    # ranking in Maps is essentially impossible. Skip all other checks and
+    # return immediately with a clear "do not target" verdict.
+    if category_match == "none":
+        logger.info(
+            f"Rankability '{body.keyword}' @ '{body.location}': "
+            f"category mismatch — returning hard fail (pack cats: {[r['category'] for r in ranking_categories]})"
+        )
+        return RankabilityResponse(
+            score=0,
+            verdict="very_difficult",
+            score_breakdown={"category_match": 0},
+            has_map_pack=has_map_pack,
+            competitors=competitors[:3],
+            ranking_categories=ranking_categories,
+            category_match="none",
+            keyword_in_competitor_names=keyword_name_count,
+            competitor_name_examples=competitor_name_examples,
+            in_maps_results=in_maps_results,
+            maps_position=maps_position if in_maps_results else None,
+            is_sab=_infer_is_sab(body.business_address),
+            sab_pack_mismatch=False,
+            physical_competitors_in_pack=physical_competitor_count,
+            message=(
+                "Your GBP category doesn't match any category in the Maps results — "
+                "you will not rank in Maps for this keyword. "
+                "The businesses ranking here are in a different category. "
+                "Target a different keyword, or create content for organic search instead."
+            ),
+            match_count=0,
+            total_results=len(maps_items),
+        )
+
     # ── Review metrics ─────────────────────────────────────────────────────────
     review_counts = [c.review_count for c in competitors if c.review_count is not None]
     ratings = [c.rating for c in competitors if c.rating is not None]
