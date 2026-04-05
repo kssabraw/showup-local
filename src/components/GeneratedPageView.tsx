@@ -10,6 +10,15 @@ import DOMPurify from 'dompurify';
 
 import type { TokenUsage, CostBreakdown } from "@/lib/nlp-types";
 
+function formatHtml(html: string): string {
+  const block = 'p|h[1-6]|div|ul|ol|li|br|hr|section|article|header|footer|nav|main|aside|table|thead|tbody|tr|td|th|blockquote|pre|figure|figcaption|script|style';
+  return html
+    .replace(new RegExp(`</(${block})>`, 'gi'), '</$1>\n')
+    .replace(new RegExp(`(\\n?)(<(?:${block})[^>]*>)`, 'gi'), '\n$2')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 interface Props {
   keyword: string;
   location: string;
@@ -81,7 +90,7 @@ export default function GeneratedPageView({
   const [selections, setSelections] = useState<RelatedSelection>({});
 
   const copyHtml = async () => {
-    const fullHtml = pageTitle ? `<title>${pageTitle}</title>\n\n${contentHtml}` : contentHtml;
+    const fullHtml = pageTitle ? `<title>${pageTitle}</title>\n\n${formatHtml(contentHtml)}` : formatHtml(contentHtml);
     await navigator.clipboard.writeText(fullHtml);
     setCopiedHtml(true);
     setTimeout(() => setCopiedHtml(false), 2000);
@@ -402,7 +411,7 @@ export default function GeneratedPageView({
             </Button>
           </div>
           <pre className="bg-muted rounded-xl border border-border p-4 text-xs overflow-x-auto whitespace-pre-wrap font-mono text-foreground max-h-[600px] overflow-y-auto">
-            {pageTitle ? `<title>${pageTitle}</title>\n\n` : ""}{contentHtml}
+            {pageTitle ? `<title>${pageTitle}</title>\n\n` : ""}{formatHtml(contentHtml)}
           </pre>
         </div>
       )}
