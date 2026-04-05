@@ -2331,15 +2331,18 @@ async def _score_page_for_related(
     user_prompt = _build_score_prompt(business_name, gbp_category, keyword, city, address, "", page_text)
     msg = await haiku_client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=2000,
+        max_tokens=4096,
         system=[{"type": "text", "text": _SCORE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-        messages=[{"role": "user", "content": user_prompt}],
+        messages=[
+            {"role": "user", "content": user_prompt},
+            {"role": "assistant", "content": "{"},
+        ],
     )
     token_rec = _token_record(
         "related-pages/score", "claude-haiku-4-5-20251001",
         msg.usage.input_tokens, msg.usage.output_tokens,
     )
-    scores = _parse_claude_json(msg.content[0].text)
+    scores = _parse_claude_json("{" + msg.content[0].text)
     composite, status = _composite_from_scores(scores)
     return {
         "composite_score": composite,
@@ -2792,12 +2795,15 @@ async def score_page(request: Request, body: ScorePageRequest):
         try:
             msg = await client.messages.create(
                 model=SCORE_MODEL,
-                max_tokens=2000,
+                max_tokens=4096,
                 system=[{"type": "text", "text": _SCORE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": user_prompt}],
+                messages=[
+                    {"role": "user", "content": user_prompt},
+                    {"role": "assistant", "content": "{"},  # prefill: forces JSON start, prevents preamble
+                ],
             )
             token_rec = _token_record("score-page", SCORE_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
-            parsed = _parse_claude_json(msg.content[0].text)
+            parsed = _parse_claude_json("{" + msg.content[0].text)  # prepend the prefilled "{"
             if parsed:
                 scores = parsed
                 break
