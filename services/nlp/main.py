@@ -2760,14 +2760,11 @@ async def score_page(request: Request, body: ScorePageRequest):
     from bs4 import BeautifulSoup as _BS
     page_html = body.page_content
     if not page_html and body.page_url:
-        try:
-            async with httpx.AsyncClient() as _fc:
-                _resp = await _fc.get(body.page_url, timeout=15.0,
-                                      headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"})
-                _resp.raise_for_status()
-                page_html = _resp.text
-        except Exception as _e:
-            logger.warning(f"Could not fetch page_url for scoring: {_e}")
+        async with httpx.AsyncClient() as _fc:
+            page_html = await _scrape_one(body.page_url, _fc, render_js=False)
+            if not page_html:
+                page_html = await _scrape_one(body.page_url, _fc, render_js=True)
+        if not page_html:
             raise HTTPException(status_code=422, detail="Could not fetch the provided page URL. Check that it is correct and publicly accessible.")
     if not page_html:
         raise HTTPException(status_code=422, detail="Either page_content or page_url is required")
@@ -3025,14 +3022,11 @@ async def reoptimize_page(request: Request, body: ReoptimizePageRequest):
     # Fetch existing page if URL given but no HTML
     existing_html = body.existing_page_html or ""
     if not existing_html and body.existing_page_url:
-        try:
-            async with httpx.AsyncClient() as _fc:
-                _resp = await _fc.get(body.existing_page_url, timeout=15.0,
-                                      headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"})
-                _resp.raise_for_status()
-                existing_html = _resp.text
-        except Exception as _e:
-            logger.warning(f"Could not fetch existing_page_url for reoptimize: {_e}")
+        async with httpx.AsyncClient() as _fc:
+            existing_html = await _scrape_one(body.existing_page_url, _fc, render_js=False)
+            if not existing_html:
+                existing_html = await _scrape_one(body.existing_page_url, _fc, render_js=True)
+        if not existing_html:
             raise HTTPException(status_code=422, detail="Could not fetch the provided page URL. Check that it is correct and publicly accessible.")
     if not existing_html:
         raise HTTPException(status_code=422, detail="Either existing_page_html or existing_page_url is required")
