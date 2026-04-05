@@ -146,29 +146,44 @@ const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle, isAdmin }: S
       {/* Credit balance */}
       {!collapsed && balance !== null && (
         <div className="px-3 pb-3">
-          <div className="rounded-lg bg-sidebar-accent/40 px-3 py-2.5">
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-xs font-medium text-sidebar-foreground/70">Credits</span>
-              <span className={cn("text-xs font-semibold tabular-nums", low ? "text-red-400" : "text-sidebar-accent-foreground")}>
-                {monthly} / {perMonth}
-                {bonus > 0 && <span className="text-primary ml-1">+{bonus}</span>}
+          <div className="rounded-lg bg-sidebar-accent/40 px-3 py-2.5 space-y-2">
+            <p className="text-xs font-semibold text-sidebar-foreground/70 mb-0.5">Credits</p>
+
+            {/* Analysis / Content */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-sidebar-foreground/60">Analysis &amp; Content</span>
+                <span className={cn("text-xs font-semibold tabular-nums", low ? "text-red-400" : "text-sidebar-accent-foreground")}>
+                  {monthly ?? "–"} / {perMonth}
+                  {bonus > 0 && <span className="text-primary ml-1">+{bonus}</span>}
+                </span>
+              </div>
+              <div className="h-1 rounded-full bg-sidebar-border overflow-hidden">
+                <div
+                  className={cn("h-full rounded-full transition-all", low ? "bg-red-400" : "bg-sidebar-primary")}
+                  style={{ width: `${pct ?? 0}%` }}
+                />
+              </div>
+              {low && <p className="text-xs text-red-400 mt-1">Running low</p>}
+            </div>
+
+            {/* Map pack checks */}
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-sidebar-foreground/60">Map Pack Checks</span>
+              <span className="text-xs font-semibold tabular-nums text-sidebar-accent-foreground">
+                {credits?.rankabilityUsed != null
+                  ? `${(credits.rankabilityLimit ?? 50) - credits.rankabilityUsed} left`
+                  : `50 / mo`}
               </span>
             </div>
-            <div className="h-1.5 rounded-full bg-sidebar-border overflow-hidden">
-              <div
-                className={cn("h-full rounded-full transition-all", low ? "bg-red-400" : "bg-sidebar-primary")}
-                style={{ width: `${pct}%` }}
-              />
+
+            {/* Press releases */}
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-sidebar-foreground/60">Press Releases</span>
+              <span className="text-xs font-semibold tabular-nums text-sidebar-accent-foreground">
+                {credits?.prCredits ?? 0} remaining
+              </span>
             </div>
-            {bonus > 0 && (
-              <p className="text-xs text-primary mt-1.5">{bonus} bonus credit{bonus !== 1 ? "s" : ""}</p>
-            )}
-            {low && !bonus && (
-              <p className="text-xs text-red-400 mt-1.5">Credits running low</p>
-            )}
-            {low && bonus > 0 && (
-              <p className="text-xs text-amber-400 mt-1.5">Monthly credits low — using bonus</p>
-            )}
           </div>
         </div>
       )}
