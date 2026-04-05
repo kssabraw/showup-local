@@ -3571,7 +3571,7 @@ class RankabilityResponse(BaseModel):
     total_results: int = 0
 
 
-DATAFORSEO_MAPS_ENDPOINT = "https://api.dataforseo.com/v3/serp/google/maps/live/regular"
+DATAFORSEO_MAPS_ENDPOINT = "https://api.dataforseo.com/v3/serp/google/maps/live/advanced"
 
 
 async def _fetch_maps_top10(
