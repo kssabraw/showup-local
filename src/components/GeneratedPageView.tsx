@@ -81,7 +81,8 @@ export default function GeneratedPageView({
   const [selections, setSelections] = useState<RelatedSelection>({});
 
   const copyHtml = async () => {
-    await navigator.clipboard.writeText(contentHtml);
+    const fullHtml = pageTitle ? `<title>${pageTitle}</title>\n\n${contentHtml}` : contentHtml;
+    await navigator.clipboard.writeText(fullHtml);
     setCopiedHtml(true);
     setTimeout(() => setCopiedHtml(false), 2000);
   };
@@ -375,6 +376,12 @@ export default function GeneratedPageView({
               {copiedRichText ? <><Check className="w-4 h-4 mr-1" /> Copied!</> : <><Copy className="w-4 h-4 mr-1" /> Copy All</>}
             </Button>
           </div>
+          {pageTitle && (
+            <div className="flex items-start gap-3 px-4 py-3 bg-muted/40 rounded-lg border border-border">
+              <span className="text-xs font-mono text-muted-foreground shrink-0 mt-0.5">&lt;title&gt;</span>
+              <span className="text-sm text-foreground">{pageTitle}</span>
+            </div>
+          )}
           <div
             className="bg-white rounded-xl border border-border p-8 prose prose-sm max-w-none
                        prose-headings:text-gray-900 prose-p:text-gray-800 prose-li:text-gray-800
@@ -395,7 +402,7 @@ export default function GeneratedPageView({
             </Button>
           </div>
           <pre className="bg-muted rounded-xl border border-border p-4 text-xs overflow-x-auto whitespace-pre-wrap font-mono text-foreground max-h-[600px] overflow-y-auto">
-            {contentHtml}
+            {pageTitle ? `<title>${pageTitle}</title>\n\n` : ""}{contentHtml}
           </pre>
         </div>
       )}
