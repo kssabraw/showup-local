@@ -96,20 +96,6 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     }
   }, [businesses, initialBusinessId, selectedBusinessId]);
 
-  useEffect(() => {
-    if (selectedBusinessId) {
-      const b = businesses.find((b) => b.id === selectedBusinessId);
-      if (b) {
-        const parts = b.address.split(",").map((s) => s.trim());
-        if (parts.length >= 2) {
-          const prefilled = parts.slice(1).join(", ") + ", United States";
-          setLocation(prefilled);
-          setLocationInput(prefilled);
-        }
-      }
-    }
-  }, [selectedBusinessId, businesses]);
-
   // Reset check state when inputs change
   useEffect(() => {
     setCheckState({ status: "idle" });
