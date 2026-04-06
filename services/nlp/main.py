@@ -2233,10 +2233,10 @@ CONTENT_GAPS_REPORT_END
 Only include gaps for facts that would measurably improve the page score and that you could NOT include because they weren't in the provided business data. Do not include gaps for information that is already present. If there are no gaps, output an empty array [].
 
 ALWAYS check for these high-impact gaps and include them if missing from the business data:
-1. Response time — if no specific arrival/response window (e.g. "within 2 hours", "same-day") was present in the GBP description, hours, or reviews, include this gap:
-   {"category":"Response Time","missing":"Specific response or arrival window (e.g. 'within 2 hours', 'same-day appointments')","score_impact":"high","why_important":"The nearme_intent scoring engine requires an explicit response time. Without it the page cannot score 90+ — this is the single most common reason for a sub-90 score.","how_to_add":"Add a response time to your GBP business description (e.g. 'We respond within 2 hours') or mention it in a review reply, then regenerate the page."}
-2. Service area / neighborhoods — if no specific neighborhoods or coverage areas were in the business data, flag it as a medium-impact gap.
-3. Certifications / licences — if the GBP category implies them (plumber, electrician, HVAC, contractor) but none were stated, flag as medium-impact."""
+1. Response time — if no specific arrival/response window (e.g. "within 2 hours", "same-day") was present in the business data, include this gap:
+   {"category":"Response Time","missing":"Specific response or arrival window (e.g. 'within 2 hours', 'same-day appointments')","score_impact":"high","why_important":"The nearme_intent scoring engine requires an explicit response time. Without it the page cannot score 90+ — this is the single most common reason for a sub-90 score.","how_to_add":"Add a response time to your website's about or services page, then regenerate this page with that information included."}
+2. Service area / neighborhoods — if no specific neighborhoods or coverage areas were in the business data, flag it as a medium-impact gap with how_to_add pointing to the website (e.g. "Add a service area section to your website listing the neighborhoods you serve, then regenerate.").
+3. Certifications / licences — if the GBP category implies them (plumber, electrician, HVAC, contractor) but none were stated, flag as medium-impact with how_to_add pointing to the website (e.g. "List your licences and certifications on your website's about page, then regenerate.")."""
 
 _REOPT_SYSTEM_PROMPT = """You are an expert local SEO content writer. Fix the SEO deficiencies in the existing page while keeping its design intact.
 
