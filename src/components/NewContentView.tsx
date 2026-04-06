@@ -50,7 +50,7 @@ type ViewState =
   | { kind: "form" }
   | { kind: "creating" }
   | { kind: "score"; pageMatch: { url: string; title: string; h1?: string }; serpAnalysis?: AnalysisResult; initialScoreResult?: ScoreResult }
-  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; tokenUsage: Partial<TokenUsage>; costBreakdown: Partial<CostBreakdown>; isNew?: boolean; serpAnalysis?: AnalysisResult; prevScore?: number | null }
+  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; contentGaps?: import("@/lib/nlp-types").ContentGap[]; tokenUsage: Partial<TokenUsage>; costBreakdown: Partial<CostBreakdown>; isNew?: boolean; serpAnalysis?: AnalysisResult; prevScore?: number | null }
   | { kind: "analysis"; result: AnalysisResult };
 
 // ANALYSIS_CACHE_MAX_AGE_DAYS — cached keyword analyses older than this are ignored
@@ -444,6 +444,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             pageTitle: genData.page_title ?? "",
             tokenUsage: genData.token_usage,
             costBreakdown: genData.cost_breakdown ?? {},
+            contentGaps: genData.content_gaps ?? [],
             isNew: true,
             serpAnalysis: genData.serp_analysis ?? undefined,
           });
@@ -510,6 +511,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             page_title: genData.page_title ?? kw,
             content_html: genData.content_html,
             schema_json: genData.schema_json ?? null,
+            content_gaps: genData.content_gaps ?? [],
           });
           if (saveError) {
             console.error("bulk create: failed to save page for keyword", kw, saveError);
@@ -823,6 +825,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         onGenerated={(result, mode, prevScore) =>
           setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "", htmlCssNotes: result.html_css_notes, tokenUsage: result.token_usage, costBreakdown: result.cost_breakdown ?? {}, isNew: true, prevScore })
         }
+        // Note: reoptimize flow doesn't produce content_gaps (it fixes existing content)
         onCreateNew={handleCreateNewPage}
         relatedPagePanel={relatedPagePanel}
       />
@@ -841,6 +844,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         schemaJson={view.schemaJson}
         pageTitle={view.pageTitle}
         htmlCssNotes={view.htmlCssNotes}
+        contentGaps={view.contentGaps}
         tokenUsage={view.tokenUsage}
         costBreakdown={view.costBreakdown}
         businessId={selectedBusinessId}

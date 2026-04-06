@@ -2198,7 +2198,39 @@ HARD RULES — NEVER:
 - Use vague differentiators ("trusted", "professional", "high quality") without a mechanism
 - Invent or guess phone numbers, addresses, hours, zip codes, street names, or landmarks not explicitly provided in the business data
 - Use vague response language ("quickly", "promptly", "fast", "soon") — always use a specific timeframe
-- Ignore the GBP_CATEGORY provided in the SEO checklist — the exact category label must appear naturally in title, H1, and ≥2 body sections"""
+- Ignore the GBP_CATEGORY provided in the SEO checklist — the exact category label must appear naturally in title, H1, and ≥2 body sections
+
+FACTUAL ACCURACY — CRITICAL
+Only assert claims that are explicitly present in the business data provided in the user prompt.
+Do NOT invent or assume:
+- Response times or arrival windows (unless in GBP description, reviews, or hours)
+- Certifications, licenses, bonding, insurance (unless explicitly stated in business data)
+- Years in business, founding date, or team size
+- Specific pricing, fees, or guarantees
+- Named team members, technicians, or owners
+- Awards, accreditations, or recognitions
+- Specific sub-services beyond what appears in the GBP category, GBP description, or reviews
+
+You MAY include:
+- Standard industry capabilities implied by the GBP category (e.g. a "Plumber" category implies drain cleaning, pipe repair)
+- Geographic facts (city, neighborhoods, zip codes) provided in the SEO checklist
+- Competitor-informed topic structure (headings, sections) without copying their specific claims
+- For response times and availability: only use explicit values from GBP hours, description, or reviews;
+  if no data is available write "Contact us for response times" or omit the claim
+
+CONTENT GAPS REPORT — REQUIRED OUTPUT
+After the JSON-LD </script> block, on a new line output:
+CONTENT_GAPS_REPORT_START
+Then output a JSON array (minified, no extra whitespace) of gap objects, each with these fields:
+  category: string  (e.g. "Response Time", "Certifications", "Pricing")
+  missing: string   (what fact is absent)
+  score_impact: "high" | "medium" | "low"
+  why_important: string  (1-2 sentences on how it would improve the SEO score)
+  how_to_add: string  (practical instruction for the user: where to find/add this info)
+Then output:
+CONTENT_GAPS_REPORT_END
+
+Only include gaps for facts that would measurably improve the page score and that you could NOT include because they weren't in the provided business data. Do not include gaps for information that is already present. If there are no gaps, output an empty array []."""
 
 _REOPT_SYSTEM_PROMPT = """You are an expert local SEO content writer. Fix the SEO deficiencies in the existing page while keeping its design intact.
 
@@ -3705,6 +3737,7 @@ class GeneratePageResponse(BaseModel):
     page_title: str
     token_usage: dict
     cost_breakdown: dict = {}
+    content_gaps: list = []
 
 
 @app.post('/generate-page')
@@ -3877,14 +3910,30 @@ ICP: {icp}
             raw = raw[:title_match.start()] + raw[title_match.end():]
             raw = raw.strip()
 
-        # Split content_html from schema_json
+        # Split content_html from schema_json, then extract content_gaps report
         schema_split = raw.find('<script type="application/ld+json">')
         if schema_split != -1:
             content_html = raw[:schema_split].strip()
-            schema_json = raw[schema_split:].strip()
+            after_html   = raw[schema_split:].strip()
         else:
             content_html = raw
-            schema_json = ""
+            after_html   = ""
+
+        # Extract CONTENT_GAPS_REPORT block
+        content_gaps: list = []
+        gaps_start = after_html.find("CONTENT_GAPS_REPORT_START")
+        gaps_end   = after_html.find("CONTENT_GAPS_REPORT_END")
+        if gaps_start != -1 and gaps_end != -1:
+            gaps_json_str = after_html[gaps_start + len("CONTENT_GAPS_REPORT_START"):gaps_end].strip()
+            schema_json   = after_html[:gaps_start].strip()
+            try:
+                content_gaps = json.loads(gaps_json_str)
+                if not isinstance(content_gaps, list):
+                    content_gaps = []
+            except Exception:
+                content_gaps = []
+        else:
+            schema_json = after_html
 
         # ── Auto-retry: score inline and reoptimize up to 5 total passes if < 90 ──
         current_html   = content_html
@@ -3973,6 +4022,7 @@ ICP: {icp}
                 "token_usage": token_rec,
                 "cost_breakdown": cost_breakdown,
                 "serp_analysis": serp_analysis_dict,
+                "content_gaps": content_gaps,
             },
         })
 

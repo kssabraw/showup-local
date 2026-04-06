@@ -100,6 +100,14 @@ export interface CostBreakdown {
 
 // ── Page generation ───────────────────────────────────────────────────────────
 
+export interface ContentGap {
+  category: string;
+  missing: string;
+  score_impact: "high" | "medium" | "low";
+  why_important: string;
+  how_to_add: string;
+}
+
 export interface GeneratePageResult {
   content_html: string;
   schema_json: string;
@@ -107,6 +115,7 @@ export interface GeneratePageResult {
   token_usage: TokenUsage;
   cost_breakdown: CostBreakdown;
   serp_analysis?: AnalysisResult;
+  content_gaps?: ContentGap[];
 }
 
 // ── Reoptimize ────────────────────────────────────────────────────────────────

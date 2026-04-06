@@ -106,6 +106,7 @@ export type Database = {
           business_id: string
           composite_score: number | null
           composite_status: string | null
+          content_gaps: Json | null
           content_html: string
           created_at: string
           id: string
@@ -121,6 +122,7 @@ export type Database = {
           business_id: string
           composite_score?: number | null
           composite_status?: string | null
+          content_gaps?: Json | null
           content_html: string
           created_at?: string
           id?: string
@@ -136,6 +138,7 @@ export type Database = {
           business_id?: string
           composite_score?: number | null
           composite_status?: string | null
+          content_gaps?: Json | null
           content_html?: string
           created_at?: string
           id?: string

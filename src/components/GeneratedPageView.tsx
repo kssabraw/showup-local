@@ -77,6 +77,14 @@ function formatHtml(html: string): string {
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
+interface ContentGap {
+  category: string;
+  missing: string;
+  score_impact: "high" | "medium" | "low";
+  why_important: string;
+  how_to_add: string;
+}
+
 interface Props {
   keyword: string;
   location: string;
@@ -85,6 +93,7 @@ interface Props {
   schemaJson: string;
   pageTitle: string;
   htmlCssNotes?: string[];
+  contentGaps?: ContentGap[];
   tokenUsage: Partial<TokenUsage>;
   costBreakdown?: Partial<CostBreakdown>;
   businessId: string;
@@ -123,7 +132,7 @@ function scoreBadge(score?: number, status?: string) {
 }
 
 export default function GeneratedPageView({
-  keyword, location, mode, contentHtml, schemaJson, pageTitle, htmlCssNotes,
+  keyword, location, mode, contentHtml, schemaJson, pageTitle, htmlCssNotes, contentGaps,
   tokenUsage, costBreakdown,
   businessId, businessName, website, gbpCategory, address,
   phone, differentiators, detected_icp, brand_voice, serp_analysis,
@@ -508,6 +517,41 @@ export default function GeneratedPageView({
                   </li>
                 ))}
               </ul>
+            </div>
+          )}
+
+          {/* Content gaps — facts we couldn't verify/include */}
+          {contentGaps && contentGaps.length > 0 && (
+            <div className="border border-border rounded-xl overflow-hidden">
+              <div className="bg-muted/40 px-5 py-4 border-b border-border">
+                <p className="text-sm font-semibold text-foreground">How to reach 100/100</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  The following facts would improve your score but couldn't be included because they weren't
+                  verified from your business data. Add them to your Google Business Profile or website,
+                  then regenerate the page.
+                </p>
+              </div>
+              <div className="divide-y divide-border">
+                {contentGaps.map((gap, i) => (
+                  <div key={i} className="px-5 py-4 space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                        gap.score_impact === "high"
+                          ? "bg-red-500/10 text-red-500"
+                          : gap.score_impact === "medium"
+                          ? "bg-amber-500/10 text-amber-500"
+                          : "bg-muted text-muted-foreground"
+                      }`}>
+                        {gap.score_impact === "high" ? "High impact" : gap.score_impact === "medium" ? "Medium impact" : "Low impact"}
+                      </span>
+                      <span className="text-sm font-medium text-foreground">{gap.category}</span>
+                    </div>
+                    <p className="text-xs text-muted-foreground">{gap.missing}</p>
+                    <p className="text-xs text-foreground/70"><span className="font-medium">Why it matters:</span> {gap.why_important}</p>
+                    <p className="text-xs text-foreground/70"><span className="font-medium">How to add it:</span> {gap.how_to_add}</p>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>
