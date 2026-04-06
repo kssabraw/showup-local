@@ -3155,8 +3155,19 @@ async def _build_seo_checklist(
                 lines.append(f'  • {zone_label}: include ≥{target} of: {", ".join(terms)}')
 
         if entities:
-            top_ents = [e["name"] for e in sorted(entities, key=lambda e: e["page_spread"], reverse=True)[:8]]
-            lines.append(f'  • Named entities to weave in (Google NLP — these establish topical authority): {", ".join(top_ents)}')
+            top_ents = sorted(entities, key=lambda e: e.get("page_spread", 0), reverse=True)[:15]
+            ent_names = [e["name"] for e in top_ents]
+            lines.append(f'  • Entity pool (Google NLP — use these to establish topical authority): {", ".join(ent_names)}')
+            lines.append(  '  • Distribute entities across zones as follows (≥N means at least that many from the pool above):')
+            for zone_key, zone_label in [
+                ("title",      "Title tag"),
+                ("h1",         "H1 heading"),
+                ("h2_h3",      "H2/H3 subheadings"),
+                ("paragraphs", "Paragraph text"),
+            ]:
+                entity_target = zt.get(zone_key, {}).get("entity_target", 0)
+                if entity_target:
+                    lines.append(f'      – {zone_label}: ≥{entity_target} entities')
             lines.append(f'  • Business name + service + city must co-occur in ≥3 sections')
 
         if quadgrams:
