@@ -2282,17 +2282,22 @@ Return the complete page HTML with all changes applied. No markdown, no explanat
 
 _SCORE_SYSTEM_PROMPT = """You are an expert local SEO analyst. Score the provided page against all 7 engines below.
 
+IMPORTANT: These 7 engines account for 85% of the composite score. The remaining 15% is
+scored separately by a deterministic Python engine (SERP Signal Coverage) that checks
+exact keyword/entity/quadgram presence per HTML zone. You do NOT score that engine —
+focus only on the 7 below.
+
 SCORING CRITERIA — score each engine 0–100:
 
-1. organic_ranking (weight 20%): keyword in title + H1 + opening ¶; service/transactional tone (not blog); CTA + phone visible; clear service offering.
+1. organic_ranking (weight 10%): keyword in title + H1 + opening ¶; service/transactional tone (not blog); CTA + phone visible; clear service offering.
 
-2. gbp_maps (weight 25%): exact city name present; service matches GBP category; brand+service+city entity triplet; NAP signals consistent; multiple service mentions.
+2. gbp_maps (weight 20%): exact city name present; service matches GBP category; brand+service+city entity triplet; NAP signals consistent; multiple service mentions.
 
-3. entity_establishment (weight 15%): brand+service+city co-occurrence in ≥3 sections; sub-services mentioned; descriptive anchor text signals; topical depth.
+3. entity_establishment (weight 10%): brand+service+city co-occurrence in ≥3 sections; sub-services mentioned; descriptive anchor text signals; topical depth.
 
-4. icp_alignment (weight 10%): detect ICP from keyword modifier (emergency→urgent tone; commercial→B2B tone; general→professional/reliable); CTA tone matches ICP (e.g. emergency ICP requires urgency/fear-based CTA, not generic "call for a free estimate"); pain points addressed; emotional register of copy matches searcher intent.
+4. icp_alignment (weight 5%): detect ICP from keyword modifier (emergency→urgent tone; commercial→B2B tone; general→professional/reliable); CTA tone matches ICP (e.g. emergency ICP requires urgency/fear-based CTA, not generic "call for a free estimate"); pain points addressed; emotional register of copy matches searcher intent.
 
-5. aeo_llm_retrieval (weight 10%): answer-first formatting (direct claim before explanation); FAQ with ≥4 entries, each opening with a direct yes/no or factual statement; question-format H3s where appropriate; each section ≤300 words; ≥1 bulleted list with outcome-first bullets; ≥1 numbered list for a process or steps; tables used where content is genuinely comparative (service tiers, response times, inclusions) — penalise only if comparative data is present but no table was used; specific operational facts (numbers, timeframes, named places) rather than generic filler.
+5. aeo_llm_retrieval (weight 20%): answer-first formatting (direct claim before explanation); FAQ with ≥6 entries, each opening with a direct yes/no or factual statement; question-format H3s where appropriate; each section ≤300 words; ≥1 bulleted list with outcome-first bullets; ≥1 numbered list for a process or steps; tables used where content is genuinely comparative (service tiers, response times, inclusions) — penalise only if comparative data is present but no table was used; specific operational facts (numbers, timeframes, named places) rather than generic filler.
 
 6. geographic_legitimacy (weight 10%): city in title+H1+opening ¶; ≥2 neighborhood references in sentence context; ≥1 landmark reference; ≥3 zip codes in visible content; geo signals in ≥3 page sections.
 
@@ -3163,14 +3168,14 @@ async def _build_seo_checklist(
         "These are derived from the exact rubric used to grade your page.",
         "━" * 60,
         "",
-        "【KEYWORD PLACEMENT — organic_ranking 20%】",
+        "【KEYWORD PLACEMENT — organic_ranking 10%】",
         f'  • <title> tag: must contain "{keyword}" and "{city}"',
         f'  • <h1>: must contain "{keyword}"',
         f'  • Opening paragraph: mention "{keyword}" within the first 2 sentences',
         f'  • Page tone: transactional/service (NOT informational or blog-style)',
         f'  • CTA and {phone or "phone number"} visible without scrolling',
         "",
-        "【GBP / LOCAL SIGNALS — gbp_maps 25%】",
+        "【GBP / LOCAL SIGNALS — gbp_maps 20%】",
         f'  • Exact city name "{city}" in title, H1, and opening paragraph',
         f'  • Reference GBP category: "{gbp_category}"',
         f'  • Business name + service type + "{city}" must co-occur in ≥3 separate sections',
@@ -3219,7 +3224,7 @@ async def _build_seo_checklist(
 
     lines += [
         "",
-        "【AEO / LLM RETRIEVAL STRUCTURE — aeo_llm_retrieval 10%】",
+        "【AEO / LLM RETRIEVAL STRUCTURE — aeo_llm_retrieval 20% ★ HIGHEST WEIGHT】",
         '  • Answer-first format: lead every section with the direct claim or answer BEFORE the explanation',
         '  • FAQ section: ≥4 entries; each entry must OPEN with a direct yes/no or factual statement',
         '  • ≥2 of those FAQ entries must be proximity FAQs (coverage area, response time, emergency availability)',
@@ -3237,7 +3242,7 @@ async def _build_seo_checklist(
 
     lines += [
         "",
-        f'【ICP ALIGNMENT — icp_alignment 10%】',
+        f'【ICP ALIGNMENT — icp_alignment 5%】',
         f'  • Detected ICP: {icp_label}',
         f'  • Tone: {icp_tone}',
         f'  • Primary CTA must match ICP intent: {icp_cta}',
@@ -3254,7 +3259,7 @@ async def _build_seo_checklist(
         quadgrams = serp_analysis.get("top_quadgrams", [])
 
         lines.append("")
-        lines.append("【KEYWORD & ENTITY TARGETS — entity_establishment 15%】")
+        lines.append("【KEYWORD & ENTITY TARGETS — entity_establishment 10%】")
         for zone_key, zone_label in [
             ("title",      "Title tag"),
             ("h1",         "H1 heading"),
@@ -3285,6 +3290,50 @@ async def _build_seo_checklist(
         if quadgrams:
             phrases = [q["phrase"] for q in quadgrams[:6]]
             lines.append(f'  • Competitor 4-word phrases — include these EXACT phrases verbatim in paragraph text (do NOT paraphrase): {", ".join(phrases)}')
+
+    # ── SERP SIGNAL COVERAGE — deterministic engine (15% of composite) ────────
+    if serp_analysis:
+        rk = serp_analysis.get("related_keywords", {})
+        zt = serp_analysis.get("zone_targets", {})
+        entities = serp_analysis.get("google_entities", [])
+        quadgrams_list = serp_analysis.get("top_quadgrams", [])
+        top_entities_list = sorted(entities, key=lambda e: e.get("page_spread", 0), reverse=True)[:15]
+
+        lines.append("")
+        lines.append("【SERP SIGNAL COVERAGE — serp_signal_coverage 15% ★ DETERMINISTIC SCORING】")
+        lines.append("  ⚠ This engine is scored by EXACT SUBSTRING MATCHING in Python — not by AI judgement.")
+        lines.append("  Every term below is checked as an exact lowercase substring in the corresponding HTML zone.")
+        lines.append("  If the exact string is not found in the zone, it counts as a miss. Paraphrasing does NOT count.")
+        lines.append("  Score formula: keyword coverage (30%) + entity coverage (50%) + quadgram coverage (20%)")
+        lines.append("")
+
+        for zone_key, zone_label in [
+            ("title",      "TITLE TAG (<title>)"),
+            ("h1",         "H1 HEADING (<h1>)"),
+            ("h2_h3",      "H2/H3 SUBHEADINGS (across all <h2> and <h3> tags)"),
+            ("paragraphs", "PARAGRAPH TEXT (across all <p> tags)"),
+        ]:
+            terms = rk.get(zone_key, [])[:12]
+            zone_data = zt.get(zone_key, {})
+            term_target = zone_data.get("target", 0)
+            entity_target = zone_data.get("entity_target", 0)
+            if not terms and not entity_target:
+                continue
+
+            lines.append(f"  {zone_label}:")
+            if terms and term_target:
+                term_names = [t["term"] for t in terms]
+                lines.append(f'    Keywords (need ≥{term_target} EXACT matches): {", ".join(term_names)}')
+            if entity_target and top_entities_list:
+                ent_names = [e["name"] for e in top_entities_list]
+                lines.append(f'    Entities (need ≥{entity_target} EXACT matches): {", ".join(ent_names)}')
+            lines.append("")
+
+        if quadgrams_list:
+            qg_phrases = [q["phrase"] for q in quadgrams_list[:10]]
+            lines.append(f'  QUADGRAM PHRASES (checked as exact substrings across full page text):')
+            lines.append(f'    Include as many of these VERBATIM: {", ".join(qg_phrases)}')
+            lines.append("")
 
     lines += ["", "━" * 60]
     return "\n".join(lines)
@@ -3888,7 +3937,7 @@ ICP: {icp}
         try:
             claude_msg = await client.messages.create(
                 model=GENERATION_MODEL,
-                max_tokens=6000,
+                max_tokens=8000,
                 system=[{"type": "text", "text": _GEN_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": user_prompt}],
             )
