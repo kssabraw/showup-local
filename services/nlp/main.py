@@ -2218,11 +2218,11 @@ def _token_record(endpoint: str, model: str, input_tokens: int, output_tokens: i
     }
 
 _ENGINE_WEIGHTS = {
-    "organic_ranking":      0.20,
+    "organic_ranking":      0.10,
     "gbp_maps":             0.25,
     "entity_establishment": 0.15,
     "icp_alignment":        0.10,
-    "aeo_llm_retrieval":    0.10,
+    "aeo_llm_retrieval":    0.20,
     "geographic_legitimacy":0.10,
     "nearme_intent":        0.10,
 }
