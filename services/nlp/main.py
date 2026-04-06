@@ -2219,12 +2219,13 @@ def _token_record(endpoint: str, model: str, input_tokens: int, output_tokens: i
 
 _ENGINE_WEIGHTS = {
     "organic_ranking":      0.10,
-    "gbp_maps":             0.25,
-    "entity_establishment": 0.15,
-    "icp_alignment":        0.10,
+    "gbp_maps":             0.20,
+    "entity_establishment": 0.10,
+    "icp_alignment":        0.05,
     "aeo_llm_retrieval":    0.20,
     "geographic_legitimacy":0.10,
     "nearme_intent":        0.10,
+    "serp_signal_coverage": 0.15,   # deterministic — scored in Python, not Claude
 }
 
 _ENGINE_LABELS = {
@@ -2235,7 +2236,120 @@ _ENGINE_LABELS = {
     "aeo_llm_retrieval":     "AEO / LLM Retrieval Engine",
     "geographic_legitimacy": "Geographic Legitimacy Engine",
     "nearme_intent":         "Hyperlocal / Near-Me Engine",
+    "serp_signal_coverage":  "SERP Signal Coverage",
 }
+
+def _compute_serp_signal_coverage(page_html: str, serp_analysis: Optional[dict]) -> dict:
+    """
+    Deterministically score how well the page covers the SERP signals identified
+    from competitor analysis: related keywords (per zone), Google NLP entities,
+    and quadgrams.  Runs in Python — not scored by Claude — so results are
+    precise, reproducible, and cost no extra tokens.
+    """
+    if not serp_analysis:
+        return {
+            "score": 50,
+            "issues": ["No SERP analysis available — signal coverage could not be measured."],
+            "recommendations": ["Run a keyword analysis first to enable SERP signal coverage scoring."],
+        }
+
+    soup = BeautifulSoup(page_html, "html.parser")
+    page_text_lower = soup.get_text(" ", strip=True).lower()
+
+    # Zone text (mirrors _parse_page_zones; falls back to full text for plain-text input)
+    title_el = soup.find("title")
+    h1_el    = soup.find("h1")
+    p_text   = " ".join(el.get_text(" ", strip=True).lower() for el in soup.find_all("p"))
+    zones = {
+        "title":     title_el.get_text(" ", strip=True).lower() if title_el else page_text_lower[:300],
+        "h1":        h1_el.get_text(" ", strip=True).lower() if h1_el else "",
+        "h2_h3":     " ".join(el.get_text(" ", strip=True).lower() for el in soup.find_all(["h2", "h3"])),
+        "paragraphs": p_text or page_text_lower,
+    }
+
+    rk       = serp_analysis.get("related_keywords", {})
+    zt       = serp_analysis.get("zone_targets", {})
+    entities = serp_analysis.get("google_entities", [])
+    quadgrams = serp_analysis.get("top_quadgrams", [])
+
+    issues: list[str] = []
+    recommendations: list[str] = []
+
+    # ── 1. Related keyword coverage per zone  (50% of engine score) ─────────────
+    zone_label_map = {
+        "title": "title tag", "h1": "H1",
+        "h2_h3": "H2/H3 headings", "paragraphs": "paragraphs",
+    }
+    zone_scores: list[float] = []
+    for zone_key in ("title", "h1", "h2_h3", "paragraphs"):
+        terms  = rk.get(zone_key, [])[:12]
+        target = zt.get(zone_key, {}).get("target", 0)
+        if not terms or not target:
+            continue
+        zone_text = zones[zone_key]
+        found   = [t["term"] for t in terms if t["term"].lower() in zone_text]
+        missing = [t["term"] for t in terms if t["term"].lower() not in zone_text]
+        coverage = min(len(found) / max(target, 1), 1.0)
+        zone_scores.append(coverage)
+        gap = max(0, target - len(found))
+        if gap > 0 and missing:
+            zlabel = zone_label_map[zone_key]
+            issues.append(
+                f"{zlabel.capitalize()}: {len(found)}/{target} keyword targets met — "
+                f"missing: {', '.join(missing[:5])}"
+            )
+            recommendations.append(
+                f"Add {gap} more keyword{'s' if gap > 1 else ''} to {zlabel}: "
+                f"{', '.join(missing[:5])}"
+            )
+
+    kw_score = (sum(zone_scores) / len(zone_scores) * 100) if zone_scores else 50.0
+
+    # ── 2. Google NLP entity coverage  (30% of engine score) ────────────────────
+    top_entities = sorted(entities, key=lambda e: e.get("page_spread", 0), reverse=True)[:10]
+    if top_entities:
+        found_ents   = [e["name"] for e in top_entities if e["name"].lower() in page_text_lower]
+        missing_ents = [e["name"] for e in top_entities if e["name"].lower() not in page_text_lower]
+        ent_score = (len(found_ents) / len(top_entities)) * 100
+        if missing_ents:
+            issues.append(
+                f"Missing {len(missing_ents)}/{len(top_entities)} top Google NLP entities: "
+                f"{', '.join(missing_ents[:6])}"
+            )
+            recommendations.append(
+                f"Incorporate these entities naturally: {', '.join(missing_ents[:6])}"
+            )
+    else:
+        ent_score = 75.0
+
+    # ── 3. Quadgram coverage  (20% of engine score) ──────────────────────────────
+    top_qg = quadgrams[:10]
+    if top_qg:
+        found_qg   = [q["phrase"] for q in top_qg if q["phrase"].lower() in page_text_lower]
+        missing_qg = [q["phrase"] for q in top_qg if q["phrase"].lower() not in page_text_lower]
+        qg_score = (len(found_qg) / len(top_qg)) * 100
+        if missing_qg:
+            issues.append(
+                f"Missing {len(missing_qg)}/{len(top_qg)} competitor phrases: "
+                f"{', '.join(missing_qg[:4])}"
+            )
+            recommendations.append(
+                f"Weave these competitor phrases into paragraph text: "
+                f"{', '.join(missing_qg[:4])}"
+            )
+    else:
+        qg_score = 75.0
+
+    composite = round(kw_score * 0.50 + ent_score * 0.30 + qg_score * 0.20, 1)
+    return {
+        "score":             composite,
+        "issues":            issues,
+        "recommendations":   recommendations,
+        "keyword_coverage":  round(kw_score, 1),
+        "entity_coverage":   round(ent_score, 1),
+        "quadgram_coverage": round(qg_score, 1),
+    }
+
 
 def _composite_from_scores(scores: dict) -> tuple[float, str]:
     composite = sum(scores[k]["score"] * w for k, w in _ENGINE_WEIGHTS.items() if k in scores)
@@ -2520,6 +2634,8 @@ async def _score_page_for_related(
         msg.usage.input_tokens, msg.usage.output_tokens,
     )
     scores = _parse_claude_json("{" + msg.content[0].text)
+    # No serp_analysis available in the related-pages path — coverage engine scores neutral
+    scores["serp_signal_coverage"] = _compute_serp_signal_coverage(page_text, None)
     composite, status = _composite_from_scores(scores)
     return {
         "composite_score": composite,
@@ -3343,6 +3459,9 @@ async def score_page(request: Request, body: ScorePageRequest):
 
     if not scores:
         raise HTTPException(status_code=502, detail="Scoring service returned an invalid response. Please try again.")
+
+    # Inject deterministic SERP signal coverage (Python, not Claude)
+    scores["serp_signal_coverage"] = _compute_serp_signal_coverage(page_html, serp_analysis_dict)
 
     composite, status = _composite_from_scores(scores)
 

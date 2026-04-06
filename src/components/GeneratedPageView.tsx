@@ -148,11 +148,10 @@ export default function GeneratedPageView({
   useEffect(() => {
     if (scoredRef.current) return;
     scoredRef.current = true;
-    const pageText = new DOMParser().parseFromString(contentHtml, "text/html").body.innerText;
     nlp.scorePage({
       keyword,
       location,
-      page_content: pageText,
+      page_content: contentHtml,
       business_name: businessName,
       gbp_category: gbpCategory,
       address,
