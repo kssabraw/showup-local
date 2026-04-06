@@ -2168,10 +2168,10 @@ Section 10 — Geographic / Local SEO Section (200–300 words)
 Section 11 — CTA Block Tertiary (50–75 words — urgency-forward)
 <section id="cta-tertiary">...</section>
 
-Section 12 — FAQ (min 6, max 10 entries — 40–80 words each)
+Section 12 — FAQ (min 4, max 7 entries — 40–80 words each)
 <section id="faq">
   <h2>Frequently Asked Questions</h2>
-  [Min 6, max 10 FAQ entries. Every answer opens with a direct yes/no or factual statement.]
+  [Min 4, max 7 FAQ entries. Every answer opens with a direct yes/no or factual statement.]
   REQUIRED PROXIMITY FAQs — at least 2 entries must follow this pattern:
     Q: "Do you serve [specific neighborhood or city]?"
     A: "Yes, [Brand] serves [neighborhood] with [specific availability/response time, e.g. 'same-day service' or '24/7 emergency response']."
@@ -2297,7 +2297,7 @@ SCORING CRITERIA — score each engine 0–100:
 
 4. icp_alignment (weight 5%): detect ICP from keyword modifier (emergency→urgent tone; commercial→B2B tone; general→professional/reliable); CTA tone matches ICP (e.g. emergency ICP requires urgency/fear-based CTA, not generic "call for a free estimate"); pain points addressed; emotional register of copy matches searcher intent.
 
-5. aeo_llm_retrieval (weight 20%): answer-first formatting (direct claim before explanation); FAQ with ≥6 entries, each opening with a direct yes/no or factual statement; question-format H3s where appropriate; each section ≤300 words; ≥1 bulleted list with outcome-first bullets; ≥1 numbered list for a process or steps; tables used where content is genuinely comparative (service tiers, response times, inclusions) — penalise only if comparative data is present but no table was used; specific operational facts (numbers, timeframes, named places) rather than generic filler.
+5. aeo_llm_retrieval (weight 20%): answer-first formatting (direct claim before explanation); FAQ with 4–7 entries (penalise if fewer than 4 or more than 7), each opening with a direct yes/no or factual statement; question-format H3s where appropriate; each section ≤300 words; ≥1 bulleted list with outcome-first bullets; ≥1 numbered list for a process or steps; tables used where content is genuinely comparative (service tiers, response times, inclusions) — penalise only if comparative data is present but no table was used; specific operational facts (numbers, timeframes, named places) rather than generic filler.
 
 6. geographic_legitimacy (weight 10%): city in title+H1+opening ¶; ≥2 neighborhood references in sentence context; ≥1 landmark reference; ≥3 zip codes in visible content; geo signals in ≥3 page sections.
 
@@ -3226,7 +3226,7 @@ async def _build_seo_checklist(
         "",
         "【AEO / LLM RETRIEVAL STRUCTURE — aeo_llm_retrieval 20% ★ HIGHEST WEIGHT】",
         '  • Answer-first format: lead every section with the direct claim or answer BEFORE the explanation',
-        '  • FAQ section: ≥6 entries; each entry must OPEN with a direct yes/no or factual statement',
+        '  • FAQ section: 4–7 entries EXACTLY (fewer than 4 or more than 7 will be penalised); each entry must OPEN with a direct yes/no or factual statement',
         '  • ≥2 of those FAQ entries must be proximity FAQs (coverage area, response time, emergency availability)',
     ]
     if faq_suggestions:
