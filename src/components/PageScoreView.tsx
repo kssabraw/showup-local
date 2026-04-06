@@ -2,7 +2,7 @@ import { useState, useRef, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader2, CheckCircle, AlertTriangle, XCircle, ChevronDown, ChevronUp } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { nlp, nlpStream, InsufficientCreditsError, purchaseCreditPack } from "@/lib/nlp-client";
+import { nlp, nlpStreamDirect, InsufficientCreditsError, purchaseCreditPack } from "@/lib/nlp-client";
 import { useCredits, useInvalidateCredits } from "@/hooks/useCredits";
 import type { ScoreResult, ReoptimizeResult, AnalysisResult, EngineScore } from "@/lib/nlp-types";
 import CreditPackModal from "@/components/CreditPackModal";
@@ -145,7 +145,7 @@ export default function PageScoreView({
     setReoptimizing(true);
     setError("");
     try {
-      const stream = nlpStream<ReoptimizeResult>(
+      const stream = nlpStreamDirect<ReoptimizeResult>(
         "/reoptimize-page",
         {
           keyword,

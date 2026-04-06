@@ -11,7 +11,7 @@ import { StepIndicator } from "@/components/StepIndicator";
 import { useBusinessProfiles } from "@/hooks/useBusinessProfiles";
 import { useInvalidateSavedPages } from "@/hooks/useSavedPages";
 import { useCredits, useInvalidateCredits } from "@/hooks/useCredits";
-import { nlp, nlpStream, InsufficientCreditsError, RankabilityLimitError, purchaseRankabilityPack, purchaseCreditPack } from "@/lib/nlp-client";
+import { nlp, nlpStream, nlpStreamDirect, InsufficientCreditsError, RankabilityLimitError, purchaseRankabilityPack, purchaseCreditPack } from "@/lib/nlp-client";
 import RankabilityPackModal from "@/components/RankabilityPackModal";
 import CreditPackModal from "@/components/CreditPackModal";
 import type { AnalysisResult, RankabilityResult } from "@/lib/nlp-types";
@@ -398,7 +398,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     const kw = safeKwOverride ?? keyword;
     const b = businesses.find(b => b.id === selectedBusinessId)!;
     try {
-      const stream = nlpStream<import("@/lib/nlp-types").GeneratePageResult>(
+      const stream = nlpStreamDirect<import("@/lib/nlp-types").GeneratePageResult>(
         "/generate-page",
         {
           keyword: kw.trim(),
@@ -476,7 +476,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     const b = businesses.find(b => b.id === selectedBusinessId);
     if (!b) return false;
     try {
-      const stream = nlpStream<import("@/lib/nlp-types").GeneratePageResult>(
+      const stream = nlpStreamDirect<import("@/lib/nlp-types").GeneratePageResult>(
         "/generate-page",
         {
           keyword: kw.trim(),
