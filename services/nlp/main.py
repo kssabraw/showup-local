@@ -2537,11 +2537,10 @@ async def _score_html_inline(
         system=[{"type": "text", "text": _SCORE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
         messages=[
             {"role": "user", "content": user_prompt},
-            {"role": "assistant", "content": "{"},
         ],
     )
     token_rec = _token_record("score-page-inline", SCORE_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
-    scores = _parse_claude_json("{" + msg.content[0].text)
+    scores = _parse_claude_json(msg.content[0].text)
     if not scores:
         raise Exception("Inline scoring returned invalid JSON")
     scores["serp_signal_coverage"] = _compute_serp_signal_coverage(page_html, serp_analysis_dict)
@@ -2663,6 +2662,13 @@ def _parse_claude_json(text: str) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
+        # Try to extract JSON object from preamble text (model may add prose before/after)
+        match = re.search(r'\{[\s\S]*\}', text)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
         logger.warning(f"_parse_claude_json: failed to parse JSON, returning empty dict. Raw: {text[:300]}")
         return {}
 
@@ -2880,14 +2886,13 @@ async def _score_page_for_related(
         system=[{"type": "text", "text": _SCORE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
         messages=[
             {"role": "user", "content": user_prompt},
-            {"role": "assistant", "content": "{"},
         ],
     )
     token_rec = _token_record(
         "related-pages/score", "claude-haiku-4-5-20251001",
         msg.usage.input_tokens, msg.usage.output_tokens,
     )
-    scores = _parse_claude_json("{" + msg.content[0].text)
+    scores = _parse_claude_json(msg.content[0].text)
     # No serp_analysis available in the related-pages path — coverage engine scores neutral
     scores["serp_signal_coverage"] = _compute_serp_signal_coverage(page_text, None)
     composite, status = _composite_from_scores(scores)
@@ -3759,11 +3764,10 @@ async def score_page(request: Request, body: ScorePageRequest):
                 system=[{"type": "text", "text": _SCORE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 messages=[
                     {"role": "user", "content": user_prompt},
-                    {"role": "assistant", "content": "{"},  # prefill: forces JSON start, prevents preamble
                 ],
             )
             token_rec = _token_record("score-page", SCORE_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
-            parsed = _parse_claude_json("{" + msg.content[0].text)  # prepend the prefilled "{"
+            parsed = _parse_claude_json(msg.content[0].text)
             if parsed:
                 scores = parsed
                 break
