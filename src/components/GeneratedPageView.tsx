@@ -1,14 +1,81 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
-import { Copy, Check, Save, Loader2, ExternalLink, Download } from "lucide-react";
+import { Copy, Check, Save, Loader2, ExternalLink, Download, TrendingUp, ArrowRight } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { nlp } from "@/lib/nlp-client";
 import { StepIndicator } from "@/components/StepIndicator";
 import { useInvalidateSavedPages } from "@/hooks/useSavedPages";
-import type { RelatedPageItem } from "@/lib/nlp-types";
+import type { RelatedPageItem, ScoreResult } from "@/lib/nlp-types";
 import DOMPurify from 'dompurify';
 
 import type { TokenUsage, CostBreakdown } from "@/lib/nlp-types";
+
+function formatHtml(html: string): string {
+  const INDENT = '  ';
+
+  const BLOCK = new Set([
+    'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'ul', 'ol', 'li', 'dl', 'dt', 'dd',
+    'div', 'section', 'article', 'header', 'footer', 'nav', 'main', 'aside',
+    'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th',
+    'blockquote', 'pre', 'figure', 'figcaption', 'script', 'style',
+    'form', 'fieldset', 'details', 'summary',
+  ]);
+
+  // These get a blank line prepended to visually separate sections
+  const SPACER = new Set([
+    'section', 'article', 'header', 'footer', 'nav', 'main', 'aside',
+    'div', 'table', 'ul', 'ol', 'blockquote', 'figure',
+    'h1', 'h2', 'h3',
+  ]);
+
+  const VOID = new Set([
+    'br', 'hr', 'img', 'input', 'link', 'meta',
+    'area', 'base', 'col', 'embed', 'param', 'source', 'track', 'wbr',
+  ]);
+
+  function serialize(node: Node, depth: number): string {
+    // Text node
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = (node.textContent ?? '').replace(/\s+/g, ' ').trim();
+      return text ? INDENT.repeat(depth) + text : '';
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+    const el = node as Element;
+    const tag = el.tagName.toLowerCase();
+    const attrs = Array.from(el.attributes).map(a => ` ${a.name}="${a.value}"`).join('');
+    const pad = INDENT.repeat(depth);
+    const spacer = SPACER.has(tag) ? '\n' : '';
+
+    // Void elements — no children, no closing tag
+    if (VOID.has(tag)) return `${spacer}${pad}<${tag}${attrs}>`;
+
+    const children = Array.from(el.childNodes);
+    const hasBlockChild = children.some(
+      c => c.nodeType === Node.ELEMENT_NODE && BLOCK.has((c as Element).tagName.toLowerCase())
+    );
+
+    // No block children → keep content on one line (preserves inline formatting)
+    if (!hasBlockChild) {
+      const inner = el.innerHTML.replace(/\s+/g, ' ').trim();
+      return `${spacer}${pad}<${tag}${attrs}>${inner}</${tag}>`;
+    }
+
+    // Block children → indent each child on its own line
+    const childLines = children
+      .map(c => serialize(c, depth + 1))
+      .filter(s => s.trim() !== '');
+    return `${spacer}${pad}<${tag}${attrs}>\n${childLines.join('\n')}\n${pad}</${tag}>`;
+  }
+
+  const doc = new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html');
+  const lines = Array.from(doc.body.childNodes)
+    .map(n => serialize(n, 0))
+    .filter(s => s.trim() !== '');
+
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
 
 interface Props {
   keyword: string;
@@ -25,6 +92,12 @@ interface Props {
   website?: string;
   gbpCategory: string;
   address: string;
+  phone?: string;
+  differentiators?: unknown[];
+  detected_icp?: unknown;
+  brand_voice?: unknown;
+  serp_analysis?: unknown;
+  prevScore?: number | null;
   onBack: () => void;
   onNewPage: () => void;
   onRelatedAction?: (action: { mode: "reoptimize" | "new"; keyword: string; existingUrl?: string }) => void;
@@ -53,6 +126,8 @@ export default function GeneratedPageView({
   keyword, location, mode, contentHtml, schemaJson, pageTitle, htmlCssNotes,
   tokenUsage, costBreakdown,
   businessId, businessName, website, gbpCategory, address,
+  phone, differentiators, detected_icp, brand_voice, serp_analysis,
+  prevScore,
   onBack, onNewPage, onRelatedAction,
 }: Props) {
   const invalidateSavedPages = useInvalidateSavedPages();
@@ -64,19 +139,45 @@ export default function GeneratedPageView({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState("");
+
+  // Auto-score the generated/reoptimized page in the background
+  const [autoScore, setAutoScore] = useState<ScoreResult | null>(null);
+  const [autoScoring, setAutoScoring] = useState(true);
+  const scoredRef = useRef(false);
+
+  useEffect(() => {
+    if (scoredRef.current) return;
+    scoredRef.current = true;
+    nlp.scorePage({
+      keyword,
+      location,
+      page_content: contentHtml,
+      business_name: businessName,
+      gbp_category: gbpCategory,
+      address,
+      serp_analysis: serp_analysis as any,
+    }).then(result => {
+      setAutoScore(result);
+    }).catch(() => {
+      // Non-fatal — score display stays hidden
+    }).finally(() => {
+      setAutoScoring(false);
+    });
+  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
   const [activeTab, setActiveTab] = useState<"preview" | "raw-text" | "html" | "schema" | "social" | "related">("preview");
   // Related pages state
   const [relatedLoading, setRelatedLoading] = useState(false);
   const [relatedItems, setRelatedItems] = useState<RelatedPageItem[] | null>(null);
   const [relatedError, setRelatedError] = useState("");
   // Social posts state
-  const [socialPosts, setSocialPosts] = useState<{ gbp: string[]; facebook: string[]; instagram: string[]; pinterest: string[] } | null>(null);
+  const [socialPosts, setSocialPosts] = useState<{ gbp: string[] } | null>(null);
   const [socialLoading, setSocialLoading] = useState(false);
   const [copiedPost, setCopiedPost] = useState<string | null>(null);
   const [selections, setSelections] = useState<RelatedSelection>({});
 
   const copyHtml = async () => {
-    await navigator.clipboard.writeText(contentHtml);
+    const fullHtml = pageTitle ? `<title>${pageTitle}</title>\n\n${formatHtml(contentHtml)}` : formatHtml(contentHtml);
+    await navigator.clipboard.writeText(fullHtml);
     setCopiedHtml(true);
     setTimeout(() => setCopiedHtml(false), 2000);
   };
@@ -121,6 +222,8 @@ export default function GeneratedPageView({
         page_title: pageTitle || null,
         content_html: contentHtml,
         schema_json: schemaJson || null,
+        composite_score: autoScore?.composite_score ?? null,
+        composite_status: autoScore?.composite_status ?? null,
       });
       if (error) throw error;
       setSaved(true);
@@ -172,9 +275,14 @@ export default function GeneratedPageView({
         business_name: businessName,
         gbp_category: gbpCategory,
         address,
+        phone,
         page_content: pageText,
+        differentiators,
+        detected_icp,
+        brand_voice,
+        serp_analysis,
       });
-      setSocialPosts({ gbp: data.gbp, facebook: data.facebook, instagram: data.instagram, pinterest: data.pinterest });
+      setSocialPosts({ gbp: data.gbp });
     } catch {
       // Non-fatal — social tab will show a retry button
     } finally {
@@ -190,15 +298,7 @@ export default function GeneratedPageView({
 
   const downloadSocialPosts = () => {
     if (!socialPosts) return;
-    const platforms = [
-      { label: "GBP Posts", posts: socialPosts.gbp },
-      { label: "Facebook Posts", posts: socialPosts.facebook },
-      { label: "Instagram Posts", posts: socialPosts.instagram },
-      { label: "Pinterest Posts", posts: socialPosts.pinterest },
-    ];
-    const text = platforms.map(({ label, posts }) =>
-      `${label.toUpperCase()}\n${"─".repeat(40)}\n${posts.map((p, i) => `${i + 1}. ${p}`).join("\n\n")}`
-    ).join("\n\n\n");
+    const text = `GBP POSTS\n${"─".repeat(40)}\n${socialPosts.gbp.map((p, i) => `${i + 1}. ${p}`).join("\n\n")}`;
     const blob = new Blob([text], { type: "text/plain" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
@@ -279,6 +379,56 @@ export default function GeneratedPageView({
         </div>
       </div>
 
+      {/* SEO Score banner */}
+      {autoScoring ? (
+        <div className="flex items-center gap-2 px-4 py-3 bg-muted/40 border border-border rounded-xl text-sm text-muted-foreground">
+          <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+          Scoring your page…
+        </div>
+      ) : autoScore ? (
+        <div className={`flex items-center gap-4 px-5 py-4 rounded-xl border ${
+          autoScore.composite_score >= 80 ? "bg-green-500/5 border-green-500/20" :
+          autoScore.composite_score >= 60 ? "bg-amber-500/5 border-amber-500/20" :
+          "bg-red-500/5 border-red-500/20"
+        }`}>
+          <TrendingUp className={`w-5 h-5 shrink-0 ${
+            autoScore.composite_score >= 80 ? "text-green-500" :
+            autoScore.composite_score >= 60 ? "text-amber-500" :
+            "text-red-500"
+          }`} />
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-0.5">SEO Score</p>
+            {mode === "reoptimize" && prevScore != null ? (
+              <div className="flex items-center gap-2">
+                <span className="text-xl font-display font-bold text-muted-foreground">{Math.round(prevScore)}</span>
+                <ArrowRight className="w-4 h-4 text-muted-foreground" />
+                <span className={`text-xl font-display font-bold ${
+                  autoScore.composite_score >= 80 ? "text-green-500" :
+                  autoScore.composite_score >= 60 ? "text-amber-500" :
+                  "text-red-500"
+                }`}>{Math.round(autoScore.composite_score)}</span>
+                <span className="text-sm text-muted-foreground">/ 100</span>
+                {autoScore.composite_score > prevScore && (
+                  <span className="text-xs font-medium text-green-600 bg-green-500/10 px-2 py-0.5 rounded-full">
+                    +{Math.round(autoScore.composite_score - prevScore)} pts
+                  </span>
+                )}
+              </div>
+            ) : (
+              <div className="flex items-baseline gap-1.5">
+                <span className={`text-xl font-display font-bold ${
+                  autoScore.composite_score >= 80 ? "text-green-500" :
+                  autoScore.composite_score >= 60 ? "text-amber-500" :
+                  "text-red-500"
+                }`}>{Math.round(autoScore.composite_score)}</span>
+                <span className="text-sm text-muted-foreground">/ 100</span>
+              </div>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground capitalize hidden sm:block">{autoScore.composite_status?.replace("_", " ")}</p>
+        </div>
+      ) : null}
+
       {/* Cost breakdown panel */}
       {showCostBreakdown && (
         <div className="bg-muted/40 border border-border rounded-xl px-5 py-4 text-xs space-y-1.5">
@@ -320,7 +470,7 @@ export default function GeneratedPageView({
               : tab === "related" ? "Related Pages"
               : tab === "raw-text" ? "Raw Text"
               : tab === "social"
-                ? <span className="flex items-center gap-1.5">Social Posts {socialLoading && <Loader2 className="w-3 h-3 animate-spin" />}</span>
+                ? <span className="flex items-center gap-1.5">GBP Posts {socialLoading && <Loader2 className="w-3 h-3 animate-spin" />}</span>
                 : tab.charAt(0).toUpperCase() + tab.slice(1)}
           </button>
         ))}
@@ -374,6 +524,12 @@ export default function GeneratedPageView({
               {copiedRichText ? <><Check className="w-4 h-4 mr-1" /> Copied!</> : <><Copy className="w-4 h-4 mr-1" /> Copy All</>}
             </Button>
           </div>
+          {pageTitle && (
+            <div className="flex items-start gap-3 px-4 py-3 bg-muted/40 rounded-lg border border-border">
+              <span className="text-xs font-mono text-muted-foreground shrink-0 mt-0.5">&lt;title&gt;</span>
+              <span className="text-sm text-foreground">{pageTitle}</span>
+            </div>
+          )}
           <div
             className="bg-white rounded-xl border border-border p-8 prose prose-sm max-w-none
                        prose-headings:text-gray-900 prose-p:text-gray-800 prose-li:text-gray-800
@@ -394,7 +550,7 @@ export default function GeneratedPageView({
             </Button>
           </div>
           <pre className="bg-muted rounded-xl border border-border p-4 text-xs overflow-x-auto whitespace-pre-wrap font-mono text-foreground max-h-[600px] overflow-y-auto">
-            {contentHtml}
+            {pageTitle ? `<title>${pageTitle}</title>\n\n` : ""}{formatHtml(contentHtml)}
           </pre>
         </div>
       )}
@@ -441,37 +597,30 @@ export default function GeneratedPageView({
                   <Download className="w-4 h-4 mr-1.5" /> Download All
                 </Button>
               </div>
-              {([
-                { key: "gbp",       label: "GBP Posts",       wordLimit: "≤200 words" },
-                { key: "facebook",  label: "Facebook Posts",  wordLimit: "≤200 words" },
-                { key: "instagram", label: "Instagram Posts", wordLimit: "≤50 words" },
-                { key: "pinterest", label: "Pinterest Posts", wordLimit: "≤50 words" },
-              ] as const).map(({ key, label, wordLimit }) => (
-                <div key={key} className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-semibold text-foreground">{label}</h3>
-                    <span className="text-xs text-muted-foreground">{wordLimit}</span>
-                  </div>
-                  <div className="space-y-2">
-                    {socialPosts[key].map((post, i) => {
-                      const id = `${key}-${i}`;
-                      return (
-                        <div key={id} className="bg-card rounded-lg border border-border p-4 flex gap-3">
-                          <span className="text-xs font-semibold text-muted-foreground w-4 shrink-0 mt-0.5">{i + 1}</span>
-                          <p className="text-sm text-foreground flex-1 whitespace-pre-wrap">{post}</p>
-                          <button
-                            onClick={() => copyPost(post, id)}
-                            className="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
-                            title="Copy"
-                          >
-                            {copiedPost === id ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-semibold text-foreground">GBP Posts</h3>
+                  <span className="text-xs text-muted-foreground">≤200 words each</span>
                 </div>
-              ))}
+                <div className="space-y-2">
+                  {socialPosts.gbp.map((post, i) => {
+                    const id = `gbp-${i}`;
+                    return (
+                      <div key={id} className="bg-card rounded-lg border border-border p-4 flex gap-3">
+                        <span className="text-xs font-semibold text-muted-foreground w-4 shrink-0 mt-0.5">{i + 1}</span>
+                        <p className="text-sm text-foreground flex-1 whitespace-pre-wrap">{post}</p>
+                        <button
+                          onClick={() => copyPost(post, id)}
+                          className="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+                          title="Copy"
+                        >
+                          {copiedPost === id ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
             </>
           )}
         </div>

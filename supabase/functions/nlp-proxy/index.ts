@@ -16,14 +16,14 @@ const corsHeaders = {
 // Credits charged per endpoint (0 = free)
 const ENDPOINT_CREDITS: Record<string, number> = {
   "/analyze":         2,
-  "/score-page":      2,
-  "/generate-page":   1,
-  "/reoptimize-page": 1,
+  "/score-page":      1,
+  "/generate-page":   2,
+  "/reoptimize-page": 2,
 };
 
 const ENDPOINT_DESCRIPTIONS: Record<string, string> = {
-  "/analyze":         "Competitor analysis + scoring",
-  "/score-page":      "Competitor analysis + scoring",
+  "/analyze":         "Competitor analysis",
+  "/score-page":      "Page scoring",
   "/generate-page":   "New page creation",
   "/reoptimize-page": "Page reoptimization",
 };
@@ -66,6 +66,7 @@ serve(async (req: Request) => {
     "/score-page", "/generate-page", "/reoptimize-page",
     "/find-page-for-keyword", "/related-pages", "/check-rankability",
     "/plan-pages", "/health", "/generate-social-posts",
+    "/generate-press-release",
   ];
   if (!allowedEndpoints.includes(endpoint)) {
     return new Response(JSON.stringify({ error: "Not found" }), {
@@ -110,6 +111,35 @@ serve(async (req: Request) => {
     }
   }
 
+  // ── Press release credit check ────────────────────────────────────────────────
+  // PR credits are purchased separately ($60 / $159 pack) — not subscription credits.
+  if (endpoint === "/generate-press-release") {
+    const { data: ok, error: prErr } = await adminClient.rpc("deduct_pr_credit", {
+      p_user_id: user.id,
+    });
+
+    if (prErr) {
+      console.error("PR credit deduction error:", prErr);
+      return new Response(JSON.stringify({ error: "Could not process press release credit" }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    if (!ok) {
+      return new Response(
+        JSON.stringify({
+          error: "No press release credits remaining. Purchase a pack to continue.",
+          code: "INSUFFICIENT_PR_CREDITS",
+        }),
+        {
+          status: 402,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+  }
+
   // ── Rankability monthly cap (50 checks/month, separate from credits) ─────────
   if (endpoint === "/check-rankability") {
     const { data: allowed, error: limitError } = await adminClient.rpc(
@@ -147,11 +177,25 @@ serve(async (req: Request) => {
       headers: {
         "Content-Type": "application/json",
         "X-API-Key": NLP_API_KEY,
+        "X-User-ID": user.id,
       },
       body: req.method !== "GET" ? req.body : undefined,
       // @ts-ignore - Deno supports duplex streaming
       duplex: "half",
     });
+
+    // Refund credits if the NLP service returned a server error
+    if (nlpResponse.status >= 500 && creditsRequired > 0) {
+      await adminClient.rpc("refund_credits", {
+        p_user_id: user.id,
+        p_amount:  creditsRequired,
+        p_endpoint: endpoint,
+      }).then(() => {
+        console.log(`Refunded ${creditsRequired} credits to ${user.id} after ${nlpResponse.status} on ${endpoint}`);
+      }).catch((err: unknown) => {
+        console.error("Credit refund failed:", err);
+      });
+    }
 
     // Forward the response (including streaming SSE responses)
     const responseHeaders = new Headers(corsHeaders);

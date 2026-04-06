@@ -30,11 +30,16 @@ interface BusinessProfile {
   detected_icp?: unknown;
 }
 
+type PageAdvisory = {
+  level: "warning" | "info";
+  message: string;
+  suggestNew: boolean;
+};
+
 type CheckState =
   | { status: "idle" }
   | { status: "scanning" }
-  | { status: "found"; page: { url: string; title: string; h1?: string; isBlogPost?: boolean } }
-  | { status: "scoring"; page: { url: string; title: string; h1?: string; isBlogPost?: boolean } }
+  | { status: "found"; page: { url: string; title: string; h1?: string; isBlogPost?: boolean }; advisory?: PageAdvisory }
   | { status: "high_score"; page: { url: string; title: string; isBlogPost?: boolean }; score: number }
   | { status: "not_found" }
   | { status: "creating" };
@@ -43,12 +48,88 @@ import type { ScoreResult, TokenUsage, CostBreakdown } from "@/lib/nlp-types";
 
 type ViewState =
   | { kind: "form" }
+  | { kind: "creating" }
   | { kind: "score"; pageMatch: { url: string; title: string; h1?: string }; serpAnalysis?: AnalysisResult; initialScoreResult?: ScoreResult }
-  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; tokenUsage: Partial<TokenUsage>; costBreakdown: Partial<CostBreakdown>; isNew?: boolean }
+  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; tokenUsage: Partial<TokenUsage>; costBreakdown: Partial<CostBreakdown>; isNew?: boolean; serpAnalysis?: AnalysisResult; prevScore?: number | null }
   | { kind: "analysis"; result: AnalysisResult };
 
 // ANALYSIS_CACHE_MAX_AGE_DAYS — cached keyword analyses older than this are ignored
 const ANALYSIS_CACHE_MAX_AGE_DAYS = 7;
+
+/** Checks whether a found page URL/title/H1 are optimized for the given keyword + location. */
+function analyzePageOptimization(
+  url: string,
+  title: string,
+  h1: string | undefined,
+  keyword: string,
+  location: string,
+): PageAdvisory | null {
+  const stopWords = new Set(["near", "the", "and", "for", "in", "of", "a", "an"]);
+  const serviceTokens = keyword.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, "")
+    .split(/\s+/)
+    .filter(t => t.length >= 3 && !stopWords.has(t));
+
+  const city = location.split(",")[0].trim();
+  const locationTokens = city.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, "")
+    .split(/\s+/)
+    .filter(t => t.length >= 3);
+
+  const isNearMe = keyword.toLowerCase().includes("near me");
+  const urlL = url.toLowerCase();
+  const titleL = title.toLowerCase();
+  const h1L = (h1 ?? "").toLowerCase();
+
+  const has = (text: string, tokens: string[]) => tokens.length > 0 && tokens.some(t => text.includes(t));
+
+  const urlHasService  = has(urlL, serviceTokens);
+  const urlHasLocation = has(urlL, locationTokens);
+  const titleHasService  = has(titleL, serviceTokens);
+  const titleHasLocation = has(titleL, locationTokens);
+  const h1HasService  = has(h1L, serviceTokens);
+  const h1HasLocation = has(h1L, locationTokens);
+
+  if (isNearMe) {
+    const allPresent = urlHasService && urlHasLocation && titleHasService && titleHasLocation && h1HasService && h1HasLocation;
+    if (!allPresent) {
+      return {
+        level: "warning",
+        message: `"Near me" queries require the service and location in the URL, title, and H1. This page is likely missing one or more of these signals.`,
+        suggestNew: !urlHasService || !urlHasLocation,
+      };
+    }
+    return null;
+  }
+
+  if (!urlHasService && !urlHasLocation) {
+    return {
+      level: "warning",
+      message: `This page's URL contains neither the service ("${keyword}") nor the location ("${city}"). It appears to be a generic page — a dedicated service + location page will perform significantly better.`,
+      suggestNew: true,
+    };
+  }
+
+  if (!urlHasService || !urlHasLocation) {
+    const missing = !urlHasService ? `service ("${keyword}")` : `location ("${city}")`;
+    const titleH1HasService  = titleHasService  || h1HasService;
+    const titleH1HasLocation = titleHasLocation || h1HasLocation;
+    if (titleH1HasService && titleH1HasLocation) {
+      return {
+        level: "info",
+        message: `The URL is missing the ${missing}, but the title and H1 include both the service and location. The page may be reoptimizable.`,
+        suggestNew: false,
+      };
+    }
+    return {
+      level: "warning",
+      message: `The URL is missing the ${missing}, and the title/H1 are also incomplete. A dedicated "${keyword} ${city}" page will rank better.`,
+      suggestNew: true,
+    };
+  }
+
+  return null;
+}
 
 const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialLocation, initialBusinessId, isOnboarding = false }: { onBack: () => void; defaultLocation?: string; initialKeyword?: string; initialLocation?: string; initialBusinessId?: string; isOnboarding?: boolean }) => {
   const { data: businesses = [], isLoading: loadingBusinesses } = useBusinessProfiles();
@@ -66,6 +147,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const [checkState, setCheckState] = useState<CheckState>({ status: "idle" });
   const [view, setView] = useState<ViewState>({ kind: "form" });
   const [generateProgress, setGenerateProgress] = useState(0);
+  const [contentTab, setContentTab] = useState<"new" | "saved">("new");
   const [generateStep, setGenerateStep] = useState("");
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -75,6 +157,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const [relatedPages, setRelatedPages] = useState<Array<{ keyword: string; group: string; status: string; url?: string; composite_score?: number }> | null>(null);
   const [rankability, setRankability] = useState<RankabilityResult | null>(null);
   const [rankabilityLoading, setRankabilityLoading] = useState(false);
+  const [sabCity, setSabCity] = useState("");
   const [showPackModal, setShowPackModal] = useState(false);
   const [showCreditModal, setShowCreditModal] = useState(false);
   const [relatedLoading, setRelatedLoading] = useState(false);
@@ -82,6 +165,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const [bulkCreating, setBulkCreating] = useState(false);
   const [bulkProgress, setBulkProgress] = useState<{ current: number; total: number; currentKw: string } | null>(null);
   const [bulkDone, setBulkDone] = useState(0);
+  const [bulkFailed, setBulkFailed] = useState(0);
   const [manualUrl, setManualUrl] = useState("");
 
   // Auto-select first business on initial load (or onboarding-specified business)
@@ -93,20 +177,6 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
       setSelectedBusinessId(businesses[0].id);
     }
   }, [businesses, initialBusinessId, selectedBusinessId]);
-
-  useEffect(() => {
-    if (selectedBusinessId) {
-      const b = businesses.find((b) => b.id === selectedBusinessId);
-      if (b) {
-        const parts = b.address.split(",").map((s) => s.trim());
-        if (parts.length >= 2) {
-          const prefilled = parts.slice(1).join(", ") + ", United States";
-          setLocation(prefilled);
-          setLocationInput(prefilled);
-        }
-      }
-    }
-  }, [selectedBusinessId, businesses]);
 
   // Reset check state when inputs change
   useEffect(() => {
@@ -211,6 +281,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     setRankabilityLoading(true);
     setRankability(null);
     try {
+      const isSab = !b.address?.trim();
       const data = await nlp.checkRankability({
         keyword: keyword.trim(),
         location: location.trim(),
@@ -222,8 +293,11 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         business_lat: b.latitude ?? null,
         business_lng: b.longitude ?? null,
         website: b.website,
+        sab_city: isSab && sabCity.trim() ? sabCity.trim() : undefined,
+        gbp_place_id: b.gbp_place_id ?? undefined,
       });
       setRankability(data);
+      invalidateCredits();
     } catch (e: any) {
       if (e instanceof RankabilityLimitError) {
         setShowPackModal(true);
@@ -295,64 +369,30 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     }
 
     // Step 2: Pause — let user confirm or override the found page
-    setCheckState({ status: "found", page: foundPage });
+    const advisory = analyzePageOptimization(foundPage.url, foundPage.title, foundPage.h1, keyword.trim(), location.trim());
+    setCheckState({ status: "found", page: foundPage, advisory });
   };
 
-  const runScoreForPage = async (pageToScore: { url: string; title: string; h1?: string; isBlogPost?: boolean }) => {
-    const b = businesses.find(b => b.id === selectedBusinessId);
-    if (!b) return;
-
-    abortRef.current = new AbortController();
-    const signal = abortRef.current.signal;
-
-    setCheckState({ status: "scoring", page: pageToScore });
-    setError("");
-    try {
-      const [serpData, scoreData] = await Promise.all([
-        runAnalysisFor(keyword, location, locationCode, signal),
-        nlp.scorePage({
-          keyword: keyword.trim(),
-          location: location.trim(),
-          page_url: pageToScore.url,
-          business_name: b.business_name,
-          gbp_category: b.gbp_category,
-          address: b.address,
-        }, signal),
-      ]);
-      await saveTokenUsage(scoreData.token_usage);
-      await saveAnalysisToSupabase(serpData);
-
-      if (scoreData.composite_score >= 90) {
-        setCheckState({ status: "high_score", page: pageToScore, score: scoreData.composite_score });
-      } else {
-        setView({
-          kind: "score",
-          pageMatch: pageToScore,
-          serpAnalysis: serpData,
-          initialScoreResult: scoreData,
-        });
-        setCheckState({ status: "idle" });
-      }
-      invalidateCredits();
-    } catch (e: any) {
-      if (e.name === "AbortError") return;
-      if (e instanceof InsufficientCreditsError) { setShowCreditModal(true); setCheckState({ status: "idle" }); return; }
-      setError(e.message || "Scoring failed");
-      setCheckState({ status: "idle" });
-    }
+  const runScoreForPage = (pageToScore: { url: string; title: string; h1?: string; isBlogPost?: boolean }) => {
+    setView({ kind: "score", pageMatch: pageToScore });
+    setCheckState({ status: "idle" });
   };
 
   const handleCreateNewPage = async (kwOverride?: string) => {
     abortRef.current = new AbortController();
     const signal = abortRef.current.signal;
 
+    // kwOverride may arrive as a MouseEvent if called directly as an onClick handler — ignore it
+    const safeKwOverride = typeof kwOverride === "string" ? kwOverride : undefined;
+
+    setView({ kind: "creating" });
     setCheckState({ status: "creating" });
     setGenerateProgress(0);
     setGenerateStep("Starting…");
     setElapsedSeconds(0);
     setError("");
     elapsedRef.current = setInterval(() => setElapsedSeconds(s => s + 1), 1000);
-    const kw = kwOverride ?? keyword;
+    const kw = safeKwOverride ?? keyword;
     const b = businesses.find(b => b.id === selectedBusinessId)!;
     try {
       const stream = nlpStream<import("@/lib/nlp-types").GeneratePageResult>(
@@ -402,16 +442,18 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             tokenUsage: genData.token_usage,
             costBreakdown: genData.cost_breakdown ?? {},
             isNew: true,
+            serpAnalysis: genData.serp_analysis ?? undefined,
           });
           return;
         }
       }
       invalidateCredits();
     } catch (e: any) {
-      if ((e as Error).name === "AbortError") return;
-      if (e instanceof InsufficientCreditsError) { setShowCreditModal(true); setCheckState({ status: "idle" }); return; }
+      if ((e as Error).name === "AbortError") { setView({ kind: "form" }); setCheckState({ status: "idle" }); return; }
+      if (e instanceof InsufficientCreditsError) { setShowCreditModal(true); setCheckState({ status: "idle" }); setView({ kind: "form" }); return; }
       setError((e as Error).message || "Something went wrong");
       setCheckState({ status: "not_found" });
+      setView({ kind: "form" });
     } finally {
       setLoadingLabel("");
       if (elapsedRef.current) { clearInterval(elapsedRef.current); elapsedRef.current = null; }
@@ -442,18 +484,19 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         if ("step" in evt && evt.step === "error") return false;
         if ("step" in evt && evt.step === "done" && evt.result) {
           const genData = evt.result;
-          await supabase.from("generated_pages").upsert(
-            {
-              business_id: selectedBusinessId,
-              keyword: kw.trim(),
-              location: location.trim(),
-              mode: "generate",
-              page_title: genData.page_title ?? kw,
-              content_html: genData.content_html,
-              schema_json: genData.schema_json ?? null,
-            },
-            { onConflict: "business_id,keyword,location" },
-          );
+          const { error: saveError } = await supabase.from("generated_pages").insert({
+            business_id: selectedBusinessId,
+            keyword: kw.trim(),
+            location: location.trim(),
+            mode: "generate",
+            page_title: genData.page_title ?? kw,
+            content_html: genData.content_html,
+            schema_json: genData.schema_json ?? null,
+          });
+          if (saveError) {
+            console.error("bulk create: failed to save page for keyword", kw, saveError);
+            return false;
+          }
           await supabase.from("token_usage").insert({
             ...genData.token_usage,
             business_id: selectedBusinessId,
@@ -476,15 +519,17 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     setBulkCreating(true);
     setBulkDone(0);
     let done = 0;
+    let failed = 0;
     for (let i = 0; i < queue.length; i++) {
       if (bulkCancelledRef.current) break;
       setBulkProgress({ current: i + 1, total: queue.length, currentKw: queue[i] });
       const ok = await createAndSavePage(queue[i], abortRef.current?.signal);
-      if (ok) done++;
+      if (ok) done++; else failed++;
     }
     setBulkCreating(false);
     setBulkProgress(null);
     setBulkDone(done);
+    setBulkFailed(failed);
     setSelectedForCreate(new Set());
     invalidateSavedPages();
   };
@@ -503,7 +548,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     runScoreForPage({ url: u, title: u });
   };
 
-  const handleRelatedAction = async ({
+  const handleRelatedAction = ({
     mode,
     keyword: relKw,
     existingUrl,
@@ -516,44 +561,15 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     }
 
     setKeyword(relKw);
-    setView({ kind: "form" });
 
-    // mode === "reoptimize" — run analysis + score the existing page
+    // mode === "reoptimize" — navigate to score view; user scores manually from there
     if (!existingUrl) {
+      setView({ kind: "form" });
       setCheckState({ status: "not_found" });
       return;
     }
 
-    const b = businesses.find(b => b.id === selectedBusinessId);
-    if (!b) return;
-
-    setCheckState({ status: "scoring", page: { url: existingUrl, title: existingUrl } });
-    try {
-      const [serpData, scoreData] = await Promise.all([
-        runAnalysisFor(relKw, location, locationCode),
-        nlp.scorePage({
-          keyword: relKw.trim(),
-          location: location.trim(),
-          page_url: existingUrl,
-          business_name: b.business_name,
-          gbp_category: b.gbp_category,
-          address: b.address,
-        }),
-      ]);
-      await saveTokenUsage(scoreData.token_usage);
-      await saveAnalysisToSupabase(serpData);
-
-      setView({
-        kind: "score",
-        pageMatch: { url: existingUrl, title: existingUrl },
-        serpAnalysis: serpData,
-        initialScoreResult: scoreData,
-      });
-      setCheckState({ status: "idle" });
-    } catch (e: any) {
-      setError((e as Error).message || "Failed to load page score");
-      setCheckState({ status: "idle" });
-    }
+    setView({ kind: "score", pageMatch: { url: existingUrl, title: existingUrl } });
   };
 
   const selectedBusiness = businesses.find(b => b.id === selectedBusinessId);
@@ -613,12 +629,9 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                       </div>
                       {item.status === "found" ? (
                         <div className="flex items-center gap-2 shrink-0">
-                          <span className={`text-xs font-semibold ${item.composite_score >= 80 ? "text-green-500" : item.composite_score >= 60 ? "text-amber-500" : "text-red-500"}`}>
-                            {item.composite_score ?? "–"}
-                          </span>
                           <Button size="sm" variant="outline" className="text-xs h-7 px-2"
                             onClick={() => handleRelatedAction({ mode: "reoptimize", keyword: item.keyword, existingUrl: item.url })}>
-                            Reoptimize
+                            Score →
                           </Button>
                         </div>
                       ) : (
@@ -646,9 +659,14 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             )}
           </div>
         )}
-        {bulkDone > 0 && !bulkCreating && (
-          <div className="px-4 py-3 border-t border-border">
-            <p className="text-xs text-green-600 font-medium">{bulkDone} page{bulkDone > 1 ? "s" : ""} created and saved — view them in Saved Pages below.</p>
+        {(bulkDone > 0 || bulkFailed > 0) && !bulkCreating && (
+          <div className="px-4 py-3 border-t border-border space-y-1">
+            {bulkDone > 0 && (
+              <p className="text-xs text-green-600 font-medium">{bulkDone} page{bulkDone > 1 ? "s" : ""} created and saved — <button type="button" onClick={() => setContentTab("saved")} className="underline hover:no-underline">view in Saved Pages</button>.</p>
+            )}
+            {bulkFailed > 0 && (
+              <p className="text-xs text-destructive font-medium">{bulkFailed} page{bulkFailed > 1 ? "s" : ""} failed to save. Check console for details.</p>
+            )}
           </div>
         )}
       </div>
@@ -656,6 +674,62 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   })() : null;
 
   // ── Sub-view routing ───────────────────────────────────────────────────────
+  if (view.kind === "creating") {
+    const steps = [
+      { label: "Fetching top search results",           detail: "Pulling the top ranking pages for your keyword",              done: generateProgress >= 40, active: generateProgress < 40 },
+      { label: "Scraping & analysing competitor pages", detail: "Reading competitor pages to find patterns and topics",         done: generateProgress >= 65, active: generateProgress >= 15 && generateProgress < 65 },
+      { label: "Generating page",                       detail: "13-section structure + JSON-LD schema",                       done: generateProgress >= 100, active: generateProgress >= 65 },
+    ];
+    const mins = Math.floor(elapsedSeconds / 60);
+    const secs = elapsedSeconds % 60;
+    const elapsed = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+    return (
+      <div className="max-w-2xl mx-auto space-y-6">
+        <div>
+          <h1 className="text-2xl font-display font-bold text-foreground">Creating Your Page</h1>
+          <p className="text-muted-foreground text-sm mt-1">Hang tight — this usually takes 60–120 seconds.</p>
+        </div>
+        <div className="bg-card border border-border rounded-xl px-6 py-6 space-y-4">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span className="font-medium">Building your page… <span className="tabular-nums">{elapsed}</span></span>
+            <span className="opacity-70">Usually 60–120 seconds</span>
+          </div>
+          <div className="space-y-3">
+            {steps.map((step, i) => (
+              <div key={i} className="flex items-start gap-3">
+                <div className="mt-0.5 shrink-0">
+                  {step.done ? (
+                    <div className="w-4 h-4 rounded-full bg-green-500 flex items-center justify-center">
+                      <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 10 10"><path d="M2 5l2.5 2.5L8 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                    </div>
+                  ) : step.active ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-accent" />
+                  ) : (
+                    <div className="w-4 h-4 rounded-full border border-border" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className={`text-sm ${step.active ? "text-foreground font-medium" : step.done ? "text-muted-foreground line-through" : "text-muted-foreground"}`}>
+                    {step.label}
+                  </p>
+                  {step.active && <p className="text-xs text-muted-foreground mt-0.5">{step.detail}</p>}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden">
+            <div className="h-full bg-accent rounded-full transition-all duration-500" style={{ width: `${generateProgress}%` }} />
+          </div>
+          {generateStep && <p className="text-xs text-muted-foreground text-center">{generateStep}</p>}
+          <button onClick={cancelOperation} className="text-xs text-muted-foreground hover:text-destructive transition-colors">
+            Cancel
+          </button>
+        </div>
+        {error && <div className="bg-destructive/10 border border-destructive/20 rounded-lg px-4 py-3 text-sm text-destructive">{error}</div>}
+      </div>
+    );
+  }
+
   if (view.kind === "score") {
     return (
       <PageScoreView
@@ -674,8 +748,8 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         onSerpAnalysis={saveAnalysisToSupabase}
         initialScoreResult={view.initialScoreResult}
         onBack={() => setView({ kind: "form" })}
-        onGenerated={(result, mode) =>
-          setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "", htmlCssNotes: result.html_css_notes, tokenUsage: result.token_usage, costBreakdown: result.cost_breakdown ?? {}, isNew: true })
+        onGenerated={(result, mode, prevScore) =>
+          setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "", htmlCssNotes: result.html_css_notes, tokenUsage: result.token_usage, costBreakdown: result.cost_breakdown ?? {}, isNew: true, prevScore })
         }
         onCreateNew={handleCreateNewPage}
         relatedPagePanel={relatedPagePanel}
@@ -702,6 +776,12 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         website={selectedBusiness?.website ?? undefined}
         gbpCategory={selectedBusiness?.gbp_category || ""}
         address={selectedBusiness?.address || ""}
+        phone={selectedBusiness?.phone ?? undefined}
+        differentiators={selectedBusiness?.differentiators ?? undefined}
+        detected_icp={selectedBusiness?.detected_icp ?? undefined}
+        brand_voice={selectedBusiness?.brand_voice ?? undefined}
+        serp_analysis={view.serpAnalysis ?? undefined}
+        prevScore={view.prevScore ?? null}
         onBack={() => setView({ kind: "form" })}
         onNewPage={() => { setView({ kind: "form" }); setKeyword(""); setCheckState({ status: "idle" }); }}
         onRelatedAction={handleRelatedAction}
@@ -721,7 +801,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     );
   }
 
-  const isChecking = checkState.status === "scanning" || checkState.status === "scoring" || checkState.status === "found";
+  const isChecking = checkState.status === "scanning" || checkState.status === "found";
 
   // ── Main form ──────────────────────────────────────────────────────────────
   const handleCreditPurchase = async (pack: { id: "25" | "60" | "150" }) => {
@@ -782,6 +862,29 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           </>
         )}
       </div>
+
+      {/* Tab switcher — only shown outside onboarding */}
+      {!isOnboarding && (
+        <div className="flex gap-1 bg-muted/40 rounded-lg p-1 w-fit">
+          {(["new", "saved"] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setContentTab(tab)}
+              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                contentTab === tab
+                  ? "bg-card text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {tab === "new" ? "New Page" : "Saved Pages"}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {contentTab === "saved" && !isOnboarding ? (
+        <SavedPagesList businesses={businesses} onOpen={(page) => { openSavedPage(page); setContentTab("new"); }} />
+      ) : (
 
       <div className="bg-card rounded-xl border border-border p-6 space-y-5">
         <h2 className="text-base font-semibold text-foreground">What Service And Area Do You Want To Rank For?</h2>
@@ -882,52 +985,53 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                 <span>⚠️ This appears to be a blog post, not a dedicated service page.</span>
               </div>
             )}
-            <Button
-              className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
-              onClick={() => runScoreForPage(checkState.page)}
-              disabled={(credits?.balance ?? 0) < 2}
-              title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
-            >
-              Score This Page
-              <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span>
-            </Button>
+            {checkState.advisory && (
+              <div className={`px-3 py-2.5 rounded-lg text-xs space-y-2 ${checkState.advisory.level === "warning" ? "bg-red-500/10 border border-red-500/20 text-red-700" : "bg-blue-500/10 border border-blue-500/20 text-blue-700"}`}>
+                <p>{checkState.advisory.level === "warning" ? "⚠️ " : "ℹ️ "}{checkState.advisory.message}</p>
+                {checkState.advisory.suggestNew && (
+                  <Button
+                    className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold"
+                    onClick={() => handleCreateNewPage()}
+                    size="sm"
+                  >
+                    <FilePlus className="w-3.5 h-3.5 mr-1.5" />
+                    Create a New Optimized Page
+                  </Button>
+                )}
+              </div>
+            )}
+            {(!checkState.advisory || !checkState.advisory.suggestNew) && (
+              <Button
+                className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
+                onClick={() => runScoreForPage(checkState.page)}
+              >
+                View & Score This Page
+              </Button>
+            )}
+            {checkState.advisory?.suggestNew && (
+              <Button
+                variant="outline"
+                className="w-full font-medium"
+                onClick={() => runScoreForPage(checkState.page)}
+              >
+                View & score existing page instead
+              </Button>
+            )}
             <div className="flex gap-2">
               <input type="url" placeholder="Or enter a different URL…" value={manualUrl}
                 onChange={e => setManualUrl(e.target.value)}
                 onKeyDown={e => e.key === "Enter" && handleScoreManualUrl()}
                 className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent" />
-              <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score</Button>
+              <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score →</Button>
             </div>
             <button onClick={() => setCheckState({ status: "not_found" })}
               className="w-full text-xs text-muted-foreground hover:text-foreground text-center py-1 transition-colors">
               No page exists — create a new one instead
             </button>
+            {relatedPagePanel}
           </div>
         )}
 
-        {/* Scoring state */}
-        {checkState.status === "scoring" && (
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-2 px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs text-amber-600">
-              <span className="flex items-center gap-2 min-w-0">
-                <FileSearch className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">Found: <a href={checkState.page.url} target="_blank" rel="noopener noreferrer" className="underline font-medium">{checkState.page.title}</a></span>
-              </span>
-            </div>
-            {checkState.page.isBlogPost && (
-              <div className="flex items-center gap-2 px-3 py-2 bg-orange-500/10 border border-orange-500/20 rounded-lg text-xs text-orange-600">
-                <span>⚠️ This appears to be a blog post, not a service page. Consider creating a dedicated service page for this keyword.</span>
-              </div>
-            )}
-            <div className="px-4 py-3 bg-muted/30 rounded-lg space-y-2">
-              <div className="flex items-center gap-3 text-sm text-muted-foreground">
-                <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-                <span>Fetching competitor data and scoring this page… <span className="opacity-60 text-xs">(usually 20–40s)</span></span>
-              </div>
-              <button onClick={cancelOperation} className="text-xs text-muted-foreground hover:text-destructive transition-colors">Cancel</button>
-            </div>
-          </div>
-        )}
 
         {/* High score — well optimized */}
         {checkState.status === "high_score" && (
@@ -938,12 +1042,15 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                 <span className="truncate">Found: <a href={checkState.page.url} target="_blank" rel="noopener noreferrer" className="underline font-medium">{checkState.page.title}</a></span>
               </span>
             </div>
-            <div className="flex gap-2">
-              <input type="url" placeholder="Or score a specific URL…" value={manualUrl}
-                onChange={e => setManualUrl(e.target.value)}
-                onKeyDown={e => e.key === "Enter" && handleScoreManualUrl()}
-                className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent" />
-              <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score</Button>
+            <div className="space-y-1">
+              <div className="flex gap-2">
+                <input type="url" placeholder="Or score a different URL…" value={manualUrl}
+                  onChange={e => setManualUrl(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && handleScoreManualUrl()}
+                  className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent" />
+                <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score</Button>
+              </div>
+              <p className="text-xs text-muted-foreground">Scoring costs 1 credit</p>
             </div>
             {checkState.page.isBlogPost && (
               <div className="flex items-center gap-2 px-3 py-2 bg-orange-500/10 border border-orange-500/20 rounded-lg text-xs text-orange-600">
@@ -996,19 +1103,22 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             <Button
               className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
               onClick={handleCreateNewPage}
-              disabled={(credits?.balance ?? 0) < 1}
-              title={(credits?.balance ?? 0) < 1 ? "Insufficient credits" : undefined}
+              disabled={(credits?.balance ?? 0) < 2}
+              title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
             >
               <Sparkles className="w-4 h-4 mr-2" /> Create New Page
-              <span className="ml-2 text-xs opacity-70 font-normal">1 credit</span>
+              <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span>
             </Button>
 
-            <div className="flex gap-2">
-              <input type="url" placeholder="Or score a specific URL…" value={manualUrl}
-                onChange={e => setManualUrl(e.target.value)}
-                onKeyDown={e => e.key === "Enter" && handleScoreManualUrl()}
-                className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent" />
-              <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score</Button>
+            <div className="space-y-1">
+              <div className="flex gap-2">
+                <input type="url" placeholder="Or score a different URL…" value={manualUrl}
+                  onChange={e => setManualUrl(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && handleScoreManualUrl()}
+                  className="flex-1 text-sm px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-1 focus:ring-accent" />
+                <Button size="sm" onClick={handleScoreManualUrl} disabled={!manualUrl.trim()}>Score</Button>
+              </div>
+              <p className="text-xs text-muted-foreground">Scoring costs 1 credit</p>
             </div>
 
             {relatedPagePanel}
@@ -1026,8 +1136,8 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         {checkState.status === "creating" && (() => {
           const steps = [
             {
-              label: "Fetching top Google results",
-              detail: "DataForSEO organic SERP",
+              label: "Fetching top search results",
+              detail: "Pulling the top ranking pages for your keyword",
               done: generateProgress >= 40,
               active: generateProgress < 40,
             },
@@ -1038,7 +1148,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
               active: generateProgress >= 15 && generateProgress < 65,
             },
             {
-              label: "Generating page with Claude",
+              label: "Generating page",
               detail: "13-section structure + JSON-LD schema",
               done: generateProgress >= 100,
               active: generateProgress >= 65,
@@ -1134,7 +1244,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                   {[
                     { label: "Category match", key: "category_match", max: 35 },
                     { label: "Competition barrier", key: "competition_barrier", max: 15 },
-                    { label: "Distance from city center", key: "distance", max: 20 },
+                    { label: "Distance to target city", key: "distance", max: 20 },
                     { label: "Keyword in competitor names", key: "keyword_in_competitor_names", max: 25 },
                     { label: "Appears in Google Maps", key: "in_maps_results", max: 5 },
                   ].map(({ label, key, max }) => {
@@ -1162,16 +1272,25 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                   <div className="px-3 pb-1">
                     <p className="text-muted-foreground mb-1.5 font-medium">Map pack competitors</p>
                     <div className="space-y-1">
-                      {rankability.competitors.map((c, i) => (
-                        <div key={i} className="flex items-center justify-between bg-muted/50 rounded px-2 py-1">
-                          <span className="truncate flex-1 font-medium">{c.name}</span>
+                      {rankability.competitors.map((c, i) => {
+                        const pos = i + 1;
+                        const isClient = rankability.in_maps_results && pos === rankability.maps_position;
+                        const rowClass = isClient
+                          ? pos <= 3
+                            ? "flex items-center justify-between bg-green-500/15 border border-green-500/30 rounded px-2 py-1"
+                            : "flex items-center justify-between bg-amber-500/15 border border-amber-500/30 rounded px-2 py-1"
+                          : "flex items-center justify-between bg-muted/50 rounded px-2 py-1";
+                        return (
+                        <div key={i} className={rowClass}>
+                          <span className={`truncate flex-1 font-medium ${isClient ? (pos <= 3 ? "text-green-700" : "text-amber-700") : ""}`}>{c.name}</span>
                           <div className="flex items-center gap-2 ml-2 flex-shrink-0 text-muted-foreground">
                             {c.review_count != null && <span>{c.review_count} reviews</span>}
                             {c.rating != null && <span>★ {c.rating}</span>}
                             {c.has_keyword_in_name && <span className="text-amber-600 font-semibold">KW</span>}
                           </div>
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                     {rankability.min_reviews_in_pack != null && (
                       <div className="text-muted-foreground mt-1.5 space-y-0.5">
@@ -1197,17 +1316,24 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                     <p className="text-amber-600">⚠ No map pack found — low local intent keyword</p>
                   )}
                   {rankability.distance_miles != null && !rankability.distance_ok && (
-                    <p className="text-red-600">✗ {rankability.distance_miles} mi from city center — proximity disadvantage</p>
+                    <p className="text-red-600">✗ {rankability.distance_miles} mi from target city — proximity disadvantage</p>
                   )}
                   {rankability.distance_miles != null && rankability.distance_ok && (
-                    <p className="text-green-700">✓ {rankability.distance_miles} mi from city center — good proximity</p>
+                    <p className="text-green-700">✓ {rankability.distance_miles} mi from target city — good proximity</p>
                   )}
                   {rankability.keyword_in_competitor_names > 0 && (
                     <p className="text-amber-600">⚠ {rankability.keyword_in_competitor_names} competitor(s) have keyword in name: {rankability.competitor_name_examples.join(", ")}</p>
                   )}
-                  {rankability.in_maps_results && (
-                    <p className="text-green-700">✓ Business appears at position {rankability.maps_position} in Google Maps top 10</p>
-                  )}
+                  {rankability.in_maps_results
+                    ? <p className={
+                        (rankability.maps_position ?? 0) <= 3
+                          ? "text-green-700 font-semibold"
+                          : "text-amber-600 font-semibold"
+                      }>
+                        ✓ Business appears at position {rankability.maps_position} in Google Maps top 10
+                      </p>
+                    : <p className="text-red-600">✗ Business not found in Google Maps top 10 for this keyword</p>
+                  }
                   {rankability.category_match === "none" && (
                     <p className="text-red-600">✗ GBP category mismatch — pack uses different categories</p>
                   )}
@@ -1222,6 +1348,20 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                 {rankability.message}
               </div>
             )}
+            {selectedBusiness && !selectedBusiness.address?.trim() && (
+              <div className="space-y-1">
+                <p className="text-xs text-muted-foreground">
+                  Service area business detected — enter the city where your GBP is registered to calculate proximity score:
+                </p>
+                <input
+                  type="text"
+                  placeholder="e.g. Anaheim, CA"
+                  value={sabCity}
+                  onChange={e => setSabCity(e.target.value)}
+                  className="w-full text-sm border border-input rounded-md px-3 py-1.5 bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
@@ -1234,22 +1374,16 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
               <Button
                 className="flex-1 bg-accent text-accent-foreground hover:opacity-90 font-semibold"
                 onClick={handleCheckSite}
-                disabled={!canCheck || (credits !== undefined && (credits?.balance ?? 0) < 2)}
-                title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
+                disabled={!canCheck}
               >
                 <FileSearch className="w-4 h-4 mr-2" /> Check My Site
-                <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span>
               </Button>
             </div>
           </div>
         )}
       </div>
 
-      {/* ── Saved Pages ── */}
-      <SavedPagesList
-        businesses={businesses}
-        onOpen={openSavedPage}
-      />
+      )} {/* end contentTab === "new" conditional */}
     </div>
     </>
   );

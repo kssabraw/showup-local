@@ -18,6 +18,7 @@ export const NLP_SERVICE_URL =
 const PROXY_URL             = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/nlp-proxy`;
 const PURCHASE_URL          = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/purchase-rankability-pack`;
 const CREDIT_PURCHASE_URL   = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/purchase-credit-pack`;
+const PR_PURCHASE_URL       = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/purchase-press-release-pack`;
 
 async function getAuthHeader(): Promise<string> {
   const { data: { session } } = await supabase.auth.getSession();
@@ -35,6 +36,13 @@ export class InsufficientCreditsError extends Error {
   }
 }
 
+export class InsufficientPRCreditsError extends Error {
+  constructor() {
+    super("No press release credits remaining. Purchase a pack to continue.");
+    this.name = "InsufficientPRCreditsError";
+  }
+}
+
 export class RankabilityLimitError extends Error {
   readonly limit: number;
   constructor(limit = 50) {
@@ -48,6 +56,9 @@ export class RankabilityLimitError extends Error {
 
 function throwIfInsufficientCredits(res: Response, d: Record<string, unknown>) {
   if (res.status === 402) {
+    if ((d as { code?: string }).code === "INSUFFICIENT_PR_CREDITS") {
+      throw new InsufficientPRCreditsError();
+    }
     throw new InsufficientCreditsError((d.credits_required as number) ?? 1);
   }
   if (res.status === 429 && (d as { code?: string }).code === "RANKABILITY_LIMIT_REACHED") {
@@ -138,7 +149,8 @@ export const nlp = {
       keyword: string;
       location: string;
       location_code?: number | null;
-      page_url: string;
+      page_url?: string;
+      page_content?: string;
       business_name: string;
       gbp_category: string;
       address: string;
@@ -211,6 +223,8 @@ export const nlp = {
       business_lat?: number | null;
       business_lng?: number | null;
       website?: string | null;
+      sab_city?: string;
+      gbp_place_id?: string;
     },
     signal?: AbortSignal,
   ) => nlpPost<RankabilityResult>("/check-rankability", body, signal),
@@ -222,12 +236,26 @@ export const nlp = {
       business_name: string;
       gbp_category: string;
       address?: string;
+      phone?: string;
       page_content: string;
+      differentiators?: unknown[];
+      detected_icp?: unknown;
+      brand_voice?: unknown;
+      serp_analysis?: unknown;
     },
     signal?: AbortSignal,
-  ) => nlpPost<{ gbp: string[]; facebook: string[]; instagram: string[]; pinterest: string[]; token_usage: Record<string, unknown> }>(
+  ) => nlpPost<{ gbp: string[]; token_usage: Record<string, unknown> }>(
     "/generate-social-posts", body, signal,
   ),
+
+  analyzeBrandVoice: (
+    body: {
+      website_url?: string;
+      business_name: string;
+      gbp_category?: string;
+    },
+    signal?: AbortSignal,
+  ) => nlpPost<{ brand_voice: unknown }>("/analyze-brand-voice", body, signal),
 
   analyzeBusiness: (
     body: {
@@ -243,6 +271,43 @@ export const nlp = {
     differentiators: unknown[];
     analysis_status: string;
   }>("/analyze-business", body, signal),
+
+  generatePressRelease: (
+    body: {
+      business_name: string;
+      website: string;
+      gbp_place_id?: string | null;
+      address?: string | null;
+      gbp_category: string;
+      keyword: string;
+      location: string;
+      page_content: string;
+      related_keywords?: string[];
+      entities?: string[];
+      quadgrams?: string[];
+      spokesperson: string;
+      contact_email: string;
+      page_url?: string;
+      additional_links?: { url: string; anchor_text: string }[];
+    },
+    signal?: AbortSignal,
+  ) => nlpPost<{
+    content_html: string;
+    word_count: number;
+    gbp_embed_html: string | null;
+    token_usage: Record<string, unknown>;
+  }>("/generate-press-release", body, signal),
+
+  checkRankability: (
+    body: { keyword: string; location: string; gbp_category: string },
+    signal?: AbortSignal,
+  ) => nlpPost<{
+    verdict: string;
+    match_count: number;
+    total_results: number;
+    ranking_categories: { category: string; count: number }[];
+    message: string;
+  }>("/check-rankability", body, signal),
 };
 
 /** Purchase a credit top-up pack. Returns a Stripe Checkout URL once Stripe is configured. */
@@ -251,6 +316,26 @@ export async function purchaseCreditPack(
 ): Promise<{ checkout_url: string | null; message?: string }> {
   const authHeader = await getAuthHeader();
   const res = await fetch(CREDIT_PURCHASE_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(authHeader ? { Authorization: authHeader } : {}),
+    },
+    body: JSON.stringify({ pack_id }),
+  });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    throw new Error((d as { error?: string }).error || `Purchase failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Purchase a press release pack. Returns a Stripe Checkout URL once Stripe is configured. */
+export async function purchasePressReleasePack(
+  pack_id: "1" | "3",
+): Promise<{ checkout_url: string | null; message?: string }> {
+  const authHeader = await getAuthHeader();
+  const res = await fetch(PR_PURCHASE_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

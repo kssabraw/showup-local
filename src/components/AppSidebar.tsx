@@ -8,9 +8,8 @@ import {
   Zap,
   ClipboardList,
   Store,
-  Facebook,
-  Instagram,
-  Pin,
+  Newspaper,
+  ShieldCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCredits } from "@/hooks/useCredits";
@@ -20,24 +19,23 @@ interface SidebarProps {
   onItemClick: (item: string) => void;
   collapsed: boolean;
   onToggle: () => void;
+  isAdmin?: boolean;
 }
 
 const navItems = [
-  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { id: "content", label: "Content", icon: FileText },
-  { id: "planning", label: "Planning", icon: ClipboardList },
-  { id: "locations", label: "Locations", icon: MapPin },
-  { id: "settings", label: "Settings", icon: Settings },
+  { id: "dashboard",       label: "Dashboard",       icon: LayoutDashboard },
+  { id: "content",         label: "Content",         icon: FileText },
+  { id: "planning",        label: "Planning",        icon: ClipboardList },
+  { id: "press-releases",  label: "Press Releases",  icon: Newspaper },
+  { id: "locations",       label: "Locations",       icon: MapPin },
+  { id: "settings",        label: "Settings",        icon: Settings },
 ];
 
 const comingSoonItems = [
-  { id: "gbp-posts",       label: "GBP Posts",       icon: Store },
-  { id: "facebook-posts",  label: "Facebook Posts",  icon: Facebook },
-  { id: "instagram-posts", label: "Instagram Posts", icon: Instagram },
-  { id: "pinterest-posts", label: "Pinterest Posts", icon: Pin },
+  { id: "gbp-posts", label: "GBP Posts", icon: Store },
 ];
 
-const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarProps) => {
+const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle, isAdmin }: SidebarProps) => {
   const { data: credits } = useCredits();
   const balance = credits?.balance ?? null;
   const monthly = credits?.monthlyBalance ?? null;
@@ -102,6 +100,23 @@ const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarPro
           );
         })}
 
+        {/* Admin item */}
+        {isAdmin && (
+          <button
+            onClick={() => onItemClick("admin")}
+            className={cn(
+              "w-full flex items-center gap-3 rounded-lg text-sm font-medium transition-colors",
+              collapsed ? "justify-center p-2" : "px-3 py-2.5",
+              activeItem === "admin"
+                ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50"
+            )}
+          >
+            <ShieldCheck className="w-4 h-4 flex-shrink-0" />
+            {!collapsed && "Admin"}
+          </button>
+        )}
+
         {/* Coming soon items */}
         {comingSoonItems.map((item) => {
           const Icon = item.icon;
@@ -131,29 +146,60 @@ const AppSidebar = ({ activeItem, onItemClick, collapsed, onToggle }: SidebarPro
       {/* Credit balance */}
       {!collapsed && balance !== null && (
         <div className="px-3 pb-3">
-          <div className="rounded-lg bg-sidebar-accent/40 px-3 py-2.5">
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-xs font-medium text-sidebar-foreground/70">Credits</span>
-              <span className={cn("text-xs font-semibold tabular-nums", low ? "text-red-400" : "text-sidebar-accent-foreground")}>
-                {monthly} / {perMonth}
-                {bonus > 0 && <span className="text-primary ml-1">+{bonus}</span>}
+          <div className="rounded-lg bg-sidebar-accent/40 px-3 py-2.5 space-y-2">
+            <p className="text-xs font-semibold text-sidebar-foreground/70 mb-0.5">Credits</p>
+
+            {/* Analysis / Content */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-sidebar-foreground/60">Analysis &amp; Content</span>
+                <span className={cn("text-xs font-semibold tabular-nums", low ? "text-red-400" : "text-sidebar-accent-foreground")}>
+                  {monthly ?? "–"} / {perMonth}
+                  {bonus > 0 && <span className="text-primary ml-1">+{bonus}</span>}
+                </span>
+              </div>
+              <div className="h-1 rounded-full bg-sidebar-border overflow-hidden">
+                <div
+                  className={cn("h-full rounded-full transition-all", low ? "bg-red-400" : "bg-sidebar-primary")}
+                  style={{ width: `${pct ?? 0}%` }}
+                />
+              </div>
+              {low && <p className="text-xs text-red-400 mt-1">Running low</p>}
+            </div>
+
+            {/* Map pack checks */}
+            {(() => {
+              const used = credits?.rankabilityUsed ?? 0;
+              const limit = credits?.rankabilityLimit ?? 50;
+              const remaining = limit - used;
+              const mapPct = Math.min(100, Math.round((remaining / limit) * 100));
+              const mapLow = remaining <= 5;
+              return (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs text-sidebar-foreground/60">Map Pack Checks</span>
+                    <span className={cn("text-xs font-semibold tabular-nums", mapLow ? "text-red-400" : "text-sidebar-accent-foreground")}>
+                      {remaining} / {limit}
+                    </span>
+                  </div>
+                  <div className="h-1 rounded-full bg-sidebar-border overflow-hidden">
+                    <div
+                      className={cn("h-full rounded-full transition-all", mapLow ? "bg-red-400" : "bg-sidebar-primary")}
+                      style={{ width: `${mapPct}%` }}
+                    />
+                  </div>
+                  {mapLow && <p className="text-xs text-red-400 mt-1">Running low</p>}
+                </div>
+              );
+            })()}
+
+            {/* Press releases */}
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-sidebar-foreground/60">Press Releases</span>
+              <span className="text-xs font-semibold tabular-nums text-sidebar-accent-foreground">
+                {credits?.prCredits ?? 0} remaining
               </span>
             </div>
-            <div className="h-1.5 rounded-full bg-sidebar-border overflow-hidden">
-              <div
-                className={cn("h-full rounded-full transition-all", low ? "bg-red-400" : "bg-sidebar-primary")}
-                style={{ width: `${pct}%` }}
-              />
-            </div>
-            {bonus > 0 && (
-              <p className="text-xs text-primary mt-1.5">{bonus} bonus credit{bonus !== 1 ? "s" : ""}</p>
-            )}
-            {low && !bonus && (
-              <p className="text-xs text-red-400 mt-1.5">Credits running low</p>
-            )}
-            {low && bonus > 0 && (
-              <p className="text-xs text-amber-400 mt-1.5">Monthly credits low — using bonus</p>
-            )}
           </div>
         </div>
       )}

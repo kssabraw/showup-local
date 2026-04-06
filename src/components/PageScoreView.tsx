@@ -33,7 +33,7 @@ interface Props {
   onSerpAnalysis?: (analysis: AnalysisResult) => void;  // called when scoring ran analysis inline
   initialScoreResult?: ScoreResult;
   onBack: () => void;
-  onGenerated: (result: GeneratedResult, mode: "reoptimize") => void;
+  onGenerated: (result: GeneratedResult, mode: "reoptimize", prevScore?: number) => void;
   onCreateNew: () => void;
   relatedPagePanel?: ReactNode;
 }
@@ -166,7 +166,7 @@ export default function PageScoreView({
         if ("step" in evt && evt.step === "done" && evt.result) {
           await saveTokenUsage(evt.result.token_usage);
           invalidateCredits();
-          onGenerated(evt.result as GeneratedResult, "reoptimize");
+          onGenerated(evt.result as GeneratedResult, "reoptimize", scoreResult?.composite_score ?? undefined);
           return;
         }
       }
@@ -335,7 +335,7 @@ export default function PageScoreView({
                   title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
                 >
                   {reoptimizing
-                    ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Reoptimizing…</>
+                    ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Rewriting page…</>
                     : <>Reoptimize This Page <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span></>}
                 </Button>
                 {reoptimizing && (

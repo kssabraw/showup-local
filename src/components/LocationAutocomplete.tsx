@@ -14,6 +14,7 @@ interface Props {
   onInputChange: (raw: string) => void;
   onClear: () => void;
   disabled?: boolean;
+  label?: string;
 }
 
 export function LocationAutocomplete({
@@ -23,6 +24,7 @@ export function LocationAutocomplete({
   onInputChange,
   onClear,
   disabled = false,
+  label = "Area",
 }: Props) {
   const [suggestions, setSuggestions] = useState<LocationOption[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -74,7 +76,7 @@ export function LocationAutocomplete({
 
   return (
     <div className="space-y-2" ref={containerRef}>
-      <label className="text-sm font-medium text-foreground">Area</label>
+      <label className="text-sm font-medium text-foreground">{label}</label>
       <div className="relative">
         <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground z-10" />
         <input

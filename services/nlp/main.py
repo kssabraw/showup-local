@@ -67,7 +67,23 @@ except Exception as e:
 app = FastAPI()
 
 # ── Rate limiting ──────────────────────────────────────────────────────────────
-limiter = Limiter(key_func=get_remote_address)
+# All requests arrive via the Supabase nlp-proxy edge function, so X-Forwarded-For
+# is the Supabase server IP — useless for per-client limiting. The proxy sets
+# X-User-ID to the authenticated Supabase user ID, which we use as the rate limit
+# key so each user gets their own independent bucket.
+def _real_client_ip(request: Request) -> str:
+    user_id = request.headers.get("X-User-ID", "")
+    if user_id:
+        return user_id
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    real_ip = request.headers.get("X-Real-IP", "")
+    if real_ip:
+        return real_ip.strip()
+    return get_remote_address(request)
+
+limiter = Limiter(key_func=_real_client_ip)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -115,8 +131,10 @@ NLP_API_KEY          = os.environ.get("NLP_API_KEY", "")
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 async def verify_api_key(api_key: str = Security(_api_key_header)):
-    """Validates X-API-Key header. Skipped if NLP_API_KEY env var is not set."""
-    if NLP_API_KEY and api_key != NLP_API_KEY:
+    """Validates X-API-Key header. Fails closed — rejects all requests if NLP_API_KEY is unset."""
+    if not NLP_API_KEY:
+        raise HTTPException(status_code=503, detail="Service authentication not configured")
+    if api_key != NLP_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
     return api_key
 
@@ -137,7 +155,7 @@ for name, val in [
         logger.warning(f"{name} not set — related feature will be skipped")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-ZONES = ["title", "h1", "h2_h3", "body"]
+ZONES = ["title", "h1", "h2_h3", "paragraphs"]
 
 RELATED_MIN_PAGE_SPREAD  = 0.49
 RELATED_MIN_SIMILARITY   = 0.1
@@ -206,7 +224,7 @@ class ZoneKeywords(BaseModel):
     title: List[dict]
     h1: List[dict]
     h2_h3: List[dict]
-    body: List[dict]
+    paragraphs: List[dict] = []
 
 
 class AnalysisResponse(BaseModel):
@@ -649,13 +667,13 @@ async def _run_serp_analysis(
         )
 
     # Step 3: parse zones
-    zone_buckets: Dict[str, List[str]] = {z: [] for z in ZONES + ["paragraphs"]}
+    zone_buckets: Dict[str, List[str]] = {z: [] for z in ZONES}
     h2_per_page: List[List[str]] = []
     h3_per_page: List[List[str]] = []
     scraped_urls: List[str] = []
     for url, html in zip(serp_urls, pages):
         zones = extract_zones(html)
-        for z in ZONES + ["paragraphs"]:
+        for z in ZONES:
             zone_buckets[z].append(zones[z])
         h2_per_page.append(zones.get("h2_list", []))
         h3_per_page.append(zones.get("h3_list", []))
@@ -666,7 +684,7 @@ async def _run_serp_analysis(
         title=get_related_keywords_for_zone(zone_buckets["title"], keyword),
         h1=get_related_keywords_for_zone(zone_buckets["h1"], keyword),
         h2_h3=get_related_keywords_for_zone(zone_buckets["h2_h3"], keyword),
-        body=get_related_keywords_for_zone(zone_buckets["body"], keyword),
+        paragraphs=get_related_keywords_for_zone(zone_buckets["paragraphs"], keyword),
     )
     quadgrams = get_top_quadgrams(zone_buckets["paragraphs"], keyword)
 
@@ -755,7 +773,7 @@ async def analyze(request: Request, body: AnalysisRequest):
     return await _run_serp_analysis(body.keyword, body.location, body.location_code, body.urls)
 
 
-@app.get('/health', dependencies=[Depends(verify_api_key)])
+@app.get('/health')
 async def health():
     return {'status': 'ok'}
 
@@ -1484,7 +1502,7 @@ Return only valid JSON, no markdown or explanation."""
 
 
 @app.post('/analyze-business', response_model=BusinessAnalysisResponse, dependencies=[Depends(verify_api_key)])
-@limiter.limit("20/minute")
+@limiter.limit("5/minute")
 async def analyze_business(request: Request, body: BusinessAnalysisRequest):
     """
     Phase 1 business setup pipeline:
@@ -1782,7 +1800,7 @@ Return a JSON object with exactly this structure:
 
 
 @app.post('/analyze-brand-voice', response_model=BrandVoiceResponse, dependencies=[Depends(verify_api_key)])
-@limiter.limit("20/minute")
+@limiter.limit("5/minute")
 async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
     """
     Brand voice pipeline:
@@ -1818,7 +1836,7 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
             selected = await _crawl_pages_for_brand_voice(url, client, max_pages=25)
 
         async def _scrapeowl_extract(pages: List[dict], render_js: bool) -> List[str]:
-            """Fetch pages via ScrapeOwl and extract paragraph text."""
+            """Fetch pages via ScrapeOwl and extract text content."""
             async with httpx.AsyncClient() as sc:
                 htmls = await asyncio.gather(
                     *[_scrape_one(p['url'], sc, render_js=render_js) for p in pages],
@@ -1829,10 +1847,22 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
                 if not html or isinstance(html, Exception):
                     continue
                 soup = BeautifulSoup(html, "html.parser")
-                for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+                for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]):
                     tag.decompose()
-                paragraphs = [para.get_text(" ", strip=True) for para in soup.find_all("p")]
-                paragraphs = [para for para in paragraphs if len(para) > 40]
+                # Try <p> tags first; fall back to all block-level text if none found
+                paragraphs = [el.get_text(" ", strip=True) for el in soup.find_all("p")]
+                paragraphs = [t for t in paragraphs if len(t) > 40]
+                if not paragraphs:
+                    # Many builder sites (Duda, Wix, Squarespace) use <div>/<span> not <p>
+                    lines = soup.get_text("\n", strip=True).splitlines()
+                    seen = set()
+                    for line in lines:
+                        line = line.strip()
+                        if len(line) > 40 and line not in seen:
+                            paragraphs.append(line)
+                            seen.add(line)
+                        if len(paragraphs) >= 30:
+                            break
                 text = " ".join(paragraphs[:30])
                 if text.strip():
                     results.append(f"[{p.get('page_type', 'page')}] {p['url']}\n{text[:600]}")
@@ -1909,7 +1939,94 @@ TITLE TAG FORMULA (follow exactly — do not deviate):
 - Additional persuasion: a benefit or proof point that includes 1–2 more entities (e.g. "Same-Day Response, No Overtime Fees")
 - Total title length: 60–70 characters ideal, 80 max
 
-MANDATORY 13-SECTION STRUCTURE
+AEO / LLM WRITING RULES — apply throughout every section
+
+These rules make content retrievable by AI assistants (ChatGPT, Gemini, Perplexity) and
+optimised for Answer Engine Optimisation. Follow all of them in every section.
+
+1. ANSWER-FIRST: Open every section, paragraph, and FAQ answer with a direct claim.
+   State the conclusion before the explanation.
+   ✗ Bad:  "Tree service is a complex process that requires professional expertise..."
+   ✓ Good: "[Brand] removes trees same-day in Anaheim — including emergency situations."
+
+2. ONE IDEA PER PARAGRAPH: Each <p> covers exactly one point. 3–5 sentences max.
+   Wall-of-text paragraphs are not cited by LLMs. Short, focused paragraphs are.
+
+3. QUESTION-FORMAT H3s: Where natural, write H3s as questions a real searcher would type.
+   e.g. "Do you offer emergency tree removal in Anaheim?"
+        "How much does tree trimming cost in Orange County?"
+   LLMs use these as retrieval anchors — they match them against user queries directly.
+
+4. DIRECT FAQ ANSWERS: Every FAQ answer opens with a direct yes/no or factual statement.
+   ✗ Bad:  "That's a great question. It depends on..."
+   ✓ Good: "Yes, [Brand] offers 24/7 emergency tree removal in Anaheim and surrounding cities."
+
+5. BULLETED LISTS — use <ul> for features, services, inclusions, and what-to-expect items:
+   - Each bullet is a complete, self-contained statement (no sentence fragments)
+   - Lead with the outcome or benefit, not the feature name
+   - 1–2 lines per bullet maximum
+   - Minimum 3 bullets, maximum 8 per list
+   - ✗ Bad bullet:  "Fast service"
+   - ✓ Good bullet: "Same-day response — crews dispatched within 2 hours for Anaheim emergencies"
+
+6. NUMBERED LISTS — use <ol> for processes, steps, and how-it-works sequences:
+   - Each step begins with an action verb
+   - Include what the customer does AND what [Brand] does at each step
+   - 3–5 steps is ideal; never exceed 7
+
+7. TABLES — use <table><thead><tbody> only when content is genuinely comparative or multi-attribute.
+   Do NOT force a table where a list or prose is more natural.
+   USE a table when the page has data that fits 2–4 columns and ≥3 rows, such as:
+   - Service tiers (e.g. trim vs. removal vs. emergency) with price range, timeline, availability
+   - Response time by area/neighbourhood
+   - What's included vs. excluded for a service
+   - Side-by-side comparison of two or more service types
+   DO NOT use a table for:
+   - A simple list of services (use <ul> instead)
+   - FAQ entries (question/answer is not tabular)
+   - Step-by-step processes (use <ol> instead)
+   - Geographic coverage lists (use prose or <ul> instead)
+   When you do use a table:
+   - Column headers must be specific (never "Option A / Option B")
+   - Include a locally-relevant column where it fits naturally (e.g. city, response time)
+   - Keep to 2–4 columns; never exceed 6
+   - Precede every table with a <p> sentence introducing what it shows
+
+8. SPECIFIC FACTS OVER VAGUE CLAIMS — LLMs cite specificity, not generalities:
+   ✗ "We respond quickly."              → ✓ "Crews arrive within 2–4 hours for Anaheim emergencies."
+   ✗ "Serving the local area."          → ✓ "Serving Anaheim, Anaheim Hills, Yorba Linda & Orange County."
+   ✗ "Competitive pricing."             → ✓ "Free estimates — no trip fee within a 15-mile radius."
+
+9. ENTITY TRIPLETS in ≥3 sections: [Brand] + [service] + [city] must co-occur in the
+   intro, the main services body, the local section, and the FAQ. This establishes the
+   entity relationship in LLM retrieval.
+
+10. SECTION LENGTH ≤300 words: LLMs extract from dense sections poorly. If a topic needs
+    more depth, split it into multiple H2 subsections rather than lengthening one section.
+
+BRAND VOICE vs. AEO STRUCTURE — TIEBREAKER RULES
+
+These two sets of rules rarely conflict, but when they appear to, apply this hierarchy:
+
+AEO rules govern STRUCTURE — where the answer sits, paragraph length, heading format,
+list usage. These are layout decisions and are non-negotiable regardless of brand voice.
+
+Brand voice governs EXPRESSION — word choice, tone, personality, sentence rhythm,
+vocabulary. These apply within every structural element.
+
+In practice: a warm, conversational brand still writes short paragraphs and answer-first
+openings — it just does so in its own voice, not in a clinical or generic one.
+
+THE ONE REAL CONFLICT ZONE — FAQ and section openers:
+A direct answer must always come first, but it must be written in the brand's register.
+✗ Cold brand voice applied wrongly: "Yes." (technically direct but robotic)
+✗ Warm brand voice applied wrongly: "What a great question — it really depends on..." (buries the answer)
+✓ Direct answer in brand voice:
+  - Warm/friendly brand:   "Absolutely — our crews are on call 24/7, including weekends and holidays."
+  - Professional/authoritative brand: "Yes. [Brand] provides 24/7 emergency response across Anaheim."
+  - Urgent/emergency brand: "Yes — call now and we'll dispatch a crew within the hour."
+
+The rule: lead with the answer, then let the rest of the sentence and paragraph carry the brand tone.
 
 Section 1 — Intro / Direct Answer Block (100–150 words)
 <section id="intro">
@@ -2006,21 +2123,53 @@ HARD RULES — NEVER:
 - Use vague differentiators ("trusted", "professional", "high quality") without a mechanism
 - Invent or guess phone numbers, addresses, hours, zip codes, street names, or landmarks not explicitly provided in the business data"""
 
-_REOPT_SYSTEM_PROMPT = """You are an expert local SEO content writer. Fix the SEO deficiencies in the page provided by updating its text content only.
+_REOPT_SYSTEM_PROMPT = """You are an expert local SEO content writer. Fix the SEO deficiencies in the existing page while keeping its design intact.
 
-STRICT RULES — follow exactly:
-1. TEXT ONLY: Only change text content (words between HTML tags). You may also update SEO-relevant attributes: alt, title, meta[content], og:title, og:description, aria-label, and JSON-LD schema text values.
-2. PRESERVE EVERYTHING ELSE: Do not change any element types, CSS classes, IDs, data-* attributes, href, src, or any non-content attributes. Do not add, remove, or reorder any HTML elements.
-3. Fix every deficiency listed through word choices, phrasing, and copy — not by adding new HTML sections.
-4. Naturally incorporate competitor entities and phrases from SERP data where missing.
-5. Do not fabricate reviews or placeholder text. Do not use "near me" literally in body copy.
+WHAT YOU CAN CHANGE:
+- Text between existing HTML tags (rewrite copy freely)
+- SEO attributes: alt, title, meta[content], og:title, og:description, aria-label, JSON-LD schema text values
+- Add new HTML elements (paragraphs, lists, headings, sections) inserted wherever they fit most naturally in the page flow
 
-Return your response in EXACTLY this format (do not deviate):
+WHAT YOU MUST NOT CHANGE:
+- Existing HTML tag names, CSS classes, IDs, data-* attributes, href, src, or any non-content attributes
+- Do not remove or reorder any existing HTML elements
 
-<<<NOTES>>>
-List each HTML/CSS structural change that would further improve SEO but that you could NOT make because it requires adding/moving/removing elements or changing classes. Be specific (e.g. "Add an FAQ section with schema markup", "H1 tag is missing — the page title is wrapped in a <div> instead"). If none, write "None."
-<<<HTML>>>
-[Complete page HTML with ONLY text content and SEO attributes changed]"""
+SERP SIGNAL TARGETS — apply these to the corresponding zones:
+The user prompt contains COMPETITOR SIGNAL DATA with per-zone keyword and entity targets.
+Follow those targets exactly:
+- PAGE TITLE: rewrite the <title> tag text to hit the keyword and entity targets for that zone
+- H1: rewrite the H1 text to hit the keyword and entity targets for that zone
+- H2/H3: rewrite existing subheadings and add new ones where needed to hit those targets
+- PARAGRAPHS: weave missing keywords, entities, and quadgram phrases naturally into paragraph text
+If the existing page is missing a zone entirely (e.g. no H1, no FAQ), add it at the most natural location.
+
+PLACEMENT RULES FOR NEW CONTENT:
+- Insert new content where it reads most naturally — not always at the bottom
+- A missing FAQ? Insert it after the main service description
+- A missing local geo block? Insert it near any existing location references
+- Think about page flow: intro → services → social proof → local → FAQ → CTA
+- New elements use semantic HTML (<section>, <h2>, <ul>, <p> etc.) — the site's CSS will style them
+
+AEO / LLM WRITING RULES — apply to all text and any new content added:
+1. ANSWER-FIRST: Open every section and FAQ answer with a direct claim.
+2. ONE IDEA PER PARAGRAPH: Each <p> covers exactly one point. 3–5 sentences max.
+3. QUESTION-FORMAT H3s: Where natural, write H3s as questions a real searcher would type.
+4. DIRECT FAQ ANSWERS: Every FAQ answer opens with a direct yes/no or factual statement.
+5. BULLETED LISTS — use <ul> for features, services, inclusions, what-to-expect items.
+6. NUMBERED LISTS — use <ol> for processes, steps, how-it-works sequences.
+7. TABLES — only when content is genuinely comparative. Never force a table.
+8. SPECIFIC FACTS OVER VAGUE CLAIMS — cite numbers, timeframes, named places.
+9. ENTITY TRIPLETS in ≥3 sections: [Brand] + [service] + [city] must co-occur.
+10. SECTION LENGTH ≤300 words.
+
+HARD RULES — NEVER:
+- Change any CSS class, ID, or HTML attribute on existing elements
+- Remove or reorder existing HTML elements
+- Use "near me" literally in body content
+- Fabricate reviews or invent addresses/phone numbers not provided
+- Include placeholder text like [Insert here]
+
+Return the complete page HTML with all changes applied. No markdown, no explanations."""
 
 _SCORE_SYSTEM_PROMPT = """You are an expert local SEO analyst. Score the provided page against all 7 engines below.
 
@@ -2032,13 +2181,13 @@ SCORING CRITERIA — score each engine 0–100:
 
 3. entity_establishment (weight 15%): brand+service+city co-occurrence in ≥3 sections; sub-services mentioned; descriptive anchor text signals; topical depth.
 
-4. icp_alignment (weight 10%): detect ICP from keyword modifier (emergency→urgent tone; commercial→B2B tone; general→professional/reliable); CTA matches ICP; pain points addressed.
+4. icp_alignment (weight 10%): detect ICP from keyword modifier (emergency→urgent tone; commercial→B2B tone; general→professional/reliable); CTA tone matches ICP (e.g. emergency ICP requires urgency/fear-based CTA, not generic "call for a free estimate"); pain points addressed; emotional register of copy matches searcher intent.
 
-5. aeo_llm_retrieval (weight 10%): answer-first formatting (direct claim before explanation); FAQ with ≥4 entries; each section ≤300 words; Q&A heading structure; specific operational details (not generic filler).
+5. aeo_llm_retrieval (weight 10%): answer-first formatting (direct claim before explanation); FAQ with ≥4 entries, each opening with a direct yes/no or factual statement; question-format H3s where appropriate; each section ≤300 words; ≥1 bulleted list with outcome-first bullets; ≥1 numbered list for a process or steps; tables used where content is genuinely comparative (service tiers, response times, inclusions) — penalise only if comparative data is present but no table was used; specific operational facts (numbers, timeframes, named places) rather than generic filler.
 
 6. geographic_legitimacy (weight 10%): city in title+H1+opening ¶; ≥2 neighborhood references in sentence context; ≥1 landmark reference; ≥3 zip codes in visible content; geo signals in ≥3 page sections.
 
-7. nearme_intent (weight 10%): phone above fold; availability language in opening block; response time stated explicitly; ≥2 neighborhood+service+availability blocks; ≥1 street reference; ≥2 proximity FAQs (availability/response/coverage/emergency).
+7. nearme_intent (weight 10%): phone above fold; availability language in opening block ("available now", "same-day", "emergency response"); response time stated explicitly (e.g. "arrive within 2 hours", "respond in 15 minutes"); ≥2 neighborhood+service+availability blocks; ≥1 street reference; ≥2 proximity FAQs (availability/response/coverage/emergency).
 
 Return ONLY valid JSON — no markdown, no explanation:
 {
@@ -2069,13 +2218,14 @@ def _token_record(endpoint: str, model: str, input_tokens: int, output_tokens: i
     }
 
 _ENGINE_WEIGHTS = {
-    "organic_ranking":      0.20,
-    "gbp_maps":             0.25,
-    "entity_establishment": 0.15,
-    "icp_alignment":        0.10,
-    "aeo_llm_retrieval":    0.10,
+    "organic_ranking":      0.10,
+    "gbp_maps":             0.20,
+    "entity_establishment": 0.10,
+    "icp_alignment":        0.05,
+    "aeo_llm_retrieval":    0.20,
     "geographic_legitimacy":0.10,
     "nearme_intent":        0.10,
+    "serp_signal_coverage": 0.15,   # deterministic — scored in Python, not Claude
 }
 
 _ENGINE_LABELS = {
@@ -2086,7 +2236,131 @@ _ENGINE_LABELS = {
     "aeo_llm_retrieval":     "AEO / LLM Retrieval Engine",
     "geographic_legitimacy": "Geographic Legitimacy Engine",
     "nearme_intent":         "Hyperlocal / Near-Me Engine",
+    "serp_signal_coverage":  "SERP Signal Coverage",
 }
+
+def _compute_serp_signal_coverage(page_html: str, serp_analysis: Optional[dict]) -> dict:
+    """
+    Deterministically score how well the page covers the SERP signals identified
+    from competitor analysis: related keywords (per zone), Google NLP entities,
+    and quadgrams.  Runs in Python — not scored by Claude — so results are
+    precise, reproducible, and cost no extra tokens.
+    """
+    if not serp_analysis:
+        return {
+            "score": 50,
+            "issues": ["No SERP analysis available — signal coverage could not be measured."],
+            "recommendations": ["Run a keyword analysis first to enable SERP signal coverage scoring."],
+        }
+
+    soup = BeautifulSoup(page_html, "html.parser")
+    page_text_lower = soup.get_text(" ", strip=True).lower()
+
+    # Zone text (mirrors _parse_page_zones; falls back to full text for plain-text input)
+    title_el = soup.find("title")
+    h1_el    = soup.find("h1")
+    p_text   = " ".join(el.get_text(" ", strip=True).lower() for el in soup.find_all("p"))
+    zones = {
+        "title":     title_el.get_text(" ", strip=True).lower() if title_el else page_text_lower[:300],
+        "h1":        h1_el.get_text(" ", strip=True).lower() if h1_el else "",
+        "h2_h3":     " ".join(el.get_text(" ", strip=True).lower() for el in soup.find_all(["h2", "h3"])),
+        "paragraphs": p_text or page_text_lower,
+    }
+
+    rk       = serp_analysis.get("related_keywords", {})
+    zt       = serp_analysis.get("zone_targets", {})
+    entities = serp_analysis.get("google_entities", [])
+    quadgrams = serp_analysis.get("top_quadgrams", [])
+
+    issues: list[str] = []
+    recommendations: list[str] = []
+
+    # ── 1. Related keyword coverage per zone  (50% of engine score) ─────────────
+    zone_label_map = {
+        "title": "title tag", "h1": "H1",
+        "h2_h3": "H2/H3 headings", "paragraphs": "paragraphs",
+    }
+    zone_scores: list[float] = []
+    for zone_key in ("title", "h1", "h2_h3", "paragraphs"):
+        terms  = rk.get(zone_key, [])[:12]
+        target = zt.get(zone_key, {}).get("target", 0)
+        if not terms or not target:
+            continue
+        zone_text = zones[zone_key]
+        found   = [t["term"] for t in terms if t["term"].lower() in zone_text]
+        missing = [t["term"] for t in terms if t["term"].lower() not in zone_text]
+        coverage = min(len(found) / max(target, 1), 1.0)
+        zone_scores.append(coverage)
+        gap = max(0, target - len(found))
+        if gap > 0 and missing:
+            zlabel = zone_label_map[zone_key]
+            issues.append(
+                f"{zlabel.capitalize()}: {len(found)}/{target} keyword targets met — "
+                f"missing: {', '.join(missing[:5])}"
+            )
+            recommendations.append(
+                f"Add {gap} more keyword{'s' if gap > 1 else ''} to {zlabel}: "
+                f"{', '.join(missing[:5])}"
+            )
+
+    kw_score = (sum(zone_scores) / len(zone_scores) * 100) if zone_scores else 50.0
+
+    # ── 2. Google NLP entity coverage per zone  (50% of engine score) ──────────
+    top_entities = sorted(entities, key=lambda e: e.get("page_spread", 0), reverse=True)[:15]
+    ent_zone_scores: list[float] = []
+    if top_entities:
+        for zone_key in ("title", "h1", "h2_h3", "paragraphs"):
+            entity_target = zt.get(zone_key, {}).get("entity_target", 0)
+            if not entity_target:
+                continue
+            zone_text = zones[zone_key]
+            found_ents   = [e["name"] for e in top_entities if e["name"].lower() in zone_text]
+            missing_ents = [e["name"] for e in top_entities if e["name"].lower() not in zone_text]
+            coverage = min(len(found_ents) / max(entity_target, 1), 1.0)
+            ent_zone_scores.append(coverage)
+            gap = max(0, entity_target - len(found_ents))
+            if gap > 0 and missing_ents:
+                zlabel = zone_label_map[zone_key]
+                issues.append(
+                    f"{zlabel.capitalize()}: {len(found_ents)}/{entity_target} entity targets met — "
+                    f"missing: {', '.join(missing_ents[:5])}"
+                )
+                recommendations.append(
+                    f"Add {gap} more {'entity' if gap == 1 else 'entities'} to {zlabel}: "
+                    f"{', '.join(missing_ents[:5])}"
+                )
+        ent_score = (sum(ent_zone_scores) / len(ent_zone_scores) * 100) if ent_zone_scores else 75.0
+    else:
+        ent_score = 75.0
+
+    # ── 3. Quadgram coverage  (20% of engine score) ──────────────────────────────
+    top_qg = quadgrams[:10]
+    if top_qg:
+        found_qg   = [q["phrase"] for q in top_qg if q["phrase"].lower() in page_text_lower]
+        missing_qg = [q["phrase"] for q in top_qg if q["phrase"].lower() not in page_text_lower]
+        qg_score = (len(found_qg) / len(top_qg)) * 100
+        if missing_qg:
+            issues.append(
+                f"Missing {len(missing_qg)}/{len(top_qg)} competitor phrases: "
+                f"{', '.join(missing_qg[:4])}"
+            )
+            recommendations.append(
+                f"Weave these competitor phrases into paragraph text: "
+                f"{', '.join(missing_qg[:4])}"
+            )
+    else:
+        qg_score = 75.0
+
+    composite = round(kw_score * 0.30 + ent_score * 0.50 + qg_score * 0.20, 1)
+    return {
+        "score":             composite,
+        "issues":            issues,
+        "recommendations":   recommendations,
+        "keyword_coverage":  round(kw_score, 1),
+        "entity_coverage":   round(ent_score, 1),
+        "quadgram_coverage": round(qg_score, 1),
+    }
+
 
 def _composite_from_scores(scores: dict) -> tuple[float, str]:
     composite = sum(scores[k]["score"] * w for k, w in _ENGINE_WEIGHTS.items() if k in scores)
@@ -2258,7 +2532,11 @@ def _parse_claude_json(text: str) -> dict:
     if text.startswith("```"):
         text = re.sub(r'^```(?:json)?\s*', '', text)
         text = re.sub(r'\s*```$', '', text.strip())
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        logger.warning(f"_parse_claude_json: failed to parse JSON, returning empty dict. Raw: {text[:300]}")
+        return {}
 
 def compute_zone_targets(
     zone_buckets: Dict[str, List[str]],
@@ -2268,35 +2546,28 @@ def compute_zone_targets(
     """
     For each zone, count how many of the filtered related-keyword terms appear in
     each competitor page's zone text, then return the max count as the target.
-    Also computes an entity target from the paragraph zone.
+    Also computes per-zone entity targets by counting how many Google entities
+    appear in each zone across competitor pages.
     """
     targets: Dict[str, dict] = {}
+    entity_names = {e["name"].lower() for e in google_entities} if google_entities else set()
+
     for zone_name in ZONES:
-        terms = getattr(related, zone_name)
-        if not terms:
-            targets[zone_name] = {"target": 0}
-            continue
-        term_set = {t["term"].lower() for t in terms}
-        max_count = 0
+        terms = getattr(related, zone_name, [])
+        term_set = {t["term"].lower() for t in terms} if terms else set()
+        max_term_count = 0
+        max_entity_count = 0
+
         for page_text in zone_buckets.get(zone_name, []):
             if not page_text:
                 continue
             cleaned = clean_text(page_text).lower()
-            count = sum(1 for term in term_set if term in cleaned)
-            max_count = max(max_count, count)
-        targets[zone_name] = {"target": max_count}
+            if term_set:
+                max_term_count = max(max_term_count, sum(1 for t in term_set if t in cleaned))
+            if entity_names:
+                max_entity_count = max(max_entity_count, sum(1 for e in entity_names if e in cleaned))
 
-    # Entity target: count distinct Google entities present in each page's paragraphs
-    if google_entities:
-        entity_names = {e["name"].lower() for e in google_entities}
-        max_entity_count = 0
-        for page_text in zone_buckets.get("paragraphs", []):
-            if not page_text:
-                continue
-            cleaned = clean_text(page_text).lower()
-            count = sum(1 for name in entity_names if name in cleaned)
-            max_entity_count = max(max_entity_count, count)
-        targets["entities"] = {"target": max_entity_count}
+        targets[zone_name] = {"target": max_term_count, "entity_target": max_entity_count}
 
     return targets
 
@@ -2465,15 +2736,20 @@ async def _score_page_for_related(
     user_prompt = _build_score_prompt(business_name, gbp_category, keyword, city, address, "", page_text)
     msg = await haiku_client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=2000,
+        max_tokens=4096,
         system=[{"type": "text", "text": _SCORE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-        messages=[{"role": "user", "content": user_prompt}],
+        messages=[
+            {"role": "user", "content": user_prompt},
+            {"role": "assistant", "content": "{"},
+        ],
     )
     token_rec = _token_record(
         "related-pages/score", "claude-haiku-4-5-20251001",
         msg.usage.input_tokens, msg.usage.output_tokens,
     )
-    scores = _parse_claude_json(msg.content[0].text)
+    scores = _parse_claude_json("{" + msg.content[0].text)
+    # No serp_analysis available in the related-pages path — coverage engine scores neutral
+    scores["serp_signal_coverage"] = _compute_serp_signal_coverage(page_text, None)
     composite, status = _composite_from_scores(scores)
     return {
         "composite_score": composite,
@@ -2493,32 +2769,49 @@ def _serp_context(serp_analysis: Optional[dict]) -> str:
     quadgrams = serp_analysis.get("top_quadgrams", [])
 
     zone_labels = [
-        ("title",  "PAGE TITLE (<title> tag)"),
-        ("h1",     "H1 HEADING"),
-        ("h2_h3",  "H2/H3 SUBHEADINGS"),
-        ("body",   "BODY TEXT"),
+        ("title",      "PAGE TITLE (<title> tag)"),
+        ("h1",         "H1 HEADING"),
+        ("h2_h3",      "H2/H3 SUBHEADINGS"),
+        ("paragraphs", "PARAGRAPHS (<p> tags)"),
     ]
 
-    parts = ["COMPETITOR SIGNAL DATA — match or exceed these targets in the corresponding zones:"]
+    top_entities = sorted(entities, key=lambda e: e["page_spread"], reverse=True)[:15] if entities else []
+
+    parts = ["""COMPETITOR SIGNAL DATA — match or exceed these targets in the corresponding zones:
+
+NOTE: Related keywords and Google entities are two separate lists derived independently.
+Related keywords come from TF-IDF analysis of competitor page text (topical relevance signal).
+Google entities come from Google's Natural Language API (entity establishment signal).
+There may be overlap — a term like "Anaheim" can appear on both lists. If it does,
+using it once counts toward both the keyword target and the entity target for that zone."""]
+
+    # Show entity list once up front so per-zone instructions can reference it
+    if top_entities:
+        ent_items = [f"{e['name']} (×{e['recommended_mentions']})" for e in top_entities]
+        parts.append(f"\nGOOGLE ENTITIES — use these across the zones per the targets below:")
+        parts.append(f"  {', '.join(ent_items)}")
+
+    zone_display = {
+        "title":      "title tag",
+        "h1":         "H1",
+        "h2_h3":      "H2 and H3 headings",
+        "paragraphs": "paragraphs",
+    }
 
     for zone_key, zone_label in zone_labels:
         terms = rk.get(zone_key, [])[:20]
-        target = zt.get(zone_key, {}).get("target", 0)
-        if not terms:
+        zone_data = zt.get(zone_key, {})
+        term_target = zone_data.get("target", 0)
+        entity_target = zone_data.get("entity_target", 0)
+        if not terms and not entity_target:
             continue
         parts.append(f"\n{zone_label}:")
-        if target:
-            parts.append(f"  Target: include ~{target} of these terms (best competitor used {target})")
-        parts.append(f"  Terms (ranked by relevance): {', '.join(t['term'] for t in terms)}")
-
-    if entities:
-        entity_target = zt.get("entities", {}).get("target", 0)
-        parts.append(f"\nGOOGLE ENTITIES (named entities from competitor pages):")
-        if entity_target:
-            parts.append(f"  Target: reference ~{entity_target} of these in body content (best competitor used {entity_target})")
-        top_entities = sorted(entities, key=lambda e: e["page_spread"], reverse=True)[:15]
-        ent_items = [f"{e['name']} (×{e['recommended_mentions']})" for e in top_entities]
-        parts.append(f"  Entities: {', '.join(ent_items)}")
+        if term_target and terms:
+            parts.append(f"  Use {term_target} of these keywords in the {zone_display[zone_key]}: {', '.join(t['term'] for t in terms)}")
+        elif terms:
+            parts.append(f"  Keywords (ranked by relevance): {', '.join(t['term'] for t in terms)}")
+        if entity_target and top_entities:
+            parts.append(f"  Use {entity_target} of the above entities in the {zone_display[zone_key]}")
 
     if quadgrams:
         parts.append(f"\nTOP COMPETITOR PHRASES (4-word phrases — use naturally in body):")
@@ -2642,6 +2935,238 @@ def _reopt_serp_context(page_zones: dict, serp_analysis: Optional[dict]) -> str:
 
     return "\n".join(parts)
 
+
+# ── Strategy-3 SEO checklist ──────────────────────────────────────────────────
+
+def _detect_icp_from_keyword(keyword: str) -> tuple[str, str, str]:
+    """Returns (icp_label, tone_instruction, cta_instruction) based on keyword modifiers."""
+    kw = keyword.lower()
+    if any(w in kw for w in ["emergency", "urgent", "24/7", "same day", "same-day", "asap", "immediate"]):
+        return (
+            "Emergency Homeowner (fear/urgency-driven)",
+            "urgency and reassurance — they are stressed and need immediate help",
+            '"Call now — we\'re available 24/7" / "Available right now" / "Don\'t wait — call us"',
+        )
+    if any(w in kw for w in ["commercial", "business", "office", "property", "hoa", "industrial"]):
+        return (
+            "Commercial Client (B2B, professional)",
+            "professional and businesslike — emphasise reliability, insurance, minimal disruption",
+            '"Request a commercial quote" / "Schedule a site assessment"',
+        )
+    if any(w in kw for w in ["cheap", "affordable", "budget", "low cost", "low-cost", "inexpensive"]):
+        return (
+            "Budget-Conscious Homeowner",
+            "transparent and value-focused — lead with pricing clarity and no hidden fees",
+            '"Get a free, no-obligation estimate"',
+        )
+    return (
+        "General Homeowner (professional/reliable)",
+        "confident and trustworthy — emphasise expertise, safety, and quality",
+        '"Get a free estimate" / "Call for a quote"',
+    )
+
+
+async def _fetch_zip_codes_for_city(city: str, state: str, address: Optional[str], client) -> str:
+    """Return a comma-separated list of ZIP codes for the city via a tiny Haiku call."""
+    # Try extracting from address first
+    zip_from_addr = None
+    if address:
+        m = re.search(r'\b(\d{5})\b', address)
+        if m:
+            zip_from_addr = m.group(1)
+
+    location_str = f"{city}, {state}".strip(", ") or city
+    try:
+        msg = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=80,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"List 6 real ZIP codes that serve {location_str}. "
+                    "Return ONLY a comma-separated list of 5-digit ZIP codes, nothing else."
+                ),
+            }],
+        )
+        raw = msg.content[0].text.strip()
+        zips = [z.strip() for z in raw.replace("\n", ",").split(",") if re.match(r'^\d{5}$', z.strip())]
+        if zip_from_addr and zip_from_addr not in zips:
+            zips = [zip_from_addr] + zips
+        return ", ".join(zips[:6]) if zips else (zip_from_addr or f"local ZIP codes for {city}")
+    except Exception:
+        return zip_from_addr or f"local ZIP codes for {city}"
+
+
+async def _build_seo_checklist(
+    keyword: str,
+    location: str,
+    address: Optional[str],
+    phone: Optional[str],
+    gbp_category: str,
+    serp_analysis: Optional[dict],
+    client,   # Anthropic client — used for ZIP lookup
+) -> str:
+    """
+    Build a concrete, data-driven SEO checklist from scoring rubric + SERP data + business data.
+    Maps every engine requirement to specific values so Claude knows exactly what to produce.
+    """
+    city = location.split(",")[0].strip()
+    state_parts = location.split(",")
+    state = state_parts[1].strip() if len(state_parts) > 1 else ""
+
+    icp_label, icp_tone, icp_cta = _detect_icp_from_keyword(keyword)
+    is_emergency = "Emergency" in icp_label
+
+    # ── Geo entities from SERP ───────────────────────────────────────────────
+    geo_names: list[str] = []
+    if serp_analysis:
+        for e in serp_analysis.get("google_entities", []):
+            if e.get("entity_type") in ("LOCATION", "OTHER") and e.get("page_spread", 0) >= 3:
+                name = e["name"]
+                if name.lower() != city.lower() and len(name) > 2:
+                    geo_names.append(name)
+            if len(geo_names) >= 6:
+                break
+
+    # ── ZIP codes ────────────────────────────────────────────────────────────
+    zip_codes = await _fetch_zip_codes_for_city(city, state, address, client)
+
+    # ── Street reference from address ────────────────────────────────────────
+    street_ref = ""
+    if address:
+        street_ref = address.split(",")[0].strip()
+
+    # ── FAQ question suggestions from competitor headings ────────────────────
+    faq_suggestions: list[str] = []
+    if serp_analysis:
+        for h in serp_analysis.get("competitor_headings", []):
+            text = h.get("text", "")
+            if "?" in text or any(text.lower().startswith(w) for w in
+                                  ["how", "what", "when", "where", "why", "do ", "can ", "is ", "are ", "will "]):
+                faq_suggestions.append(f'"{text}"')
+            if len(faq_suggestions) >= 4:
+                break
+
+    # ── Build checklist ──────────────────────────────────────────────────────
+    lines = [
+        "━" * 60,
+        "SEO SCORING CHECKLIST — satisfy ALL items below to score 90+.",
+        "These are derived from the exact rubric used to grade your page.",
+        "━" * 60,
+        "",
+        "【KEYWORD PLACEMENT — organic_ranking 20%】",
+        f'  • <title> tag: must contain "{keyword}" and "{city}"',
+        f'  • <h1>: must contain "{keyword}"',
+        f'  • Opening paragraph: mention "{keyword}" within the first 2 sentences',
+        f'  • Page tone: transactional/service (NOT informational or blog-style)',
+        f'  • CTA and {phone or "phone number"} visible without scrolling',
+        "",
+        "【GBP / LOCAL SIGNALS — gbp_maps 25%】",
+        f'  • Exact city name "{city}" in title, H1, and opening paragraph',
+        f'  • Reference GBP category: "{gbp_category}"',
+        f'  • Business name + service type + "{city}" must co-occur in ≥3 separate sections',
+    ]
+
+    if phone:
+        lines.append(f'  • NAP: include phone {phone} in the page')
+    if address:
+        lines.append(f'  • NAP: include address "{address}"')
+
+    lines += [
+        "",
+        "【GEOGRAPHIC LEGITIMACY — geographic_legitimacy 10%】",
+        f'  • "{city}" must appear in title, H1, and opening paragraph',
+    ]
+    if geo_names:
+        lines.append(f'  • Neighborhoods/areas to mention in sentence context (use ≥2): {", ".join(geo_names)}')
+    else:
+        lines.append(f'  • Include ≥2 neighborhood or district references near {city} in sentence context')
+    lines += [
+        f'  • ZIP codes — embed ≥3 of these in visible body text: {zip_codes}',
+        f'  • Include ≥1 local landmark, street name, or recognizable reference near {city}',
+        f'  • Geo signals must appear across ≥3 separate page sections (not all bunched together)',
+    ]
+    if street_ref:
+        lines.append(f'  • Street reference available from business address: "{street_ref}"')
+
+    lines += [
+        "",
+        "【NEAR-ME INTENT — nearme_intent 10%】",
+    ]
+    if phone:
+        lines.append(f'  • {phone} must appear ABOVE THE FOLD (in the hero/header section)')
+    if is_emergency:
+        lines.append('  • Opening block must include availability language: "available 24/7", "emergency response", or "same-day service"')
+        lines.append('  • State explicit response time: e.g. "arrive within 2 hours", "on-site within 60 minutes"')
+    else:
+        lines.append('  • Include availability/responsiveness language near the top of the page')
+        lines.append('  • Mention a service timeframe (e.g. "same-week appointments", "respond within 24 hours")')
+    lines += [
+        '  • Include ≥2 blocks combining: [neighborhood name] + [service] + [availability signal]',
+        '  • Include ≥2 FAQ entries on coverage area, response time, or service availability (proximity FAQs)',
+    ]
+    if street_ref:
+        lines.append(f'  • Include street-level reference: "{street_ref}" or nearby street names')
+
+    lines += [
+        "",
+        "【AEO / LLM RETRIEVAL STRUCTURE — aeo_llm_retrieval 10%】",
+        '  • Answer-first format: lead every section with the direct claim or answer BEFORE the explanation',
+        '  • FAQ section: ≥4 entries; each entry must OPEN with a direct yes/no or factual statement',
+        '  • ≥2 of those FAQ entries must be proximity FAQs (coverage area, response time, emergency availability)',
+    ]
+    if faq_suggestions:
+        lines.append(f'  • Suggested FAQ questions from top-ranking competitors: {", ".join(faq_suggestions)}')
+    lines += [
+        '  • ≥1 bulleted list with outcome-first bullets (benefit or result stated first)',
+        '  • ≥1 numbered list for a process, steps, or how-it-works section',
+        '  • Each content section ≤300 words — split longer topics into multiple H2 subsections',
+        '  • Use question-format H3s where the content is naturally Q&A',
+        '  • Include specific operational facts: named places, response times, certifications, service counts',
+    ]
+
+    lines += [
+        "",
+        f'【ICP ALIGNMENT — icp_alignment 10%】',
+        f'  • Detected ICP: {icp_label}',
+        f'  • Tone: {icp_tone}',
+        f'  • Primary CTA must match ICP intent: {icp_cta}',
+        f'  • Address the ICP\'s primary pain point directly in the first 2 sections',
+    ]
+
+    # ── SERP keyword + entity targets (entity_establishment 15%) ────────────
+    if serp_analysis:
+        rk = serp_analysis.get("related_keywords", {})
+        zt = serp_analysis.get("zone_targets", {})
+        entities = serp_analysis.get("google_entities", [])
+        quadgrams = serp_analysis.get("top_quadgrams", [])
+
+        lines.append("")
+        lines.append("【KEYWORD & ENTITY TARGETS — entity_establishment 15%】")
+        for zone_key, zone_label in [
+            ("title",      "Title tag"),
+            ("h1",         "H1 heading"),
+            ("h2_h3",      "H2/H3 subheadings"),
+            ("paragraphs", "Paragraph text"),
+        ]:
+            terms = [t["term"] for t in rk.get(zone_key, [])[:8]]
+            target = zt.get(zone_key, {}).get("target", 0)
+            if terms and target:
+                lines.append(f'  • {zone_label}: include ≥{target} of: {", ".join(terms)}')
+
+        if entities:
+            top_ents = [e["name"] for e in sorted(entities, key=lambda e: e["page_spread"], reverse=True)[:8]]
+            lines.append(f'  • Named entities to weave in (Google NLP — these establish topical authority): {", ".join(top_ents)}')
+            lines.append(f'  • Business name + service + city must co-occur in ≥3 sections')
+
+        if quadgrams:
+            phrases = [q["phrase"] for q in quadgrams[:6]]
+            lines.append(f'  • Competitor 4-word phrases to use naturally in paragraphs: {", ".join(phrases)}')
+
+    lines += ["", "━" * 60]
+    return "\n".join(lines)
+
+
 class FindPageRequest(BaseModel):
     website_url: str
     keyword: str
@@ -2653,7 +3178,7 @@ class FindPageResponse(BaseModel):
     is_blog_post: bool = False
 
 @app.post('/find-page-for-keyword', response_model=FindPageResponse, dependencies=[Depends(verify_api_key)])
-@limiter.limit("20/minute")
+@limiter.limit("10/minute")
 async def find_page_for_keyword(request: Request, body: FindPageRequest):
     """
     Lightweight site scan: check if the business has a page targeting the keyword.
@@ -2803,44 +3328,15 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
             candidate_pool.sort(key=_slug_match_score, reverse=True)
             candidate_pool = candidate_pool[:25]
 
-            # ── Direct URL guessing (runs if sitemap found nothing useful) ─────────
-            # Generate slug permutations from service + location words and probe them.
-            # Catches cases where sitemap discovery fails entirely.
-            if not svc_matches and not loc_matches:
-                svc_slug = "-".join(kw_words)
-                loc_slug = "-".join(loc_words[:2]) if loc_words else ""  # e.g. "newport-beach"
-                guesses = []
-                if svc_slug and loc_slug:
-                    guesses += [
-                        f"{origin}/{loc_slug}-{svc_slug}/",
-                        f"{origin}/{loc_slug}-{svc_slug}s/",
-                        f"{origin}/{svc_slug}-{loc_slug}/",
-                        f"{origin}/{svc_slug}s-{loc_slug}/",
-                    ]
-                if svc_slug:
-                    guesses += [f"{origin}/{svc_slug}/", f"{origin}/{svc_slug}s/"]
-
-                async def _probe(u: str) -> Optional[str]:
-                    try:
-                        r = await client.head(u, timeout=5.0)
-                        return u if r.status_code in (200, 301, 302) else None
-                    except Exception:
-                        return None
-
-                probe_results = await asyncio.gather(*[_probe(g) for g in guesses])
-                guessed = [u for u in probe_results if u]
-                if guessed:
-                    logger.info(f"find-page-for-keyword: direct-guess found {guessed}")
-                    candidate_pool = guessed + candidate_pool
-
             # ── site: search fallback ─────────────────────────────────────────────
-            # If all sitemap + guessing attempts found nothing, query Google via
-            # DataForSEO with  site:{domain} {keyword} {city}  and use the results.
-            if not candidate_pool and DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD:
+            # Run when the sitemap had no keyword/location slug matches — meaning
+            # the page either isn't in the sitemap or uses an unexpected URL pattern.
+            # Uses Google's index via DataForSEO site: query to find indexed pages.
+            if not svc_matches and not loc_matches and DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD:
                 try:
                     city = (body.location or "").split(",")[0].strip()
                     site_query = f"site:{base_netloc} {body.keyword} {city}".strip()
-                    logger.info(f"find-page-for-keyword: falling back to site-search: {site_query!r}")
+                    logger.info(f"find-page-for-keyword: no sitemap slug matches — site-search: {site_query!r}")
                     credentials = base64.b64encode(
                         f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
                     ).decode()
@@ -2859,9 +3355,41 @@ async def find_page_for_keyword(request: Request, body: FindPageRequest):
                                         _u = _item.get("url", "")
                                         if _u and base_netloc in _u and _u not in candidate_pool:
                                             candidate_pool.append(_u)
-                        logger.info(f"find-page-for-keyword: site-search returned {len(candidate_pool)} results")
+                        logger.info(f"find-page-for-keyword: site-search added results, pool now {len(candidate_pool)}")
                 except Exception as _se:
                     logger.warning(f"find-page-for-keyword: site-search failed ({_se})")
+
+            # ── Direct URL guessing ───────────────────────────────────────────────
+            # Probe slug permutations built from keyword + location words.
+            # Runs after site: search so Google results take precedence; catches
+            # pages not yet indexed by Google or missing from the sitemap.
+            svc_slug = "-".join(kw_words)
+            loc_slug = "-".join(loc_words[:2]) if loc_words else ""  # e.g. "newport-beach"
+            guesses = []
+            if svc_slug and loc_slug:
+                guesses += [
+                    f"{origin}/{loc_slug}-{svc_slug}/",
+                    f"{origin}/{loc_slug}-{svc_slug}s/",
+                    f"{origin}/{svc_slug}-{loc_slug}/",
+                    f"{origin}/{svc_slug}s-{loc_slug}/",
+                ]
+            if svc_slug:
+                guesses += [f"{origin}/{svc_slug}/", f"{origin}/{svc_slug}s/"]
+            # Skip any URL already in the pool
+            guesses = [g for g in guesses if g not in candidate_pool and g.rstrip('/') not in candidate_pool]
+
+            async def _probe(u: str) -> Optional[str]:
+                try:
+                    r = await client.head(u, timeout=5.0)
+                    return u if r.status_code in (200, 301, 302) else None
+                except Exception:
+                    return None
+
+            probe_results = await asyncio.gather(*[_probe(g) for g in guesses])
+            guessed = [u for u in probe_results if u]
+            if guessed:
+                logger.info(f"find-page-for-keyword: direct-guess found {guessed}")
+                candidate_pool = candidate_pool + guessed
 
             # Generic fallback: if still nothing, take top 10 discovered URLs
             if not candidate_pool:
@@ -2995,20 +3523,21 @@ async def score_page(request: Request, body: ScorePageRequest):
     serp_analysis_dict: Optional[dict] = body.serp_analysis
     if not serp_analysis_dict:
         logger.info(f"score-page: no serp_analysis provided — running inline SERP analysis for '{body.keyword}'")
-        inline_serp = await _run_serp_analysis(body.keyword, body.location, body.location_code)
-        serp_analysis_dict = inline_serp.model_dump()
+        try:
+            inline_serp = await _run_serp_analysis(body.keyword, body.location, body.location_code)
+            serp_analysis_dict = inline_serp.model_dump()
+        except Exception as _serp_err:
+            logger.warning(f"score-page: inline SERP analysis failed ({_serp_err})")
+            raise HTTPException(status_code=503, detail="Could not fetch competitor data. Please try again in a moment.")
 
     from bs4 import BeautifulSoup as _BS
     page_html = body.page_content
     if not page_html and body.page_url:
-        try:
-            async with httpx.AsyncClient() as _fc:
-                _resp = await _fc.get(body.page_url, timeout=15.0,
-                                      headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"})
-                _resp.raise_for_status()
-                page_html = _resp.text
-        except Exception as _e:
-            logger.warning(f"Could not fetch page_url for scoring: {_e}")
+        async with httpx.AsyncClient() as _fc:
+            page_html = await _scrape_one(body.page_url, _fc, render_js=False)
+            if not page_html:
+                page_html = await _scrape_one(body.page_url, _fc, render_js=True)
+        if not page_html:
             raise HTTPException(status_code=422, detail="Could not fetch the provided page URL. Check that it is correct and publicly accessible.")
     if not page_html:
         raise HTTPException(status_code=422, detail="Either page_content or page_url is required")
@@ -3018,19 +3547,36 @@ async def score_page(request: Request, body: ScorePageRequest):
 
     user_prompt = _build_score_prompt(body.business_name, body.gbp_category, body.keyword, city, body.address, serp_ctx, page_text)
 
-    try:
-        msg = await client.messages.create(
-            model=SCORE_MODEL,
-            max_tokens=2000,
-            system=[{"type": "text", "text": _SCORE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-    except Exception as e:
-        logger.exception("Claude scoring error")
-        raise HTTPException(status_code=502, detail="Scoring service temporarily unavailable")
+    scores = None
+    token_rec = None
+    for attempt in range(2):
+        try:
+            msg = await client.messages.create(
+                model=SCORE_MODEL,
+                max_tokens=8192,
+                system=[{"type": "text", "text": _SCORE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                messages=[
+                    {"role": "user", "content": user_prompt},
+                    {"role": "assistant", "content": "{"},  # prefill: forces JSON start, prevents preamble
+                ],
+            )
+            token_rec = _token_record("score-page", SCORE_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
+            parsed = _parse_claude_json("{" + msg.content[0].text)  # prepend the prefilled "{"
+            if parsed:
+                scores = parsed
+                break
+            logger.warning(f"score-page: Claude returned empty/invalid JSON on attempt {attempt + 1}, {'retrying' if attempt == 0 else 'giving up'}")
+        except Exception as e:
+            logger.exception(f"Claude scoring error on attempt {attempt + 1}")
+            if attempt == 1:
+                raise HTTPException(status_code=502, detail="Scoring service temporarily unavailable. Please try again.")
 
-    token_rec = _token_record("score-page", SCORE_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
-    scores = _parse_claude_json(msg.content[0].text)
+    if not scores:
+        raise HTTPException(status_code=502, detail="Scoring service returned an invalid response. Please try again.")
+
+    # Inject deterministic SERP signal coverage (Python, not Claude)
+    scores["serp_signal_coverage"] = _compute_serp_signal_coverage(page_html, serp_analysis_dict)
+
     composite, status = _composite_from_scores(scores)
 
     return ScorePageResponse(
@@ -3166,6 +3712,17 @@ async def generate_page(request: Request, body: GeneratePageRequest):
                         lines.append(f"    Trust signals: {'; '.join(pain[:2])}")
                 icp_text = "\n".join(lines)
 
+        await q.put({"step": "progress", "progress": 60, "message": "Building SEO checklist…"})
+        seo_checklist = await _build_seo_checklist(
+            keyword=body.keyword,
+            location=body.location,
+            address=body.address,
+            phone=body.phone,
+            gbp_category=body.gbp_category,
+            serp_analysis=serp_analysis_dict,
+            client=client,
+        )
+
         user_prompt = f"""BUSINESS DATA
 Name: {body.business_name}
 Category: {body.gbp_category}
@@ -3182,7 +3739,9 @@ ICP: {icp}
 {icp_text}
 {diff_text}
 {reviews_text}
-{serp_ctx}"""
+{serp_ctx}
+
+{seo_checklist}"""
 
         await q.put({"step": "progress", "progress": 65, "message": "Generating your page…"})
 
@@ -3364,6 +3923,17 @@ async def reoptimize_page(request: Request, body: ReoptimizePageRequest):
         page_zones = _parse_page_zones(existing_html)
         serp_ctx = _reopt_serp_context(page_zones, body.serp_analysis)
 
+        await q.put({"step": "progress", "progress": 25, "message": "Building SEO checklist…"})
+        seo_checklist = await _build_seo_checklist(
+            keyword=body.keyword,
+            location=body.location,
+            address=body.address,
+            phone=body.phone,
+            gbp_category=body.gbp_category,
+            serp_analysis=body.serp_analysis,
+            client=client,
+        )
+
         deficiency_text = "\n".join(
             f"  Engine: {d['engine']} (score: {d['score']}/100)\n"
             f"  Issues: {'; '.join(d.get('issues', []))}\n"
@@ -3377,18 +3947,20 @@ PHONE: {body.phone or "[PHONE]"}
 ADDRESS: {body.address or "Not provided"}
 {serp_ctx}
 
-DEFICIENCIES TO FIX:
+{seo_checklist}
+
+SEO DEFICIENCIES TO FIX (these must all be addressed in the rewrite):
 {deficiency_text}
 
-EXISTING PAGE:
+EXISTING PAGE (use as reference — preserve accurate facts, fix everything else):
 {existing_html[:12000]}"""
 
-        await q.put({"step": "progress", "progress": 40, "message": "Reoptimizing your page…"})
+        await q.put({"step": "progress", "progress": 40, "message": "Rewriting your page…"})
 
         try:
             claude_msg = await client.messages.create(
                 model=GENERATION_MODEL,
-                max_tokens=6000,
+                max_tokens=8000,
                 system=[{"type": "text", "text": _REOPT_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": user_prompt}],
             )
@@ -3403,31 +3975,17 @@ EXISTING PAGE:
             raw = re.sub(r'\n?```$', '', raw)
             raw = raw.strip()
 
-        # Split on delimiter to extract notes and HTML separately
-        html_css_notes: List[str] = []
-        if "<<<HTML>>>" in raw:
-            parts = raw.split("<<<HTML>>>", 1)
-            notes_block = parts[0]
-            html_block = parts[1].strip()
-            # Extract bullet lines from the notes block (between <<<NOTES>>> and <<<HTML>>>)
-            if "<<<NOTES>>>" in notes_block:
-                notes_text = notes_block.split("<<<NOTES>>>", 1)[1].strip()
-            else:
-                notes_text = notes_block.strip()
-            if notes_text and notes_text.lower() != "none.":
-                for line in notes_text.splitlines():
-                    line = line.strip().lstrip("-•*123456789. ").strip()
-                    if line and line.lower() != "none.":
-                        html_css_notes.append(line)
-        else:
-            html_block = raw
+        # Extract title tag if present
+        title_match = re.search(r'<title>(.*?)</title>', raw, re.IGNORECASE | re.DOTALL)
+        page_title = title_match.group(1).strip() if title_match else ""
 
-        schema_split = html_block.find('<script type="application/ld+json">')
+        # Split schema from content
+        schema_split = raw.find('<script type="application/ld+json">')
         if schema_split != -1:
-            content_html = html_block[:schema_split].strip()
-            schema_json = html_block[schema_split:].strip()
+            content_html = raw[:schema_split].strip()
+            schema_json = raw[schema_split:].strip()
         else:
-            content_html = html_block
+            content_html = raw
             schema_json = None
 
         # ── Auto-retry: score inline and reoptimize up to 5 total passes if < 90 ──
@@ -3497,8 +4055,9 @@ EXISTING PAGE:
             "result": {
                 "content_html": content_html,
                 "schema_json": schema_json,
+                "page_title": page_title,
                 "token_usage": token_rec,
-                "html_css_notes": html_css_notes,
+                "html_css_notes": [],
             },
         })
 
@@ -3594,32 +4153,17 @@ async def related_pages(request: Request, body: RelatedPagesRequest):
                 except Exception:
                     pass
 
-            # Step 3: For each keyword, find matching page + score concurrently
+            # Step 3: For each keyword, find matching page (no auto-scoring — user scores explicitly)
             async def _process_keyword(kw: str, group: str) -> RelatedPageItem:
-                nonlocal total_input_tokens, total_output_tokens
                 found = await _find_page_for_keyword_reuse(kw, discovered_urls, http_client)
                 if found:
-                    try:
-                        score_dict, score_tok = await _score_page_for_related(
-                            kw, body.location, found["url"],
-                            body.business_name, body.gbp_category, body.address, haiku_client,
-                        )
-                        total_input_tokens += score_tok.get("input_tokens", 0)
-                        total_output_tokens += score_tok.get("output_tokens", 0)
-                        return RelatedPageItem(
-                            keyword=kw,
-                            group=group,
-                            status="found",
-                            url=found["url"],
-                            page_title=found.get("title"),
-                            composite_score=score_dict["composite_score"],
-                            composite_status=score_dict["composite_status"],
-                            engine_scores=score_dict["engine_scores"],
-                            deficiencies=score_dict["deficiencies"],
-                        )
-                    except Exception:
-                        return RelatedPageItem(keyword=kw, group=group, status="found",
-                                               url=found["url"], page_title=found.get("title"))
+                    return RelatedPageItem(
+                        keyword=kw,
+                        group=group,
+                        status="found",
+                        url=found["url"],
+                        page_title=found.get("title"),
+                    )
                 else:
                     return RelatedPageItem(keyword=kw, group=group, status="missing")
 
@@ -3642,14 +4186,18 @@ async def related_pages(request: Request, body: RelatedPagesRequest):
 
 # ── /generate-social-posts ────────────────────────────────────────────────────
 
-_SOCIAL_SYSTEM_PROMPT = """You are a social media copywriter specialising in local service businesses. Given a page's content and business details, generate social media posts that drive local leads.
+_SOCIAL_SYSTEM_PROMPT = """You are a social media copywriter specialising in local service businesses. Given a page's content and business details, generate Google Business Profile posts that drive local leads.
 
 Rules:
-- GBP / Facebook posts: max 200 words. Conversational, benefit-led, clear CTA mentioning the city.
-- Instagram posts: max 50 words. Punchy, emoji-friendly, hashtag line at the end (5–8 tags).
-- Pinterest posts: max 50 words. Descriptive, search-optimised, focus on the service benefit.
-- Vary the angle across the 5 posts per platform (e.g. urgency, social proof, education, offer, story).
+- GBP posts: max 200 words. Conversational, benefit-led, clear CTA mentioning the city.
+- Vary the angle across the 5 posts (e.g. urgency, social proof, education, offer, story).
 - Never fabricate reviews, prices, or guarantees not mentioned in the page content.
+- If brand voice instructions are provided, match that tone and style exactly.
+- If target customer profiles are provided, write to those specific pain points and motivations.
+- If differentiators are provided, weave them into posts naturally — include the mechanism, not just the claim.
+- If SEO signal data is provided (related keywords and Google entities), weave them into posts
+  naturally where they fit — do not force them in, do not list them verbatim. The goal is natural
+  language that happens to contain these terms, not keyword stuffing.
 - Output valid JSON only — no markdown fences, no commentary."""
 
 class SocialPostsRequest(BaseModel):
@@ -3658,13 +4206,15 @@ class SocialPostsRequest(BaseModel):
     business_name: str
     gbp_category: str
     address: Optional[str] = None
+    phone: Optional[str] = None
     page_content: str          # plain text of the generated page
+    differentiators: Optional[List[dict]] = None
+    detected_icp: Optional[dict] = None
+    brand_voice: Optional[dict] = None
+    serp_analysis: Optional[dict] = None
 
 class SocialPostsResponse(BaseModel):
     gbp: List[str]
-    facebook: List[str]
-    instagram: List[str]
-    pinterest: List[str]
     token_usage: dict
 
 @app.post('/generate-social-posts', response_model=SocialPostsResponse, dependencies=[Depends(verify_api_key)])
@@ -3679,21 +4229,101 @@ async def generate_social_posts(request: Request, body: SocialPostsRequest):
     city = body.location.split(",")[0].strip()
     page_text = body.page_content[:4000]  # cap context to keep cost low
 
+    # Build differentiators block
+    diff_text = ""
+    if body.differentiators:
+        diff_text = "\nDIFFERENTIATORS (weave these in naturally — include the mechanism, not just the claim):\n" + \
+            "\n".join(f"  - {d.get('claim','')} (mechanism: {d.get('mechanism','')})" for d in body.differentiators)
+
+    # Build ICP block
+    icp_text = ""
+    if body.detected_icp:
+        segments = body.detected_icp.get("segments", [])
+        if segments:
+            lines = ["\nTARGET CUSTOMER PROFILES (write to these pain points and motivations):"]
+            for seg in segments[:2]:
+                name = seg.get("name", "")
+                desc = seg.get("description", "")
+                msg = seg.get("messaging", {})
+                tone = msg.get("tone", "")
+                hooks = msg.get("hooks", [])
+                lines.append(f"  [{name}] {desc}")
+                if tone:
+                    lines.append(f"    Tone: {tone}")
+                if hooks:
+                    lines.append(f"    Hooks: {'; '.join(hooks[:2])}")
+            icp_text = "\n".join(lines)
+
+    # Build brand voice block
+    brand_voice_text = ""
+    if body.brand_voice:
+        bv = body.brand_voice
+        accepted = bv.get("recommended_accepted")
+        if accepted == "recommended":
+            voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
+        elif accepted == "current":
+            voice = bv.get("current_voice") or {}
+        else:
+            voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
+        guide = bv.get("writer_execution_guide", "")
+        if voice or guide:
+            lines = ["\nBRAND VOICE (match this exactly):"]
+            if voice.get("tone"):
+                lines.append(f"  Tone: {voice['tone']}")
+            if voice.get("personality"):
+                lines.append(f"  Personality: {', '.join(voice['personality'])}")
+            ws = voice.get("writing_style", {})
+            if ws:
+                lines.append(f"  Style: {ws.get('sentence_length','')} sentences, {ws.get('person','')} person, {ws.get('formality','')} formality")
+            vocab = voice.get("vocabulary", {})
+            if vocab.get("use"):
+                lines.append(f"  Words/phrases to use: {', '.join(vocab['use'])}")
+            if vocab.get("avoid"):
+                lines.append(f"  Words/phrases to avoid: {', '.join(vocab['avoid'])}")
+            if guide:
+                lines.append(f"  Writer instructions: {guide}")
+            brand_voice_text = "\n".join(lines)
+
+    # Build SEO signals block from serp_analysis — entities + top keywords, used naturally
+    seo_signals_text = ""
+    if body.serp_analysis:
+        entities = body.serp_analysis.get("google_entities", [])
+        rk = body.serp_analysis.get("related_keywords", {})
+        top_entities = [e["name"] for e in sorted(entities, key=lambda e: e.get("page_spread", 0), reverse=True)[:8]]
+        # Flatten related keywords across zones, deduplicate, take top terms
+        seen: set = set()
+        top_keywords = []
+        for zone in ("paragraphs", "h2_h3", "h1", "title"):
+            for t in rk.get(zone, []):
+                term = t["term"]
+                if term.lower() not in seen:
+                    seen.add(term.lower())
+                    top_keywords.append(term)
+                if len(top_keywords) >= 12:
+                    break
+            if len(top_keywords) >= 12:
+                break
+        lines = ["\nSEO SIGNALS (weave these naturally into posts where they fit — do not force or list verbatim):"]
+        if top_entities:
+            lines.append(f"  Entities: {', '.join(top_entities)}")
+        if top_keywords:
+            lines.append(f"  Keywords: {', '.join(top_keywords)}")
+        if len(lines) > 1:
+            seo_signals_text = "\n".join(lines)
+
     user_prompt = f"""Business: {body.business_name}
 Category: {body.gbp_category}
 Location: {city}
 Keyword: {body.keyword}
 Address: {body.address or ""}
+Phone: {body.phone or "not provided"}{diff_text}{icp_text}{brand_voice_text}{seo_signals_text}
 
 PAGE CONTENT:
 {page_text}
 
-Generate exactly 5 posts for each of the 4 platforms. Return this JSON structure:
+Generate exactly 5 Google Business Profile posts. Return this JSON structure:
 {{
-  "gbp": ["post1", "post2", "post3", "post4", "post5"],
-  "facebook": ["post1", "post2", "post3", "post4", "post5"],
-  "instagram": ["post1", "post2", "post3", "post4", "post5"],
-  "pinterest": ["post1", "post2", "post3", "post4", "post5"]
+  "gbp": ["post1", "post2", "post3", "post4", "post5"]
 }}"""
 
     try:
@@ -3713,9 +4343,6 @@ Generate exactly 5 posts for each of the 4 platforms. Return this JSON structure
 
     return SocialPostsResponse(
         gbp=data.get("gbp", []),
-        facebook=data.get("facebook", []),
-        instagram=data.get("instagram", []),
-        pinterest=data.get("pinterest", []),
         token_usage=token_rec,
     )
 
@@ -3864,6 +4491,8 @@ class RankabilityRequest(BaseModel):
     business_lat: Optional[float] = None
     business_lng: Optional[float] = None
     website: Optional[str] = None  # to check top-10 organic presence
+    sab_city: Optional[str] = None  # SAB only: city where GBP is physically located
+    gbp_place_id: Optional[str] = None  # GBP place_id for exact Maps match
 
 
 class CompetitorInfo(BaseModel):
@@ -3917,7 +4546,7 @@ class RankabilityResponse(BaseModel):
     total_results: int = 0
 
 
-DATAFORSEO_MAPS_ENDPOINT = "https://api.dataforseo.com/v3/serp/google/maps/live/regular"
+DATAFORSEO_MAPS_ENDPOINT = "https://api.dataforseo.com/v3/serp/google/maps/live/advanced"
 
 
 async def _fetch_maps_top10(
@@ -3925,10 +4554,16 @@ async def _fetch_maps_top10(
     loc_field: dict,
     business_name: str,
     credentials: str,
-) -> tuple[bool, int]:
+    place_id: Optional[str] = None,
+) -> tuple[bool, int, list[dict]]:
     """
-    Query DataForSEO Google Maps endpoint for top-10 results and check if
-    business_name appears. Returns (found, position) — position 0 if not found.
+    Query DataForSEO Google Maps endpoint for top-10 results.
+    Returns (business_found, position, maps_items).
+    - business_found: True if client business appears in top-10
+    - position: rank_group (1–10) if found, 0 otherwise
+    - maps_items: full list of maps_search items for competitor/category analysis
+
+    Match priority: place_id (exact) → business_name (fuzzy, high threshold)
     """
     payload = [{
         "keyword": keyword,
@@ -3945,17 +4580,28 @@ async def _fetch_maps_top10(
             )
             resp.raise_for_status()
             data = resp.json()
+        maps_items = []
         for task in (data.get("tasks") or []):
             for result in (task.get("result") or []):
                 for item in (result.get("items") or []):
                     if item.get("type") == "maps_search":
-                        name = item.get("title", "")
-                        pos = item.get("rank_absolute") or item.get("rank_group") or 0
-                        if _keyword_in_name(business_name, name):
-                            return True, int(pos)
+                        maps_items.append(item)
+        for item in maps_items:
+            pos = item.get("rank_group") or item.get("rank_absolute") or 0
+            # Prefer exact place_id match
+            if place_id and item.get("place_id") == place_id:
+                return True, int(pos), maps_items
+            # Fallback: require ALL significant tokens (len >= 5) to appear in result name
+            if business_name and not place_id:
+                name = item.get("title", "")
+                sig_tokens = [t for t in re.sub(r'[^a-z0-9\s]', '', business_name.lower()).split() if len(t) >= 5]
+                name_norm = re.sub(r'[^a-z0-9\s]', '', name.lower())
+                if sig_tokens and all(t in name_norm for t in sig_tokens):
+                    return True, int(pos), maps_items
+        return False, 0, maps_items
     except Exception as e:
         logger.warning(f"Maps top-10 check failed for '{keyword}': {e}")
-    return False, 0
+    return False, 0, []
 
 
 @app.post('/check-rankability', response_model=RankabilityResponse, dependencies=[Depends(verify_api_key)])
@@ -3988,45 +4634,42 @@ async def check_rankability(request: Request, body: RankabilityRequest):
             resp.raise_for_status()
             return resp.json()
 
-    maps_task = _fetch_maps_top10(body.keyword, loc_field, body.business_name or "", credentials) \
-        if body.business_name else None
+    # Run SERP and Maps in parallel. SERP determines has_map_pack (organic signal only).
+    # Maps top-10 is used for all competitor/category analysis regardless.
+    maps_task = _fetch_maps_top10(body.keyword, loc_field, body.business_name or "", credentials, place_id=body.gbp_place_id)
+    serp_data, (in_maps_results, maps_position, maps_items) = await asyncio.gather(
+        _fetch_serp(), maps_task
+    )
 
-    if maps_task:
-        serp_data, (in_maps_results, maps_position) = await asyncio.gather(
-            _fetch_serp(), maps_task
-        )
-    else:
-        serp_data = await _fetch_serp()
-        in_maps_results, maps_position = False, 0
-
-    # Parse SERP items
-    organic_items: List[dict] = []
+    # Parse organic SERP — only used to determine if a local pack appears in search results
     local_pack_items: List[dict] = []
     for task in (serp_data.get("tasks") or []):
         for result in (task.get("result") or []):
             for item in (result.get("items") or []):
-                t = item.get("type", "")
-                if t == "organic":
-                    organic_items.append(item)
-                elif t == "local_pack":
+                if item.get("type") == "local_pack":
                     local_pack_items.append(item)
 
-    # ── Local pack analysis ────────────────────────────────────────────────────
+    # has_map_pack is determined solely by organic SERP (honest signal)
     has_map_pack = len(local_pack_items) > 0
+
+    # ── Competitor & category analysis from Maps top-10 ────────────────────────
+    # Maps endpoint reliably returns the top local businesses regardless of
+    # whether the organic SERP happened to render the local pack widget.
     competitors: List[CompetitorInfo] = []
     category_counts: Dict[str, int] = {}
     keyword_name_count = 0
     competitor_name_examples: List[str] = []
     physical_competitor_count = 0
 
-    for item in local_pack_items[:3]:
+    for item in maps_items[:10]:
         name = item.get("title", "")
-        rating = item.get("rating", {}).get("value") if isinstance(item.get("rating"), dict) else item.get("rating")
-        review_count = item.get("rating", {}).get("votes_count") if isinstance(item.get("rating"), dict) else item.get("rating_votes")
+        rating_obj = item.get("rating") or {}
+        rating = rating_obj.get("value") if isinstance(rating_obj, dict) else rating_obj
+        review_count = rating_obj.get("votes_count") if isinstance(rating_obj, dict) else None
 
-        # Physical location = has a non-empty address shown in the pack
-        address_val = item.get("address") or item.get("address_info", {}) or ""
-        is_physical = bool(address_val) if isinstance(address_val, str) else bool(address_val)
+        # Physical location = has a street address (not just city)
+        address_val = item.get("address", "") or ""
+        is_physical = bool(address_val)
         if is_physical:
             physical_competitor_count += 1
 
@@ -4035,8 +4678,9 @@ async def check_rankability(request: Request, body: RankabilityRequest):
             keyword_name_count += 1
             competitor_name_examples.append(name)
 
-        # Collect categories from snippet/categories field
-        for cat in (item.get("categories") or []):
+        # Maps items use singular "category" field
+        cat = item.get("category", "")
+        if cat:
             category_counts[cat] = category_counts.get(cat, 0) + 1
 
         competitors.append(CompetitorInfo(
@@ -4065,28 +4709,109 @@ async def check_rankability(request: Request, body: RankabilityRequest):
     else:
         category_match = "none"
 
-    # ── Review metrics ─────────────────────────────────────────────────────────
-    review_counts = [c.review_count for c in competitors if c.review_count is not None]
-    ratings = [c.rating for c in competitors if c.rating is not None]
+    # ── Category mismatch — hard fail ─────────────────────────────────────────
+    # If none of the Maps top-10 businesses share the client's GBP category,
+    # ranking in Maps is essentially impossible. Skip all other checks and
+    # return immediately with a clear "do not target" verdict.
+    if category_match == "none":
+        logger.info(
+            f"Rankability '{body.keyword}' @ '{body.location}': "
+            f"category mismatch — returning hard fail (pack cats: {[r['category'] for r in ranking_categories]})"
+        )
+        return RankabilityResponse(
+            score=0,
+            verdict="very_difficult",
+            score_breakdown={"category_match": 0},
+            has_map_pack=has_map_pack,
+            competitors=competitors[:3],
+            ranking_categories=ranking_categories,
+            category_match="none",
+            keyword_in_competitor_names=keyword_name_count,
+            competitor_name_examples=competitor_name_examples,
+            in_maps_results=in_maps_results,
+            maps_position=maps_position if in_maps_results else None,
+            is_sab=_infer_is_sab(body.business_address),
+            sab_pack_mismatch=False,
+            physical_competitors_in_pack=physical_competitor_count,
+            message=(
+                "Your GBP category doesn't match any category in the Maps results — "
+                "you will not rank in Maps for this keyword. "
+                "The businesses ranking here are in a different category. "
+                "Target a different keyword, or create content for organic search instead."
+            ),
+            match_count=0,
+            total_results=len(maps_items),
+        )
+
+    # ── Review metrics (top 3 only — mirrors the visible 3-pack) ───────────────
+    top3 = competitors[:3]
+    review_counts = [c.review_count for c in top3 if c.review_count is not None]
+    ratings = [c.rating for c in top3 if c.rating is not None]
     min_reviews = min(review_counts) if review_counts else None
     max_reviews = max(review_counts) if review_counts else None
     avg_reviews = round(sum(review_counts) / len(review_counts), 1) if review_counts else None
     avg_rating = round(sum(ratings) / len(ratings), 2) if ratings else None
 
+    # ── SAB auto-detection ─────────────────────────────────────────────────────
+    is_sab = _infer_is_sab(body.business_address)
+
     # ── Distance ───────────────────────────────────────────────────────────────
+    # Physical business: measure from their lat/lng to the target city center.
+    # SAB: measure from the center of their registered city to the target city center
+    #      (they hide their address, so we use sab_city supplied by the user).
     distance_miles = None
     distance_ok = True
-    if body.business_lat and body.business_lng:
-        city_coords = await _geocode_location(body.location)
-        if city_coords:
+    target_coords = await _geocode_location(body.location)
+    if target_coords:
+        if is_sab and body.sab_city:
+            origin_coords = await _geocode_location(body.sab_city)
+            if origin_coords:
+                distance_miles = round(_haversine_miles(
+                    origin_coords[0], origin_coords[1],
+                    target_coords[0], target_coords[1]
+                ), 1)
+                distance_ok = distance_miles <= 10.0
+        elif not is_sab and body.business_lat and body.business_lng:
             distance_miles = round(_haversine_miles(
                 body.business_lat, body.business_lng,
-                city_coords[0], city_coords[1]
+                target_coords[0], target_coords[1]
             ), 1)
             distance_ok = distance_miles <= 10.0
 
-    # ── SAB auto-detection ─────────────────────────────────────────────────────
-    is_sab = _infer_is_sab(body.business_address)
+    # ── Distance hard fail ─────────────────────────────────────────────────────
+    # >10 miles from the target city = effectively impossible to rank in Maps.
+    # Return immediately, same as category mismatch.
+    if distance_miles is not None and distance_miles > 10.0:
+        logger.info(
+            f"Rankability '{body.keyword}' @ '{body.location}': "
+            f"distance hard fail — {distance_miles} mi"
+        )
+        return RankabilityResponse(
+            score=0,
+            verdict="very_difficult",
+            score_breakdown={"distance": 0},
+            has_map_pack=has_map_pack,
+            competitors=competitors[:3],
+            ranking_categories=ranking_categories,
+            category_match=category_match,
+            keyword_in_competitor_names=keyword_name_count,
+            competitor_name_examples=competitor_name_examples,
+            in_maps_results=in_maps_results,
+            maps_position=maps_position if in_maps_results else None,
+            is_sab=is_sab,
+            sab_pack_mismatch=False,
+            physical_competitors_in_pack=physical_competitor_count,
+            distance_miles=distance_miles,
+            distance_ok=False,
+            message=(
+                f"Your business is {distance_miles} miles from {body.location} — "
+                "Google Maps heavily favors businesses within 5 miles of the search location. "
+                "You are unlikely to rank in Maps for this keyword. "
+                "Target a city closer to your location or target organic rankings instead."
+            ),
+            match_count=match_count,
+            total_results=len(maps_items),
+        )
 
     # ── Score ──────────────────────────────────────────────────────────────────
     score_data = _rankability_score(
@@ -4099,7 +4824,7 @@ async def check_rankability(request: Request, body: RankabilityRequest):
         in_maps_results=in_maps_results,
         is_sab=is_sab,
         physical_competitor_count=physical_competitor_count,
-        total_pack_count=len(local_pack_items[:3]),
+        total_pack_count=len(maps_items[:10]),
     )
 
     # ── Review gap — reviews needed to match weakest competitor ───────────────
@@ -4116,7 +4841,12 @@ async def check_rankability(request: Request, body: RankabilityRequest):
     }
     message = verdict_labels.get(score_data["verdict"], "")
     if not has_map_pack:
-        message = "No map pack found for this keyword — may be a low local-intent query"
+        # Organic SERP didn't show a local pack — note it but still scored from Maps data
+        no_pack_note = " (no local pack in organic SERP for this query)" if maps_items else ""
+        if not maps_items:
+            message = "No map pack found for this keyword — may be a low local-intent query"
+        else:
+            message = verdict_labels.get(score_data["verdict"], "") + no_pack_note
     elif score_data.get("sab_pack_mismatch"):
         message += f". Your service area business faces a pack dominated by {physical_competitor_count} physical location(s) — Google heavily favors proximity for this keyword"
 
@@ -4151,4 +4881,170 @@ async def check_rankability(request: Request, body: RankabilityRequest):
         message=message,
         match_count=match_count,
         total_results=len(local_pack_items),
+    )
+
+
+# ── /generate-press-release ───────────────────────────────────────────────────
+
+_PRESS_RELEASE_SYSTEM_PROMPT = """You are an SEO press release journalist specialising in local service businesses. You write detailed, neutral, journalistic press releases that are optimised for search engines.
+
+MANDATORY RULES:
+1. Body word count: 650–800 words. After writing, count the words in the body (everything between the title and the About section). If under 650, add extra paragraphs until the minimum is met.
+2. Write in strict 3rd-person neutral tone. Never promotional.
+3. Forbidden words: "top-notch", "look no further", "you", "yours". No questions anywhere.
+4. No hyperlinks or anchor text in the press release body — links are handled separately.
+5. Write a dedicated section (with an <h2>) for each related keyword provided.
+6. Weave in as many of the provided quadgrams and entities as possible while maintaining readability.
+7. Feature the main keyword in the title and 2–3 times in the body.
+8. The ONLY allowable CTA is the contact line — no other calls to action.
+
+TITLE FORMAT: "[main keyword] (provided by|now provided by|offered by|now offered by|proudly offered by|is delighted to offer|expanded by) [business name]"
+Readability is the priority — fix grammar as needed (e.g. "Bronx Car Accident Legal Services Now Offered By Kerner Law Group" not "Bronx Car Accident Attorney Now Offered By Kerner Law Group").
+
+FIRST PARAGRAPH: Must contain an RDF triple sentence that directly states the business name, the service, and the location. Example: "ABC Plumbing offers emergency plumbing services in Chicago." Focus on grammatical correctness and readability.
+
+QUOTE: Include one positive quote attributed to the spokesperson.
+
+OUTPUT FORMAT: Return clean HTML only — no markdown, no code fences, no explanation.
+Use this exact structure:
+<h1>Title</h1>
+<p>First paragraph with RDF triple...</p>
+[body paragraphs and h2 sections]
+<blockquote><p>"Quote text." — Spokesperson Name, Business Name</p></blockquote>
+<p>For more information, please contact SPOKESPERSON_NAME at PAGE_URL</p>
+<h2>About BUSINESS_NAME</h2>
+<p>About paragraph...</p>
+<hr>
+<p><strong>Reminder:</strong> Place your additional links in the body above. ADDITIONAL_LINKS_LIST Include your GBP embed iframe: GBP_EMBED_CODE</p>
+<p><strong>Main keyword:</strong> MAIN_KEYWORD</p>
+<p><strong>Related keywords used:</strong> RELATED_KEYWORDS_LIST</p>"""
+
+
+class AdditionalLink(BaseModel):
+    url: str
+    anchor_text: str
+
+
+class PressReleaseGenerationRequest(BaseModel):
+    # Business info
+    business_name: str
+    website: str
+    gbp_place_id: Optional[str] = None
+    address: Optional[str] = None
+    gbp_category: str
+    # Content
+    keyword: str
+    location: str
+    page_content: str        # plain text of the generated page
+    # SEO signals from keyword analysis
+    related_keywords: List[str] = []   # top terms
+    entities: List[str] = []           # Google entity names
+    quadgrams: List[str] = []          # top quadgram phrases
+    # User-supplied inputs
+    spokesperson: str
+    contact_email: str
+    page_url: Optional[str] = None     # defaults to website
+    additional_links: List[AdditionalLink] = []
+
+
+class PressReleaseGenerationResponse(BaseModel):
+    content_html: str
+    word_count: int
+    gbp_embed_html: Optional[str]
+    token_usage: dict
+
+
+@app.post('/generate-press-release', response_model=PressReleaseGenerationResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit("5/minute")
+async def generate_press_release(request: Request, body: PressReleaseGenerationRequest):
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+
+    import anthropic as _anthropic
+    client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+    city = body.location.split(",")[0].strip()
+    page_url = (body.page_url or body.website or "").strip()
+    page_text = body.page_content[:5000]
+
+    # Build related keywords block (cap at 5 for the spec requirement)
+    related_kw = body.related_keywords[:8]
+    entities_list = body.entities[:15]
+    quadgrams_list = body.quadgrams[:15]
+
+    # Additional links block
+    add_links_text = ""
+    if body.additional_links:
+        add_links_text = "Additional links to place (use branded anchor text as shown):\n" + \
+            "\n".join(f"  - Anchor: \"{l.anchor_text}\" → URL: {l.url}" for l in body.additional_links)
+
+    # GBP embed
+    gbp_embed_html: Optional[str] = None
+    if body.gbp_place_id:
+        gbp_embed_html = (
+            f'<iframe src="https://maps.google.com/maps?q=place_id:{body.gbp_place_id}&output=embed" '
+            f'width="600" height="450" style="border:0;" allowfullscreen loading="lazy" '
+            f'referrerpolicy="no-referrer-when-downgrade"></iframe>'
+        )
+
+    user_prompt = f"""BUSINESS DATA
+Name: {body.business_name}
+Category: {body.gbp_category}
+Location: {city}
+Address: {body.address or ""}
+Website: {body.website}
+Spokesperson: {body.spokesperson}
+Contact email: {body.contact_email}
+Page URL (use in CTA): {page_url}
+
+MAIN KEYWORD: {body.keyword}
+
+RELATED KEYWORDS (write a section for each, feature each at least once):
+{chr(10).join(f"  - {kw}" for kw in related_kw)}
+
+ENTITIES (weave as many as possible):
+{chr(10).join(f"  - {e}" for e in entities_list)}
+
+QUADGRAMS (weave as many as possible):
+{chr(10).join(f"  - {q}" for q in quadgrams_list)}
+
+PAGE CONTENT (use as factual source material — do not fabricate):
+{page_text}
+
+{add_links_text}
+
+Write the press release now. Remember: minimum 650 words in the body. Check your word count before finishing."""
+
+    try:
+        msg = await client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4000,
+            system=[{"type": "text", "text": _PRESS_RELEASE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+    except Exception:
+        logger.exception("Press release generation error")
+        raise HTTPException(status_code=502, detail="Press release generation temporarily unavailable")
+
+    content_html = msg.content[0].text.strip()
+
+    # Strip accidental markdown fences
+    if content_html.startswith("```"):
+        content_html = re.sub(r'^```(?:html)?\s*', '', content_html)
+        content_html = re.sub(r'\s*```$', '', content_html.strip())
+
+    # Rough word count on plain text
+    import html as _html
+    plain = re.sub(r'<[^>]+>', ' ', content_html)
+    plain = _html.unescape(plain)
+    word_count = len(plain.split())
+
+    token_rec = _token_record("generate-press-release", "claude-sonnet-4-6",
+                              msg.usage.input_tokens, msg.usage.output_tokens)
+
+    return PressReleaseGenerationResponse(
+        content_html=content_html,
+        word_count=word_count,
+        gbp_embed_html=gbp_embed_html,
+        token_usage=token_rec,
     )

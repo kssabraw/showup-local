@@ -1,9 +1,17 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const ALLOWED_ORIGIN = Deno.env.get("ALLOWED_ORIGIN") || "*";
+const ALLOWED_ORIGIN = Deno.env.get("ALLOWED_ORIGIN") ?? "";
+if (!ALLOWED_ORIGIN) {
+  console.warn(
+    "[dual-write-business] ALLOWED_ORIGIN is not set. " +
+    "Set it in Supabase function secrets to your frontend URL (e.g. https://yourapp.lovable.app). " +
+    "Falling back to wildcard — configure this before going to production."
+  );
+}
+const _corsOrigin = ALLOWED_ORIGIN || "*";
 
 const corsHeaders = {
-  "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+  "Access-Control-Allow-Origin": _corsOrigin,
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
@@ -14,6 +22,15 @@ Deno.serve(async (req) => {
   }
 
   try {
+    // Require a valid Supabase JWT — unauthenticated writes are not allowed
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const body = await req.json();
     const record = body.record;
     // address is intentionally not required — service area businesses (SABs)
@@ -29,20 +46,22 @@ Deno.serve(async (req) => {
     const primaryUrl = Deno.env.get("SUPABASE_URL");
     const primaryKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
     const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
-    if (!primaryUrl || !primaryKey) {
+    if (!primaryUrl || !primaryKey || !anonKey) {
       throw new Error("Primary Supabase credentials not configured");
     }
 
-    // Extract the authenticated user's ID from the JWT so we can set user_id on the row.
-    let userId: string | null = null;
-    const authHeader = req.headers.get("Authorization");
-    if (authHeader && anonKey) {
-      const anonClient = createClient(primaryUrl, anonKey, {
-        global: { headers: { Authorization: authHeader } },
-      });
-      const { data: { user } } = await anonClient.auth.getUser();
-      userId = user?.id ?? null;
+    // Verify the JWT and extract the authenticated user's ID
+    const anonClient = createClient(primaryUrl, anonKey, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const { data: { user }, error: authError } = await anonClient.auth.getUser();
+    if (authError || !user) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
+    const userId = user.id;
 
     const primary = createClient(primaryUrl, primaryKey);
 

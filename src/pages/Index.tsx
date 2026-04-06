@@ -8,6 +8,9 @@ import LocationsView from "@/components/LocationsView";
 import LocationDetailView from "@/components/LocationDetailView";
 import LoginView from "@/components/LoginView";
 import SettingsView from "@/components/SettingsView";
+import PressReleasesView from "@/components/PressReleasesView";
+import AdminView from "@/components/AdminView";
+import NotificationBell from "@/components/NotificationBell";
 import { supabase } from "@/integrations/supabase/client";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
@@ -23,12 +26,28 @@ const Index = () => {
   const [planningKeyword, setPlanningKeyword] = useState("");
   const [planningLocation, setPlanningLocation] = useState("");
   const [onboardingBusinessId, setOnboardingBusinessId] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, s) => {
+      setSession(s);
+      // When Supabase processes a password-reset link it fires PASSWORD_RECOVERY.
+      // Route straight to Settings so the user can set a new password.
+      if (event === "PASSWORD_RECOVERY") setActiveItem("settings");
+    });
     return () => subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (!session) { setIsAdmin(false); return; }
+    supabase
+      .from("profiles" as any)
+      .select("role")
+      .eq("id", session.user.id)
+      .single()
+      .then(({ data }) => setIsAdmin((data as any)?.role === "admin"));
+  }, [session?.user.id]);
 
   const handleItemClick = (item: string) => {
     setActiveItem(item);
@@ -145,6 +164,7 @@ const Index = () => {
         onItemClick={handleItemClick}
         collapsed={collapsed}
         onToggle={() => setCollapsed(!collapsed)}
+        isAdmin={isAdmin}
       />
       <main
         className={cn(
@@ -155,6 +175,9 @@ const Index = () => {
         <header className="h-16 border-b border-border bg-card/80 backdrop-blur-sm flex items-center px-6 sticky top-0 z-40">
           <div className="flex-1" />
           <div className="flex items-center gap-3">
+            <NotificationBell
+              onNavigateToPR={() => setActiveItem("press-releases")}
+            />
             <span className="text-xs text-muted-foreground hidden sm:block">{session.user.email}</span>
             <button
               onClick={() => supabase.auth.signOut()}
@@ -206,6 +229,8 @@ const Index = () => {
               }}
             />
           )}
+          {activeItem === "press-releases" && <PressReleasesView />}
+          {activeItem === "admin" && isAdmin && <AdminView />}
           {activeItem === "settings" && session && (
             <SettingsView session={session} />
           )}
