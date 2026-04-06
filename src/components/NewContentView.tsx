@@ -494,6 +494,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
       for await (const evt of stream) {
         if (evt.progress !== undefined && onProgress) onProgress(evt.progress, evt.message ?? "");
         if ("step" in evt && evt.step === "error") {
+          console.error(`[createAndSavePage] stream error event for "${kw}":`, evt);
           await supabase.rpc("refund_failed_generation", {
             p_amount: 2, p_endpoint: "/generate-page", p_business_id: selectedBusinessId,
           });
@@ -525,12 +526,14 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           return true;
         }
       }
-      // Stream ended without a done event (e.g. edge function timeout) — refund
+      // Stream ended without a done event — refund
+      console.error(`[createAndSavePage] stream ended without done event for "${kw}"`);
       await supabase.rpc("refund_failed_generation", {
         p_amount: 2, p_endpoint: "/generate-page", p_business_id: selectedBusinessId,
       });
       return false;
-    } catch {
+    } catch (err) {
+      console.error(`[createAndSavePage] caught exception for "${kw}":`, err);
       await supabase.rpc("refund_failed_generation", {
         p_amount: 2, p_endpoint: "/generate-page", p_business_id: selectedBusinessId,
       });
