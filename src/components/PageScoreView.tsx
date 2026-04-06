@@ -170,9 +170,16 @@ export default function PageScoreView({
           return;
         }
       }
+      // Stream ended without done event
+      await supabase.rpc("refund_failed_generation", {
+        p_amount: 2, p_endpoint: "/reoptimize-page", p_business_id: businessId,
+      });
     } catch (e: any) {
       if ((e as Error).name === "AbortError") return;
       if (e instanceof InsufficientCreditsError) { setShowCreditModal(true); return; }
+      await supabase.rpc("refund_failed_generation", {
+        p_amount: 2, p_endpoint: "/reoptimize-page", p_business_id: businessId,
+      });
       setError((e as Error).message || "Reoptimize failed");
     } finally {
       setReoptimizing(false);

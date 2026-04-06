@@ -447,10 +447,18 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           return;
         }
       }
+      // Stream ended without done event — refund
+      await supabase.rpc("refund_failed_generation", {
+        p_amount: 2, p_endpoint: "/generate-page", p_business_id: selectedBusinessId,
+      });
       invalidateCredits();
     } catch (e: any) {
       if ((e as Error).name === "AbortError") { setView({ kind: "form" }); setCheckState({ status: "idle" }); return; }
       if (e instanceof InsufficientCreditsError) { setShowCreditModal(true); setCheckState({ status: "idle" }); setView({ kind: "form" }); return; }
+      await supabase.rpc("refund_failed_generation", {
+        p_amount: 2, p_endpoint: "/generate-page", p_business_id: selectedBusinessId,
+      });
+      invalidateCredits();
       setError((e as Error).message || "Something went wrong");
       setCheckState({ status: "not_found" });
       setView({ kind: "form" });
@@ -481,7 +489,12 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         signal,
       );
       for await (const evt of stream) {
-        if ("step" in evt && evt.step === "error") return false;
+        if ("step" in evt && evt.step === "error") {
+          await supabase.rpc("refund_failed_generation", {
+            p_amount: 2, p_endpoint: "/generate-page", p_business_id: selectedBusinessId,
+          });
+          return false;
+        }
         if ("step" in evt && evt.step === "done" && evt.result) {
           const genData = evt.result;
           const { error: saveError } = await supabase.from("generated_pages").insert({
@@ -495,6 +508,9 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           });
           if (saveError) {
             console.error("bulk create: failed to save page for keyword", kw, saveError);
+            await supabase.rpc("refund_failed_generation", {
+              p_amount: 2, p_endpoint: "/generate-page", p_business_id: selectedBusinessId,
+            });
             return false;
           }
           await supabase.from("token_usage").insert({
@@ -505,8 +521,15 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           return true;
         }
       }
+      // Stream ended without a done event (e.g. edge function timeout) — refund
+      await supabase.rpc("refund_failed_generation", {
+        p_amount: 2, p_endpoint: "/generate-page", p_business_id: selectedBusinessId,
+      });
       return false;
     } catch {
+      await supabase.rpc("refund_failed_generation", {
+        p_amount: 2, p_endpoint: "/generate-page", p_business_id: selectedBusinessId,
+      });
       return false;
     }
   };
