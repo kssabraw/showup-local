@@ -2340,7 +2340,7 @@ def _compute_serp_signal_coverage(page_html: str, serp_analysis: Optional[dict])
     else:
         qg_score = 75.0
 
-    composite = round(kw_score * 0.50 + ent_score * 0.30 + qg_score * 0.20, 1)
+    composite = round(kw_score * 0.30 + ent_score * 0.50 + qg_score * 0.20, 1)
     return {
         "score":             composite,
         "issues":            issues,
