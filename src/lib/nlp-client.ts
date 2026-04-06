@@ -136,6 +136,54 @@ export async function* nlpStream<T>(
   }
 }
 
+/**
+ * Like nlpStream but calls Railway directly — bypasses the Supabase edge
+ * function and its 150-second timeout limit. Used for long-running endpoints
+ * (/generate-page, /reoptimize-page). Railway verifies the JWT and handles
+ * credit deduction itself.
+ */
+export async function* nlpStreamDirect<T>(
+  endpoint: string,
+  body: unknown,
+  signal?: AbortSignal,
+): AsyncGenerator<StreamEvent<T>> {
+  const authHeader = await getAuthHeader();
+  const res = await fetch(`${NLP_SERVICE_URL}${endpoint}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(authHeader ? { Authorization: authHeader } : {}),
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    const d = await res.json().catch(() => ({}));
+    throwIfInsufficientCredits(res, d);
+    throw new Error((d as { detail?: string; error?: string }).detail || (d as { detail?: string; error?: string }).error || `NLP error: ${res.status}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      try {
+        yield JSON.parse(line.slice(6)) as StreamEvent<T>;
+      } catch {
+        // skip malformed lines
+      }
+    }
+  }
+}
+
 // ── Typed endpoint wrappers ───────────────────────────────────────────────────
 
 export const nlp = {
@@ -172,7 +220,7 @@ export const nlp = {
       detected_icp?: unknown;
     },
     signal?: AbortSignal,
-  ) => nlpStream<GeneratePageResult>("/generate-page", body, signal),
+  ) => nlpStreamDirect<GeneratePageResult>("/generate-page", body, signal),
 
   reoptimizePage: (
     body: {
@@ -187,7 +235,7 @@ export const nlp = {
       serp_analysis?: AnalysisResult;
     },
     signal?: AbortSignal,
-  ) => nlpStream<ReoptimizeResult>("/reoptimize-page", body, signal),
+  ) => nlpStreamDirect<ReoptimizeResult>("/reoptimize-page", body, signal),
 
   findPageForKeyword: (
     body: { website_url: string; keyword: string; location: string },
