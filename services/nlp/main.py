@@ -2111,6 +2111,109 @@ def _build_deficiencies(scores: dict) -> List[dict]:
             })
     return out
 
+
+async def _score_html_inline(
+    page_html: str,
+    keyword: str,
+    location: str,
+    business_name: str,
+    gbp_category: str,
+    address: Optional[str],
+    serp_analysis_dict: Optional[dict],
+    client,
+) -> tuple:
+    """Score a page in-process (no HTTP). Returns (composite_score, deficiencies, scores, token_rec)."""
+    from bs4 import BeautifulSoup as _BS
+    page_text = _BS(page_html, "html.parser").get_text(separator="\n", strip=True)[:8000]
+    city = location.split(",")[0].strip()
+    serp_ctx = _serp_context(serp_analysis_dict)
+    user_prompt = _build_score_prompt(business_name, gbp_category, keyword, city, address, serp_ctx, page_text)
+
+    msg = await client.messages.create(
+        model=SCORE_MODEL,
+        max_tokens=8192,
+        system=[{"type": "text", "text": _SCORE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+        messages=[
+            {"role": "user", "content": user_prompt},
+            {"role": "assistant", "content": "{"},
+        ],
+    )
+    token_rec = _token_record("score-page-inline", SCORE_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
+    scores = _parse_claude_json("{" + msg.content[0].text)
+    if not scores:
+        raise Exception("Inline scoring returned invalid JSON")
+    scores["serp_signal_coverage"] = _compute_serp_signal_coverage(page_html, serp_analysis_dict)
+    composite, _ = _composite_from_scores(scores)
+    deficiencies = _build_deficiencies(scores)
+    return composite, deficiencies, scores, token_rec
+
+
+async def _reoptimize_html_inline(
+    existing_html: str,
+    keyword: str,
+    location: str,
+    city: str,
+    business_name: str,
+    gbp_category: str,
+    address: Optional[str],
+    phone: Optional[str],
+    deficiencies: List[dict],
+    serp_analysis_dict: Optional[dict],
+    seo_checklist: str,
+    client,
+) -> tuple:
+    """Reoptimize HTML in-process. Returns (content_html, schema_json, page_title, token_rec)."""
+    page_zones = _parse_page_zones(existing_html)
+    serp_ctx = _reopt_serp_context(page_zones, serp_analysis_dict)
+
+    deficiency_text = "\n".join(
+        f"  Engine: {d['engine']} (score: {d['score']}/100)\n"
+        f"  Issues: {'; '.join(d.get('issues', []))}\n"
+        f"  Fixes needed: {'; '.join(d.get('recommendations', []))}"
+        for d in deficiencies
+    )
+
+    user_prompt = f"""BUSINESS: {business_name} | CATEGORY: {gbp_category}
+KEYWORD: {keyword} | CITY: {city}
+PHONE: {phone or "[PHONE]"}
+ADDRESS: {address or "Not provided"}
+{serp_ctx}
+
+{seo_checklist}
+
+SEO DEFICIENCIES TO FIX (these must all be addressed in the rewrite):
+{deficiency_text}
+
+EXISTING PAGE (use as reference — preserve accurate facts, fix everything else):
+{existing_html[:12000]}"""
+
+    claude_msg = await client.messages.create(
+        model=GENERATION_MODEL,
+        max_tokens=8000,
+        system=[{"type": "text", "text": _REOPT_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    token_rec = _token_record("reoptimize-page-inline", GENERATION_MODEL, claude_msg.usage.input_tokens, claude_msg.usage.output_tokens)
+    raw = claude_msg.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r'^```[a-zA-Z]*\n?', '', raw)
+        raw = re.sub(r'\n?```$', '', raw)
+        raw = raw.strip()
+
+    title_match = re.search(r'<title>(.*?)</title>', raw, re.IGNORECASE | re.DOTALL)
+    page_title = title_match.group(1).strip() if title_match else ""
+
+    schema_split = raw.find('<script type="application/ld+json">')
+    if schema_split != -1:
+        content_html = raw[:schema_split].strip()
+        schema_json = raw[schema_split:].strip()
+    else:
+        content_html = raw
+        schema_json = None
+
+    return content_html, schema_json, page_title, token_rec
+
+
 def _sse(data: dict) -> str:
     """Format a dict as a Server-Sent Event line."""
     return f"data: {json.dumps(data)}\n\n"
@@ -3117,6 +3220,67 @@ ICP: {icp}
             content_html = raw
             schema_json = ""
 
+        # ── Auto-retry: score inline and reoptimize up to 5 total passes if < 90 ──
+        current_html   = content_html
+        current_schema = schema_json
+        current_title  = page_title
+        MAX_AUTO_PASSES = 5
+
+        await q.put({"step": "progress", "progress": 78, "message": "Scoring your page…"})
+        try:
+            inline_score, inline_defs, _, score_tok = await _score_html_inline(
+                current_html, body.keyword, body.location, body.business_name,
+                body.gbp_category, body.address, serp_analysis_dict, client,
+            )
+            token_rec["input_tokens"]  += score_tok["input_tokens"]
+            token_rec["output_tokens"] += score_tok["output_tokens"]
+            token_rec["cost_usd"]       = round(token_rec["cost_usd"] + score_tok["cost_usd"], 6)
+
+            for pass_num in range(2, MAX_AUTO_PASSES + 1):
+                if inline_score >= 90:
+                    break
+                pct = min(92, 78 + pass_num * 3)
+                await q.put({
+                    "step": "progress",
+                    "progress": pct,
+                    "message": f"Score {inline_score}/100 — optimizing (pass {pass_num} of {MAX_AUTO_PASSES})…",
+                })
+                try:
+                    new_html, new_schema, new_title, reopt_tok = await _reoptimize_html_inline(
+                        current_html, body.keyword, body.location, city,
+                        body.business_name, body.gbp_category, body.address, body.phone,
+                        inline_defs, serp_analysis_dict, seo_checklist, client,
+                    )
+                    token_rec["input_tokens"]  += reopt_tok["input_tokens"]
+                    token_rec["output_tokens"] += reopt_tok["output_tokens"]
+                    token_rec["cost_usd"]       = round(token_rec["cost_usd"] + reopt_tok["cost_usd"], 6)
+                    current_html   = new_html
+                    current_schema = new_schema if new_schema is not None else current_schema
+                    if new_title:
+                        current_title = new_title
+                except Exception as _re:
+                    logger.warning(f"generate-page auto-retry pass {pass_num} reoptimize failed: {_re}")
+                    break
+
+                try:
+                    inline_score, inline_defs, _, score_tok = await _score_html_inline(
+                        current_html, body.keyword, body.location, body.business_name,
+                        body.gbp_category, body.address, serp_analysis_dict, client,
+                    )
+                    token_rec["input_tokens"]  += score_tok["input_tokens"]
+                    token_rec["output_tokens"] += score_tok["output_tokens"]
+                    token_rec["cost_usd"]       = round(token_rec["cost_usd"] + score_tok["cost_usd"], 6)
+                except Exception as _se:
+                    logger.warning(f"generate-page auto-retry pass {pass_num} score failed: {_se}")
+                    break
+
+        except Exception as _ae:
+            logger.warning(f"generate-page: auto-retry loop failed: {_ae}")
+
+        content_html = current_html
+        schema_json  = current_schema
+        page_title   = current_title
+
         # Build combined cost breakdown
         ac = (serp_analysis_dict or {}).get("analysis_cost", {})
         claude_cost = token_rec["cost_usd"]
@@ -3265,6 +3429,67 @@ EXISTING PAGE:
         else:
             content_html = html_block
             schema_json = None
+
+        # ── Auto-retry: score inline and reoptimize up to 5 total passes if < 90 ──
+        current_html   = content_html
+        current_schema = schema_json
+        current_title  = page_title
+        MAX_AUTO_PASSES = 5
+
+        await q.put({"step": "progress", "progress": 78, "message": "Scoring your page…"})
+        try:
+            inline_score, inline_defs, _, score_tok = await _score_html_inline(
+                current_html, body.keyword, body.location, body.business_name,
+                body.gbp_category, body.address, body.serp_analysis, client,
+            )
+            token_rec["input_tokens"]  += score_tok["input_tokens"]
+            token_rec["output_tokens"] += score_tok["output_tokens"]
+            token_rec["cost_usd"]       = round(token_rec["cost_usd"] + score_tok["cost_usd"], 6)
+
+            for pass_num in range(2, MAX_AUTO_PASSES + 1):
+                if inline_score >= 90:
+                    break
+                pct = min(92, 78 + pass_num * 3)
+                await q.put({
+                    "step": "progress",
+                    "progress": pct,
+                    "message": f"Score {inline_score}/100 — optimizing (pass {pass_num} of {MAX_AUTO_PASSES})…",
+                })
+                try:
+                    new_html, new_schema, new_title, reopt_tok = await _reoptimize_html_inline(
+                        current_html, body.keyword, body.location, city,
+                        body.business_name, body.gbp_category, body.address, body.phone,
+                        inline_defs, body.serp_analysis, seo_checklist, client,
+                    )
+                    token_rec["input_tokens"]  += reopt_tok["input_tokens"]
+                    token_rec["output_tokens"] += reopt_tok["output_tokens"]
+                    token_rec["cost_usd"]       = round(token_rec["cost_usd"] + reopt_tok["cost_usd"], 6)
+                    current_html   = new_html
+                    current_schema = new_schema if new_schema is not None else current_schema
+                    if new_title:
+                        current_title = new_title
+                except Exception as _re:
+                    logger.warning(f"reoptimize-page auto-retry pass {pass_num} reoptimize failed: {_re}")
+                    break
+
+                try:
+                    inline_score, inline_defs, _, score_tok = await _score_html_inline(
+                        current_html, body.keyword, body.location, body.business_name,
+                        body.gbp_category, body.address, body.serp_analysis, client,
+                    )
+                    token_rec["input_tokens"]  += score_tok["input_tokens"]
+                    token_rec["output_tokens"] += score_tok["output_tokens"]
+                    token_rec["cost_usd"]       = round(token_rec["cost_usd"] + score_tok["cost_usd"], 6)
+                except Exception as _se:
+                    logger.warning(f"reoptimize-page auto-retry pass {pass_num} score failed: {_se}")
+                    break
+
+        except Exception as _ae:
+            logger.warning(f"reoptimize-page: auto-retry loop failed: {_ae}")
+
+        content_html = current_html
+        schema_json  = current_schema
+        page_title   = current_title
 
         await q.put({"step": "progress", "progress": 95, "message": "Finishing up…"})
         await q.put({
