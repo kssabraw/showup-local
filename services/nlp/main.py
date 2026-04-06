@@ -1947,7 +1947,7 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
 # ══════════════════════════════════════════════════════════════════════════════
 
 GENERATION_MODEL = "claude-sonnet-4-6"
-SCORE_MODEL = "claude-haiku-4-5-20251001"  # Structured JSON grading — Haiku is sufficient
+SCORE_MODEL = "claude-sonnet-4-6"  # Sonnet for accurate rubric scoring — Haiku was unreliable on nuanced criteria
 
 # Pricing per million tokens (cached input tokens billed at ~10% of normal input rate)
 _MODEL_PRICING: Dict[str, Dict[str, float]] = {
@@ -1977,7 +1977,7 @@ TITLE TAG FORMULA (follow exactly — do not deviate):
 - Brand Name: the business name
 - Justification: a short phrase using 1–2 Google entities that validates the claim (e.g. "Serving Anaheim Hills & Orange County")
 - Additional persuasion: a benefit or proof point that includes 1–2 more entities (e.g. "Same-Day Response, No Overtime Fees")
-- Total title length: 60–70 characters ideal, 80 max
+- Total title length: no character limit — prioritise keyword density and entity coverage over brevity
 
 AEO / LLM WRITING RULES — apply throughout every section
 
@@ -2130,7 +2130,7 @@ Section 6 — Main Service Body (800–1400 words)
   is critical for outranking competitors.
 
   Structure rules:
-  - You may use MULTIPLE H2s within this section if the content warrants separate major topics
+  - You MUST use MULTIPLE H2s within this section — each H2 block must be ≤300 words; split further into additional H2s if needed
   - Each H2 should represent a distinct major topic or service category
   - Use H3s under each H2 for sub-services, use cases, or scenarios
   - Every heading: include service/city naturally where it fits (not forced)
@@ -2168,10 +2168,10 @@ Section 10 — Geographic / Local SEO Section (200–300 words)
 Section 11 — CTA Block Tertiary (50–75 words — urgency-forward)
 <section id="cta-tertiary">...</section>
 
-Section 12 — FAQ (min 6, max 10 entries — 40–80 words each)
+Section 12 — FAQ (min 4, max 7 entries — 40–80 words each)
 <section id="faq">
   <h2>Frequently Asked Questions</h2>
-  [Min 6, max 10 FAQ entries. Every answer opens with a direct yes/no or factual statement.]
+  [Min 4, max 7 FAQ entries. Every answer opens with a direct yes/no or factual statement.]
   REQUIRED PROXIMITY FAQs — at least 2 entries must follow this pattern:
     Q: "Do you serve [specific neighborhood or city]?"
     A: "Yes, [Brand] serves [neighborhood] with [specific availability/response time, e.g. 'same-day service' or '24/7 emergency response']."
@@ -2230,7 +2230,13 @@ Then output a JSON array (minified, no extra whitespace) of gap objects, each wi
 Then output:
 CONTENT_GAPS_REPORT_END
 
-Only include gaps for facts that would measurably improve the page score and that you could NOT include because they weren't in the provided business data. Do not include gaps for information that is already present. If there are no gaps, output an empty array []."""
+Only include gaps for facts that would measurably improve the page score and that you could NOT include because they weren't in the provided business data. Do not include gaps for information that is already present. If there are no gaps, output an empty array [].
+
+ALWAYS check for these high-impact gaps and include them if missing from the business data:
+1. Response time — if no specific arrival/response window (e.g. "within 2 hours", "same-day") was present in the business data, include this gap:
+   {"category":"Response Time","missing":"Specific response or arrival window (e.g. 'within 2 hours', 'same-day appointments')","score_impact":"high","why_important":"The nearme_intent scoring engine requires an explicit response time. Without it the page cannot score 90+ — this is the single most common reason for a sub-90 score. Having this prominently on your website also builds trust with visitors and improves conversions.","how_to_add":"Add your typical response or arrival time to your website (e.g. on your homepage, about page, or services page). Once it's there, you can either manually add it to this page, or start the process over once all missing information has been added to your site for a fully optimised result."}
+2. Service area / neighborhoods — if no specific neighborhoods or coverage areas were in the business data, flag it as a medium-impact gap with how_to_add explaining that having a clear service area listed on the website helps both customers and search engines understand coverage, and that they can manually add it to this page or restart once the site is updated.
+3. Certifications / licences — if the GBP category implies them (plumber, electrician, HVAC, contractor) but none were stated, flag as medium-impact with how_to_add explaining that licences and certifications are a key trust signal that customers look for, and that they should be listed on the website's about or services page — then either manually added to this page or the process restarted."""
 
 _REOPT_SYSTEM_PROMPT = """You are an expert local SEO content writer. Fix the SEO deficiencies in the existing page while keeping its design intact.
 
@@ -2242,6 +2248,14 @@ WHAT YOU CAN CHANGE:
 WHAT YOU MUST NOT CHANGE:
 - Existing HTML tag names, CSS classes, IDs, data-* attributes, href, src, or any non-content attributes
 - Do not remove or reorder any existing HTML elements
+
+SERP SIGNAL COVERAGE — EXACT SUBSTRING MATCHING (15% of composite score):
+15% of the composite score is computed by a deterministic Python engine that checks for
+exact lowercase substring matches of competitor keywords, Google entities, and 4-word phrases
+in specific HTML zones (title, H1, H2/H3 headings, paragraph text).
+Paraphrasing, synonyms, or reordering DO NOT count — the exact string must appear in the zone.
+The user prompt contains COMPETITOR SIGNAL DATA showing which terms are still missing per zone.
+Prioritise adding those exact strings before making any other changes.
 
 SERP SIGNAL TARGETS — apply these to the corresponding zones:
 The user prompt contains COMPETITOR SIGNAL DATA with per-zone keyword and entity targets.
@@ -2282,17 +2296,22 @@ Return the complete page HTML with all changes applied. No markdown, no explanat
 
 _SCORE_SYSTEM_PROMPT = """You are an expert local SEO analyst. Score the provided page against all 7 engines below.
 
+IMPORTANT: These 7 engines account for 85% of the composite score. The remaining 15% is
+scored separately by a deterministic Python engine (SERP Signal Coverage) that checks
+exact keyword/entity/quadgram presence per HTML zone. You do NOT score that engine —
+focus only on the 7 below.
+
 SCORING CRITERIA — score each engine 0–100:
 
-1. organic_ranking (weight 20%): keyword in title + H1 + opening ¶; service/transactional tone (not blog); CTA + phone visible; clear service offering.
+1. organic_ranking (weight 10%): keyword in title + H1 + opening ¶; service/transactional tone (not blog); CTA + phone visible; clear service offering.
 
-2. gbp_maps (weight 25%): exact city name present; service matches GBP category; brand+service+city entity triplet; NAP signals consistent; multiple service mentions.
+2. gbp_maps (weight 20%): exact city name present; service matches GBP category; brand+service+city entity triplet; NAP signals consistent; multiple service mentions.
 
-3. entity_establishment (weight 15%): brand+service+city co-occurrence in ≥3 sections; sub-services mentioned; descriptive anchor text signals; topical depth.
+3. entity_establishment (weight 10%): brand+service+city co-occurrence in ≥3 sections; sub-services mentioned; descriptive anchor text signals; topical depth.
 
-4. icp_alignment (weight 10%): detect ICP from keyword modifier (emergency→urgent tone; commercial→B2B tone; general→professional/reliable); CTA tone matches ICP (e.g. emergency ICP requires urgency/fear-based CTA, not generic "call for a free estimate"); pain points addressed; emotional register of copy matches searcher intent.
+4. icp_alignment (weight 5%): detect ICP from keyword modifier (emergency→urgent tone; commercial→B2B tone; general→professional/reliable); CTA tone matches ICP (e.g. emergency ICP requires urgency/fear-based CTA, not generic "call for a free estimate"); pain points addressed; emotional register of copy matches searcher intent.
 
-5. aeo_llm_retrieval (weight 10%): answer-first formatting (direct claim before explanation); FAQ with ≥4 entries, each opening with a direct yes/no or factual statement; question-format H3s where appropriate; each section ≤300 words; ≥1 bulleted list with outcome-first bullets; ≥1 numbered list for a process or steps; tables used where content is genuinely comparative (service tiers, response times, inclusions) — penalise only if comparative data is present but no table was used; specific operational facts (numbers, timeframes, named places) rather than generic filler.
+5. aeo_llm_retrieval (weight 20%): answer-first formatting (direct claim before explanation); FAQ with 4–7 entries (penalise if fewer than 4 or more than 7), each opening with a direct yes/no or factual statement; question-format H3s where appropriate; each section ≤300 words; ≥1 bulleted list with outcome-first bullets; ≥1 numbered list for a process or steps; tables used where content is genuinely comparative (service tiers, response times, inclusions) — penalise only if comparative data is present but no table was used; specific operational facts (numbers, timeframes, named places) rather than generic filler.
 
 6. geographic_legitimacy (weight 10%): city in title+H1+opening ¶; ≥2 neighborhood references in sentence context; ≥1 landmark reference; ≥3 zip codes in visible content; geo signals in ≥3 page sections.
 
@@ -2507,7 +2526,7 @@ async def _score_html_inline(
 ) -> tuple:
     """Score a page in-process (no HTTP). Returns (composite_score, deficiencies, scores, token_rec)."""
     from bs4 import BeautifulSoup as _BS
-    page_text = _BS(page_html, "html.parser").get_text(separator="\n", strip=True)[:8000]
+    page_text = _BS(page_html, "html.parser").get_text(separator="\n", strip=True)
     city = location.split(",")[0].strip()
     serp_ctx = _serp_context(serp_analysis_dict)
     user_prompt = _build_score_prompt(business_name, gbp_category, keyword, city, address, serp_ctx, page_text)
@@ -2568,7 +2587,7 @@ SEO DEFICIENCIES TO FIX (these must all be addressed in the rewrite):
 {deficiency_text}
 
 EXISTING PAGE (use as reference — preserve accurate facts, fix everything else):
-{existing_html[:12000]}"""
+{existing_html}"""
 
     claude_msg = await client.messages.create(
         model=GENERATION_MODEL,
@@ -2654,29 +2673,41 @@ def compute_zone_targets(
 ) -> Dict[str, dict]:
     """
     For each zone, count how many of the filtered related-keyword terms appear in
-    each competitor page's zone text, then return the max count as the target.
-    Also computes per-zone entity targets by counting how many Google entities
-    appear in each zone across competitor pages.
+    each competitor page's zone text, then return the 75th-percentile count as the
+    target. Using the 75th percentile (rather than max) avoids outlier competitor
+    pages setting unrealistically high targets that inflate serp_signal_coverage
+    scoring difficulty.
+    Also computes per-zone entity targets using the same 75th-percentile approach.
     """
     targets: Dict[str, dict] = {}
     entity_names = {e["name"].lower() for e in google_entities} if google_entities else set()
 
+    def _p75(values: list) -> int:
+        if not values:
+            return 0
+        sorted_vals = sorted(values)
+        idx = int(np.ceil(0.75 * len(sorted_vals))) - 1
+        return sorted_vals[max(idx, 0)]
+
     for zone_name in ZONES:
         terms = getattr(related, zone_name, [])
         term_set = {t["term"].lower() for t in terms} if terms else set()
-        max_term_count = 0
-        max_entity_count = 0
+        term_counts: list[int] = []
+        entity_counts: list[int] = []
 
         for page_text in zone_buckets.get(zone_name, []):
             if not page_text:
                 continue
             cleaned = clean_text(page_text).lower()
             if term_set:
-                max_term_count = max(max_term_count, sum(1 for t in term_set if t in cleaned))
+                term_counts.append(sum(1 for t in term_set if t in cleaned))
             if entity_names:
-                max_entity_count = max(max_entity_count, sum(1 for e in entity_names if e in cleaned))
+                entity_counts.append(sum(1 for e in entity_names if e in cleaned))
 
-        targets[zone_name] = {"target": max_term_count, "entity_target": max_entity_count}
+        targets[zone_name] = {
+            "target":        _p75(term_counts),
+            "entity_target": _p75(entity_counts),
+        }
 
     return targets
 
@@ -2840,7 +2871,7 @@ async def _score_page_for_related(
                               headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"})
         _resp.raise_for_status()
         page_html = _resp.text
-    page_text = _BS2(page_html, "html.parser").get_text(separator="\n", strip=True)[:8000]
+    page_text = _BS2(page_html, "html.parser").get_text(separator="\n", strip=True)
     city = location.split(",")[0].strip()
     user_prompt = _build_score_prompt(business_name, gbp_category, keyword, city, address, "", page_text)
     msg = await haiku_client.messages.create(
@@ -3163,14 +3194,14 @@ async def _build_seo_checklist(
         "These are derived from the exact rubric used to grade your page.",
         "━" * 60,
         "",
-        "【KEYWORD PLACEMENT — organic_ranking 20%】",
+        "【KEYWORD PLACEMENT — organic_ranking 10%】",
         f'  • <title> tag: must contain "{keyword}" and "{city}"',
         f'  • <h1>: must contain "{keyword}"',
         f'  • Opening paragraph: mention "{keyword}" within the first 2 sentences',
         f'  • Page tone: transactional/service (NOT informational or blog-style)',
         f'  • CTA and {phone or "phone number"} visible without scrolling',
         "",
-        "【GBP / LOCAL SIGNALS — gbp_maps 25%】",
+        "【GBP / LOCAL SIGNALS — gbp_maps 20%】",
         f'  • Exact city name "{city}" in title, H1, and opening paragraph',
         f'  • Reference GBP category: "{gbp_category}"',
         f'  • Business name + service type + "{city}" must co-occur in ≥3 separate sections',
@@ -3194,6 +3225,10 @@ async def _build_seo_checklist(
         f'  • ZIP codes — embed ≥3 of these in visible body text: {zip_codes}',
         f'  • Include ≥1 local landmark, street name, or recognizable reference near {city}',
         f'  • Geo signals must appear across ≥3 separate page sections (not all bunched together)',
+        f'  • DISTRIBUTION RULE: do NOT save ZIP codes and neighborhood names only for Section 10.',
+        f'    – Section 6 (services): mention {city} + at least 1 neighborhood in at least one H3 body paragraph',
+        f'    – Section 12 (FAQ): at least 2 FAQ answers must reference a specific neighborhood or ZIP code',
+        f'    – Section 10 (local): full geo block with all neighborhoods, landmarks, ZIPs, streets, response time',
     ]
     if street_ref:
         lines.append(f'  • Street reference available from business address: "{street_ref}"')
@@ -3219,9 +3254,9 @@ async def _build_seo_checklist(
 
     lines += [
         "",
-        "【AEO / LLM RETRIEVAL STRUCTURE — aeo_llm_retrieval 10%】",
+        "【AEO / LLM RETRIEVAL STRUCTURE — aeo_llm_retrieval 20% ★ HIGHEST WEIGHT】",
         '  • Answer-first format: lead every section with the direct claim or answer BEFORE the explanation',
-        '  • FAQ section: ≥4 entries; each entry must OPEN with a direct yes/no or factual statement',
+        '  • FAQ section: 4–7 entries EXACTLY (fewer than 4 or more than 7 will be penalised); each entry must OPEN with a direct yes/no or factual statement',
         '  • ≥2 of those FAQ entries must be proximity FAQs (coverage area, response time, emergency availability)',
     ]
     if faq_suggestions:
@@ -3237,7 +3272,7 @@ async def _build_seo_checklist(
 
     lines += [
         "",
-        f'【ICP ALIGNMENT — icp_alignment 10%】',
+        f'【ICP ALIGNMENT — icp_alignment 5%】',
         f'  • Detected ICP: {icp_label}',
         f'  • Tone: {icp_tone}',
         f'  • Primary CTA must match ICP intent: {icp_cta}',
@@ -3254,14 +3289,14 @@ async def _build_seo_checklist(
         quadgrams = serp_analysis.get("top_quadgrams", [])
 
         lines.append("")
-        lines.append("【KEYWORD & ENTITY TARGETS — entity_establishment 15%】")
+        lines.append("【KEYWORD & ENTITY TARGETS — entity_establishment 10%】")
         for zone_key, zone_label in [
             ("title",      "Title tag"),
             ("h1",         "H1 heading"),
             ("h2_h3",      "H2/H3 subheadings"),
             ("paragraphs", "Paragraph text"),
         ]:
-            terms = [t["term"] for t in rk.get(zone_key, [])[:8]]
+            terms = [t["term"] for t in rk.get(zone_key, [])[:12]]
             target = zt.get(zone_key, {}).get("target", 0)
             if terms and target:
                 lines.append(f'  • {zone_label}: include ≥{target} of: {", ".join(terms)}')
@@ -3283,8 +3318,52 @@ async def _build_seo_checklist(
             lines.append(f'  • Business name + service + city must co-occur in ≥3 sections')
 
         if quadgrams:
-            phrases = [q["phrase"] for q in quadgrams[:6]]
+            phrases = [q["phrase"] for q in quadgrams[:10]]
             lines.append(f'  • Competitor 4-word phrases — include these EXACT phrases verbatim in paragraph text (do NOT paraphrase): {", ".join(phrases)}')
+
+    # ── SERP SIGNAL COVERAGE — deterministic engine (15% of composite) ────────
+    if serp_analysis:
+        rk = serp_analysis.get("related_keywords", {})
+        zt = serp_analysis.get("zone_targets", {})
+        entities = serp_analysis.get("google_entities", [])
+        quadgrams_list = serp_analysis.get("top_quadgrams", [])
+        top_entities_list = sorted(entities, key=lambda e: e.get("page_spread", 0), reverse=True)[:15]
+
+        lines.append("")
+        lines.append("【SERP SIGNAL COVERAGE — serp_signal_coverage 15% ★ DETERMINISTIC SCORING】")
+        lines.append("  ⚠ This engine is scored by EXACT SUBSTRING MATCHING in Python — not by AI judgement.")
+        lines.append("  Every term below is checked as an exact lowercase substring in the corresponding HTML zone.")
+        lines.append("  If the exact string is not found in the zone, it counts as a miss. Paraphrasing does NOT count.")
+        lines.append("  Score formula: keyword coverage (30%) + entity coverage (50%) + quadgram coverage (20%)")
+        lines.append("")
+
+        for zone_key, zone_label in [
+            ("title",      "TITLE TAG (<title>)"),
+            ("h1",         "H1 HEADING (<h1>)"),
+            ("h2_h3",      "H2/H3 SUBHEADINGS (across all <h2> and <h3> tags)"),
+            ("paragraphs", "PARAGRAPH TEXT (across all <p> tags)"),
+        ]:
+            terms = rk.get(zone_key, [])[:12]
+            zone_data = zt.get(zone_key, {})
+            term_target = zone_data.get("target", 0)
+            entity_target = zone_data.get("entity_target", 0)
+            if not terms and not entity_target:
+                continue
+
+            lines.append(f"  {zone_label}:")
+            if terms and term_target:
+                term_names = [t["term"] for t in terms]
+                lines.append(f'    Keywords (need ≥{term_target} EXACT matches): {", ".join(term_names)}')
+            if entity_target and top_entities_list:
+                ent_names = [e["name"] for e in top_entities_list]
+                lines.append(f'    Entities (need ≥{entity_target} EXACT matches): {", ".join(ent_names)}')
+            lines.append("")
+
+        if quadgrams_list:
+            qg_phrases = [q["phrase"] for q in quadgrams_list[:10]]
+            lines.append(f'  QUADGRAM PHRASES (checked as exact substrings across full page text):')
+            lines.append(f'    Include as many of these VERBATIM: {", ".join(qg_phrases)}')
+            lines.append("")
 
     lines += ["", "━" * 60]
     return "\n".join(lines)
@@ -3664,7 +3743,7 @@ async def score_page(request: Request, body: ScorePageRequest):
             raise HTTPException(status_code=422, detail="Could not fetch the provided page URL. Check that it is correct and publicly accessible.")
     if not page_html:
         raise HTTPException(status_code=422, detail="Either page_content or page_url is required")
-    page_text = _BS(page_html, "html.parser").get_text(separator="\n", strip=True)[:8000]
+    page_text = _BS(page_html, "html.parser").get_text(separator="\n", strip=True)
     city = body.location.split(",")[0].strip()
     serp_ctx = _serp_context(serp_analysis_dict)
 
@@ -3724,6 +3803,7 @@ class GeneratePageRequest(BaseModel):
     phone: Optional[str] = None
     website: Optional[str] = None
     hours: Optional[str] = None
+    gbp_description: Optional[str] = None
     differentiators: Optional[List[dict]] = None
     icp_type: Optional[str] = None
     brand_voice: Optional[dict] = None
@@ -3863,13 +3943,20 @@ async def generate_page(request: Request, body: GeneratePageRequest):
             client=client,
         )
 
+        gbp_description_text = (
+            f"GBP Description: {body.gbp_description}"
+            if body.gbp_description else
+            "GBP Description: Not provided"
+        )
+
         user_prompt = f"""BUSINESS DATA
 Name: {body.business_name}
 Category: {body.gbp_category}
 Address: {body.address}
 Phone: {body.phone or "Not provided — use [PHONE] as placeholder"}
-Website: {body.website or ""}
+Website: {body.website or "Not provided"}
 Hours: {body.hours or "Not provided"}
+{gbp_description_text}
 Primary keyword: {body.keyword}
 Target city: {city}
 Full location: {body.location}
@@ -3888,7 +3975,7 @@ ICP: {icp}
         try:
             claude_msg = await client.messages.create(
                 model=GENERATION_MODEL,
-                max_tokens=6000,
+                max_tokens=8000,
                 system=[{"type": "text", "text": _GEN_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": user_prompt}],
             )
@@ -3935,66 +4022,22 @@ ICP: {icp}
         else:
             schema_json = after_html
 
-        # ── Auto-retry: score inline and reoptimize up to 5 total passes if < 90 ──
-        current_html   = content_html
-        current_schema = schema_json
-        current_title  = page_title
-        MAX_AUTO_PASSES = 4
-
+        # ── Score the generated page (single pass — no retry loop) ──────────────
+        # The generation prompt is designed to hit 100/100 in one pass when all
+        # business data is present. If the score is below 100, the content_gaps
+        # report tells the user exactly what data is missing and what to add.
         await q.put({"step": "progress", "progress": 78, "message": "Scoring your page…"})
+        inline_score = None
         try:
-            inline_score, inline_defs, _, score_tok = await _score_html_inline(
-                current_html, body.keyword, body.location, body.business_name,
+            inline_score, _, _, score_tok = await _score_html_inline(
+                content_html, body.keyword, body.location, body.business_name,
                 body.gbp_category, body.address, serp_analysis_dict, client,
             )
             token_rec["input_tokens"]  += score_tok["input_tokens"]
             token_rec["output_tokens"] += score_tok["output_tokens"]
             token_rec["cost_usd"]       = round(token_rec["cost_usd"] + score_tok["cost_usd"], 6)
-
-            for pass_num in range(2, MAX_AUTO_PASSES + 1):
-                if inline_score >= 90:
-                    break
-                pct = min(92, 78 + pass_num * 3)
-                await q.put({
-                    "step": "progress",
-                    "progress": pct,
-                    "message": f"Score {inline_score}/100 — optimizing (pass {pass_num} of {MAX_AUTO_PASSES})…",
-                })
-                try:
-                    new_html, new_schema, new_title, reopt_tok = await _reoptimize_html_inline(
-                        current_html, body.keyword, body.location, city,
-                        body.business_name, body.gbp_category, body.address, body.phone,
-                        inline_defs, serp_analysis_dict, seo_checklist, client,
-                    )
-                    token_rec["input_tokens"]  += reopt_tok["input_tokens"]
-                    token_rec["output_tokens"] += reopt_tok["output_tokens"]
-                    token_rec["cost_usd"]       = round(token_rec["cost_usd"] + reopt_tok["cost_usd"], 6)
-                    current_html   = new_html
-                    current_schema = new_schema if new_schema is not None else current_schema
-                    if new_title:
-                        current_title = new_title
-                except Exception as _re:
-                    logger.warning(f"generate-page auto-retry pass {pass_num} reoptimize failed: {_re}")
-                    break
-
-                try:
-                    inline_score, inline_defs, _, score_tok = await _score_html_inline(
-                        current_html, body.keyword, body.location, body.business_name,
-                        body.gbp_category, body.address, serp_analysis_dict, client,
-                    )
-                    token_rec["input_tokens"]  += score_tok["input_tokens"]
-                    token_rec["output_tokens"] += score_tok["output_tokens"]
-                    token_rec["cost_usd"]       = round(token_rec["cost_usd"] + score_tok["cost_usd"], 6)
-                except Exception as _se:
-                    logger.warning(f"generate-page auto-retry pass {pass_num} score failed: {_se}")
-                    break
-
         except Exception as _ae:
-            logger.warning(f"generate-page: auto-retry loop failed: {_ae}")
-
-        content_html = current_html
-        schema_json  = current_schema
-        page_title   = current_title
+            logger.warning(f"generate-page: scoring failed: {_ae}")
 
         # Build combined cost breakdown
         ac = (serp_analysis_dict or {}).get("analysis_cost", {})
@@ -4126,7 +4169,7 @@ SEO DEFICIENCIES TO FIX (these must all be addressed in the rewrite):
 {deficiency_text}
 
 EXISTING PAGE (use as reference — preserve accurate facts, fix everything else):
-{existing_html[:12000]}"""
+{existing_html}"""
 
         await q.put({"step": "progress", "progress": 40, "message": "Rewriting your page…"})
 

@@ -11,6 +11,8 @@ export type BusinessProfile = Pick<
   | "website"
   | "phone"
   | "gbp_place_id"
+  | "description"
+  | "hours"
   | "differentiators"
   | "existing_pages"
   | "brand_voice"
@@ -30,7 +32,7 @@ export function useBusinessProfiles() {
       const { data, error } = await supabase
         .from("business_profiles")
         .select(
-          "id, business_name, address, gbp_category, website, phone, gbp_place_id, differentiators, existing_pages, brand_voice, detected_icp, latitude, longitude, gbp_review_count, gbp_rating",
+          "id, business_name, address, gbp_category, website, phone, gbp_place_id, description, hours, differentiators, existing_pages, brand_voice, detected_icp, latitude, longitude, gbp_review_count, gbp_rating",
         )
         .order("created_at", { ascending: false });
       if (error) throw error;
