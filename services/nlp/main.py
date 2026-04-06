@@ -2044,6 +2044,30 @@ optimised for Answer Engine Optimisation. Follow all of them in every section.
 10. SECTION LENGTH ≤300 words: LLMs extract from dense sections poorly. If a topic needs
     more depth, split it into multiple H2 subsections rather than lengthening one section.
 
+11. GEO SIGNALS ACROSS SECTIONS: City name, neighborhood references, and availability language
+    must appear in ≥3 separate sections — not only in Section 10. Required distribution:
+    - Section 1 (Intro): city name + at least 1 neighborhood or service area
+    - Section 6 (Services): city name + coverage note in at least 1 H3
+    - Section 10 (Local): full geo block (neighborhoods, landmark, ZIPs, coverage, response time)
+    - Section 12 (FAQ): ≥2 answers reference a specific city or neighborhood
+
+12. RESPONSE TIME — ALWAYS SPECIFIC: Never write "quickly", "promptly", "fast response", or
+    "soon". Every response time claim must include a specific number:
+    ✗ "We respond quickly."         → ✓ "We arrive within 2–4 hours."
+    ✗ "Same-day service available." → ✓ "Same-day appointments available — book by 2pm."
+    Include at least one explicit response time in Section 1 and at least two in Section 12 FAQ answers.
+
+13. PHONE NUMBER PLACEMENT: The phone number must appear in Section 1 (intro paragraph).
+    This ensures it is visible above the fold. It must also appear in Sections 4, 8, and 11.
+
+14. ICP-MATCHED CTA TONE: The SEO checklist in the user prompt identifies the Ideal Customer
+    Profile (ICP) for this keyword. All CTAs must match the ICP tone exactly:
+    - Emergency ICP → urgency language: "Call Now", "Available 24/7", "Dispatch in 60 min"
+    - Commercial ICP → professional: "Request a Quote", "Schedule a Site Assessment"
+    - Budget ICP → value-first: "Get a Free Estimate", "No Trip Fee", "Transparent Pricing"
+    - General ICP → confident: "Get a Quote Today", "Schedule Service"
+    Repeat the ICP-appropriate CTA in ≥3 sections (hero, mid-page, closing).
+
 BRAND VOICE vs. AEO STRUCTURE — TIEBREAKER RULES
 
 These two sets of rules rarely conflict, but when they appear to, apply this hierarchy:
@@ -2072,7 +2096,8 @@ Section 1 — Intro / Direct Answer Block (100–150 words)
 <section id="intro">
   <h1>[Exact Match Keyword] + [1–2 entities that reinforce location or service scope]</h1>
   H1 FORMULA: Write the primary keyword verbatim, then append relevant entities naturally (e.g. "Emergency Plumber Anaheim — Serving Anaheim Hills, Yorba Linda & Orange County")
-  <p>[Brand] provides [service] to [city] — [primary differentiator stated in first sentence]. [2–3 sentences: service confirmation, availability, phone CTA.] [Close with direct service claim + city.]</p>
+  <p>[Brand] provides [service] to [city] — [primary differentiator stated in first sentence]. [Availability signal with specific timeframe, e.g. "available 24/7 with crews on-site within 2 hours".] [Phone number as a CTA, e.g. "Call [phone] now".] [Close with direct service claim + city + 1 neighborhood.]</p>
+  NOTE: Phone number MUST appear in this paragraph. This section must mention city + ≥1 neighborhood.
 </section>
 
 Section 2 — USP / Value Proposition (150–200 words)
@@ -2111,7 +2136,10 @@ Section 6 — Main Service Body (800–1400 words)
   - Every heading: include service/city naturally where it fits (not forced)
   - Open with a primary service description paragraph (answer-first)
   - Each H3: 2–4 sentences covering description, real-world scenario, differentiator, geo reference
-  - Naturally weave in competitor entities and phrases from SERP data throughout
+  - List ALL sub-services or service types in individual H3 sections (e.g. if keyword is "plumber", include H3s for drain cleaning, water heater repair, pipe repair, etc. — each 2–4 sentences)
+  - At least one H3 must include city or neighborhood name naturally in the heading text
+  - Include a coverage or geo reference in at least one H3 body paragraph
+  - Weave in the EXACT competitor 4-word phrases from the SEO checklist verbatim (do not paraphrase)
   - Do NOT copy competitor headings verbatim — use them to understand topic coverage, then write
     headings that are more specific, benefit-oriented, or locally relevant
 </section>
@@ -2143,7 +2171,14 @@ Section 11 — CTA Block Tertiary (50–75 words — urgency-forward)
 Section 12 — FAQ (min 6, max 10 entries — 40–80 words each)
 <section id="faq">
   <h2>Frequently Asked Questions</h2>
-  [Must cover: availability, response time, coverage area, emergency service. Answer-first. Geographic + availability signal in each proximity FAQ.]
+  [Min 6, max 10 FAQ entries. Every answer opens with a direct yes/no or factual statement.]
+  REQUIRED PROXIMITY FAQs — at least 2 entries must follow this pattern:
+    Q: "Do you serve [specific neighborhood or city]?"
+    A: "Yes, [Brand] serves [neighborhood] with [specific availability/response time, e.g. 'same-day service' or '24/7 emergency response']."
+    Q: "How quickly can you respond to [city/neighborhood]?"
+    A: "[Specific timeframe] — e.g. 'Crews arrive within 2 hours in Anaheim and surrounding areas.'"
+  REQUIRED TOPICS (spread remaining entries across): availability, response time, coverage area, emergency service, pricing, process.
+  Each answer must include a specific fact (time, place, number) — no vague claims.
 </section>
 
 Section 13 — Schema (delivered AFTER </article> as a separate <script> block)
@@ -2161,7 +2196,9 @@ HARD RULES — NEVER:
 - Include placeholder text like [Insert here]
 - Fabricate reviews
 - Use vague differentiators ("trusted", "professional", "high quality") without a mechanism
-- Invent or guess phone numbers, addresses, hours, zip codes, street names, or landmarks not explicitly provided in the business data"""
+- Invent or guess phone numbers, addresses, hours, zip codes, street names, or landmarks not explicitly provided in the business data
+- Use vague response language ("quickly", "promptly", "fast", "soon") — always use a specific timeframe
+- Ignore the GBP_CATEGORY provided in the SEO checklist — the exact category label must appear naturally in title, H1, and ≥2 body sections"""
 
 _REOPT_SYSTEM_PROMPT = """You are an expert local SEO content writer. Fix the SEO deficiencies in the existing page while keeping its design intact.
 
