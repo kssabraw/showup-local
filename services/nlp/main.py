@@ -1947,7 +1947,7 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
 # ══════════════════════════════════════════════════════════════════════════════
 
 GENERATION_MODEL = "claude-sonnet-4-6"
-SCORE_MODEL = "claude-haiku-4-5-20251001"  # Structured JSON grading — Haiku is sufficient
+SCORE_MODEL = "claude-sonnet-4-6"  # Sonnet for accurate rubric scoring — Haiku was unreliable on nuanced criteria
 
 # Pricing per million tokens (cached input tokens billed at ~10% of normal input rate)
 _MODEL_PRICING: Dict[str, Dict[str, float]] = {
@@ -2581,7 +2581,7 @@ SEO DEFICIENCIES TO FIX (these must all be addressed in the rewrite):
 {deficiency_text}
 
 EXISTING PAGE (use as reference — preserve accurate facts, fix everything else):
-{existing_html[:12000]}"""
+{existing_html}"""
 
     claude_msg = await client.messages.create(
         model=GENERATION_MODEL,
@@ -2667,29 +2667,41 @@ def compute_zone_targets(
 ) -> Dict[str, dict]:
     """
     For each zone, count how many of the filtered related-keyword terms appear in
-    each competitor page's zone text, then return the max count as the target.
-    Also computes per-zone entity targets by counting how many Google entities
-    appear in each zone across competitor pages.
+    each competitor page's zone text, then return the 75th-percentile count as the
+    target. Using the 75th percentile (rather than max) avoids outlier competitor
+    pages setting unrealistically high targets that inflate serp_signal_coverage
+    scoring difficulty.
+    Also computes per-zone entity targets using the same 75th-percentile approach.
     """
     targets: Dict[str, dict] = {}
     entity_names = {e["name"].lower() for e in google_entities} if google_entities else set()
 
+    def _p75(values: list) -> int:
+        if not values:
+            return 0
+        sorted_vals = sorted(values)
+        idx = int(np.ceil(0.75 * len(sorted_vals))) - 1
+        return sorted_vals[max(idx, 0)]
+
     for zone_name in ZONES:
         terms = getattr(related, zone_name, [])
         term_set = {t["term"].lower() for t in terms} if terms else set()
-        max_term_count = 0
-        max_entity_count = 0
+        term_counts: list[int] = []
+        entity_counts: list[int] = []
 
         for page_text in zone_buckets.get(zone_name, []):
             if not page_text:
                 continue
             cleaned = clean_text(page_text).lower()
             if term_set:
-                max_term_count = max(max_term_count, sum(1 for t in term_set if t in cleaned))
+                term_counts.append(sum(1 for t in term_set if t in cleaned))
             if entity_names:
-                max_entity_count = max(max_entity_count, sum(1 for e in entity_names if e in cleaned))
+                entity_counts.append(sum(1 for e in entity_names if e in cleaned))
 
-        targets[zone_name] = {"target": max_term_count, "entity_target": max_entity_count}
+        targets[zone_name] = {
+            "target":        _p75(term_counts),
+            "entity_target": _p75(entity_counts),
+        }
 
     return targets
 
@@ -4187,7 +4199,7 @@ SEO DEFICIENCIES TO FIX (these must all be addressed in the rewrite):
 {deficiency_text}
 
 EXISTING PAGE (use as reference — preserve accurate facts, fix everything else):
-{existing_html[:12000]}"""
+{existing_html}"""
 
         await q.put({"step": "progress", "progress": 40, "message": "Rewriting your page…"})
 
