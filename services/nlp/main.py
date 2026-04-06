@@ -2130,7 +2130,7 @@ Section 6 — Main Service Body (800–1400 words)
   is critical for outranking competitors.
 
   Structure rules:
-  - You may use MULTIPLE H2s within this section if the content warrants separate major topics
+  - You MUST use MULTIPLE H2s within this section — each H2 block must be ≤300 words; split further into additional H2s if needed
   - Each H2 should represent a distinct major topic or service category
   - Use H3s under each H2 for sub-services, use cases, or scenarios
   - Every heading: include service/city naturally where it fits (not forced)
@@ -2242,6 +2242,14 @@ WHAT YOU CAN CHANGE:
 WHAT YOU MUST NOT CHANGE:
 - Existing HTML tag names, CSS classes, IDs, data-* attributes, href, src, or any non-content attributes
 - Do not remove or reorder any existing HTML elements
+
+SERP SIGNAL COVERAGE — EXACT SUBSTRING MATCHING (15% of composite score):
+15% of the composite score is computed by a deterministic Python engine that checks for
+exact lowercase substring matches of competitor keywords, Google entities, and 4-word phrases
+in specific HTML zones (title, H1, H2/H3 headings, paragraph text).
+Paraphrasing, synonyms, or reordering DO NOT count — the exact string must appear in the zone.
+The user prompt contains COMPETITOR SIGNAL DATA showing which terms are still missing per zone.
+Prioritise adding those exact strings before making any other changes.
 
 SERP SIGNAL TARGETS — apply these to the corresponding zones:
 The user prompt contains COMPETITOR SIGNAL DATA with per-zone keyword and entity targets.
@@ -2512,7 +2520,7 @@ async def _score_html_inline(
 ) -> tuple:
     """Score a page in-process (no HTTP). Returns (composite_score, deficiencies, scores, token_rec)."""
     from bs4 import BeautifulSoup as _BS
-    page_text = _BS(page_html, "html.parser").get_text(separator="\n", strip=True)[:8000]
+    page_text = _BS(page_html, "html.parser").get_text(separator="\n", strip=True)
     city = location.split(",")[0].strip()
     serp_ctx = _serp_context(serp_analysis_dict)
     user_prompt = _build_score_prompt(business_name, gbp_category, keyword, city, address, serp_ctx, page_text)
@@ -2845,7 +2853,7 @@ async def _score_page_for_related(
                               headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"})
         _resp.raise_for_status()
         page_html = _resp.text
-    page_text = _BS2(page_html, "html.parser").get_text(separator="\n", strip=True)[:8000]
+    page_text = _BS2(page_html, "html.parser").get_text(separator="\n", strip=True)
     city = location.split(",")[0].strip()
     user_prompt = _build_score_prompt(business_name, gbp_category, keyword, city, address, "", page_text)
     msg = await haiku_client.messages.create(
@@ -3199,6 +3207,10 @@ async def _build_seo_checklist(
         f'  • ZIP codes — embed ≥3 of these in visible body text: {zip_codes}',
         f'  • Include ≥1 local landmark, street name, or recognizable reference near {city}',
         f'  • Geo signals must appear across ≥3 separate page sections (not all bunched together)',
+        f'  • DISTRIBUTION RULE: do NOT save ZIP codes and neighborhood names only for Section 10.',
+        f'    – Section 6 (services): mention {city} + at least 1 neighborhood in at least one H3 body paragraph',
+        f'    – Section 12 (FAQ): at least 2 FAQ answers must reference a specific neighborhood or ZIP code',
+        f'    – Section 10 (local): full geo block with all neighborhoods, landmarks, ZIPs, streets, response time',
     ]
     if street_ref:
         lines.append(f'  • Street reference available from business address: "{street_ref}"')
@@ -3713,7 +3725,7 @@ async def score_page(request: Request, body: ScorePageRequest):
             raise HTTPException(status_code=422, detail="Could not fetch the provided page URL. Check that it is correct and publicly accessible.")
     if not page_html:
         raise HTTPException(status_code=422, detail="Either page_content or page_url is required")
-    page_text = _BS(page_html, "html.parser").get_text(separator="\n", strip=True)[:8000]
+    page_text = _BS(page_html, "html.parser").get_text(separator="\n", strip=True)
     city = body.location.split(",")[0].strip()
     serp_ctx = _serp_context(serp_analysis_dict)
 
