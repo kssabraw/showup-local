@@ -3850,7 +3850,7 @@ ICP: {icp}
         current_html   = content_html
         current_schema = schema_json
         current_title  = page_title
-        MAX_AUTO_PASSES = 2
+        MAX_AUTO_PASSES = 4
 
         await q.put({"step": "progress", "progress": 78, "message": "Scoring your page…"})
         try:
@@ -3864,11 +3864,6 @@ ICP: {icp}
 
             for pass_num in range(2, MAX_AUTO_PASSES + 1):
                 if inline_score >= 90:
-                    break
-                # Skip retry if already past 90s to stay well under the 150s edge function timeout
-                _elapsed = time.monotonic() - _worker_start
-                if _elapsed > 90:
-                    logger.info(f"auto-retry pass {pass_num} skipped — elapsed {_elapsed:.0f}s > 90s budget")
                     break
                 pct = min(92, 78 + pass_num * 3)
                 await q.put({
@@ -4080,7 +4075,7 @@ EXISTING PAGE (use as reference — preserve accurate facts, fix everything else
         current_html   = content_html
         current_schema = schema_json
         current_title  = page_title
-        MAX_AUTO_PASSES = 2
+        MAX_AUTO_PASSES = 4
 
         await q.put({"step": "progress", "progress": 78, "message": "Scoring your page…"})
         try:
@@ -4094,11 +4089,6 @@ EXISTING PAGE (use as reference — preserve accurate facts, fix everything else
 
             for pass_num in range(2, MAX_AUTO_PASSES + 1):
                 if inline_score >= 90:
-                    break
-                # Skip retry if already past 90s to stay well under the 150s edge function timeout
-                _elapsed = time.monotonic() - _worker_start
-                if _elapsed > 90:
-                    logger.info(f"auto-retry pass {pass_num} skipped — elapsed {_elapsed:.0f}s > 90s budget")
                     break
                 pct = min(92, 78 + pass_num * 3)
                 await q.put({
