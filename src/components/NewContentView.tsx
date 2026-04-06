@@ -439,11 +439,21 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
               { onConflict: "business_id,keyword,location" },
             );
           }
+          if (!genData.content_html) {
+            setError("Generation returned empty content. Your credits have been refunded. Please try again.");
+            setCheckState({ status: "not_found" });
+            await supabase.rpc("refund_failed_generation", {
+              p_amount: 2, p_endpoint: "/generate-page", p_business_id: selectedBusinessId,
+            });
+            invalidateCredits();
+            setView({ kind: "form" });
+            return;
+          }
           setView({
             kind: "generated",
             mode: "generate",
             contentHtml: genData.content_html,
-            schemaJson: genData.schema_json,
+            schemaJson: genData.schema_json ?? "",
             pageTitle: genData.page_title ?? "",
             tokenUsage: genData.token_usage,
             costBreakdown: genData.cost_breakdown ?? {},
