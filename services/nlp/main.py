@@ -3163,6 +3163,7 @@ async def _build_seo_checklist(
         '  • Each content section ≤300 words — split longer topics into multiple H2 subsections',
         '  • Use question-format H3s where the content is naturally Q&A',
         '  • Include specific operational facts: named places, response times, certifications, service counts',
+        '  • If the service involves tiers, response-time ranges by area, or pricing options, present them in an HTML <table> (header row + ≥2 data rows)',
     ]
 
     lines += [
@@ -3171,7 +3172,9 @@ async def _build_seo_checklist(
         f'  • Detected ICP: {icp_label}',
         f'  • Tone: {icp_tone}',
         f'  • Primary CTA must match ICP intent: {icp_cta}',
+        f'  • Repeat or rephrase the CTA in ≥2 additional sections (hero, mid-page, and closing)',
         f'  • Address the ICP\'s primary pain point directly in the first 2 sections',
+        f'  • CTA button/link text must use ICP-appropriate urgency language (e.g. "Call Now" for emergency, "Get a Free Quote" for general)',
     ]
 
     # ── SERP keyword + entity targets (entity_establishment 15%) ────────────
@@ -3212,7 +3215,7 @@ async def _build_seo_checklist(
 
         if quadgrams:
             phrases = [q["phrase"] for q in quadgrams[:6]]
-            lines.append(f'  • Competitor 4-word phrases to use naturally in paragraphs: {", ".join(phrases)}')
+            lines.append(f'  • Competitor 4-word phrases — include these EXACT phrases verbatim in paragraph text (do NOT paraphrase): {", ".join(phrases)}')
 
     lines += ["", "━" * 60]
     return "\n".join(lines)
