@@ -165,6 +165,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const [bulkCreating, setBulkCreating] = useState(false);
   const [bulkProgress, setBulkProgress] = useState<{ current: number; total: number; currentKw: string } | null>(null);
   const [bulkDone, setBulkDone] = useState(0);
+  const [bulkFailed, setBulkFailed] = useState(0);
   const [manualUrl, setManualUrl] = useState("");
 
   // Auto-select first business on initial load (or onboarding-specified business)
@@ -483,18 +484,19 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         if ("step" in evt && evt.step === "error") return false;
         if ("step" in evt && evt.step === "done" && evt.result) {
           const genData = evt.result;
-          await supabase.from("generated_pages").upsert(
-            {
-              business_id: selectedBusinessId,
-              keyword: kw.trim(),
-              location: location.trim(),
-              mode: "generate",
-              page_title: genData.page_title ?? kw,
-              content_html: genData.content_html,
-              schema_json: genData.schema_json ?? null,
-            },
-            { onConflict: "business_id,keyword,location" },
-          );
+          const { error: saveError } = await supabase.from("generated_pages").insert({
+            business_id: selectedBusinessId,
+            keyword: kw.trim(),
+            location: location.trim(),
+            mode: "generate",
+            page_title: genData.page_title ?? kw,
+            content_html: genData.content_html,
+            schema_json: genData.schema_json ?? null,
+          });
+          if (saveError) {
+            console.error("bulk create: failed to save page for keyword", kw, saveError);
+            return false;
+          }
           await supabase.from("token_usage").insert({
             ...genData.token_usage,
             business_id: selectedBusinessId,
@@ -517,15 +519,17 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     setBulkCreating(true);
     setBulkDone(0);
     let done = 0;
+    let failed = 0;
     for (let i = 0; i < queue.length; i++) {
       if (bulkCancelledRef.current) break;
       setBulkProgress({ current: i + 1, total: queue.length, currentKw: queue[i] });
       const ok = await createAndSavePage(queue[i], abortRef.current?.signal);
-      if (ok) done++;
+      if (ok) done++; else failed++;
     }
     setBulkCreating(false);
     setBulkProgress(null);
     setBulkDone(done);
+    setBulkFailed(failed);
     setSelectedForCreate(new Set());
     invalidateSavedPages();
   };
@@ -655,9 +659,14 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             )}
           </div>
         )}
-        {bulkDone > 0 && !bulkCreating && (
-          <div className="px-4 py-3 border-t border-border">
-            <p className="text-xs text-green-600 font-medium">{bulkDone} page{bulkDone > 1 ? "s" : ""} created and saved — <button type="button" onClick={() => setContentTab("saved")} className="underline hover:no-underline">view in Saved Pages</button>.</p>
+        {(bulkDone > 0 || bulkFailed > 0) && !bulkCreating && (
+          <div className="px-4 py-3 border-t border-border space-y-1">
+            {bulkDone > 0 && (
+              <p className="text-xs text-green-600 font-medium">{bulkDone} page{bulkDone > 1 ? "s" : ""} created and saved — <button type="button" onClick={() => setContentTab("saved")} className="underline hover:no-underline">view in Saved Pages</button>.</p>
+            )}
+            {bulkFailed > 0 && (
+              <p className="text-xs text-destructive font-medium">{bulkFailed} page{bulkFailed > 1 ? "s" : ""} failed to save. Check console for details.</p>
+            )}
           </div>
         )}
       </div>
