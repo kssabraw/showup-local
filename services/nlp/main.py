@@ -5,6 +5,7 @@ import asyncio
 import base64
 import json
 import re
+import time
 
 # Configure logging to stderr so Railway captures it
 logging.basicConfig(
@@ -3638,6 +3639,7 @@ async def generate_page(request: Request, body: GeneratePageRequest):
     async def _worker(q: asyncio.Queue):
         client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
         city = body.location.split(",")[0].strip()
+        _worker_start = time.monotonic()
 
         await q.put({"step": "progress", "progress": 5, "message": "Starting…"})
 
@@ -3809,6 +3811,11 @@ ICP: {icp}
             for pass_num in range(2, MAX_AUTO_PASSES + 1):
                 if inline_score >= 90:
                     break
+                # Skip retry if already past 90s to stay well under the 150s edge function timeout
+                _elapsed = time.monotonic() - _worker_start
+                if _elapsed > 90:
+                    logger.info(f"auto-retry pass {pass_num} skipped — elapsed {_elapsed:.0f}s > 90s budget")
+                    break
                 pct = min(92, 78 + pass_num * 3)
                 await q.put({
                     "step": "progress",
@@ -3915,6 +3922,7 @@ async def reoptimize_page(request: Request, body: ReoptimizePageRequest):
     async def _worker(q: asyncio.Queue):
         client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
         city = body.location.split(",")[0].strip()
+        _worker_start = time.monotonic()
 
         await q.put({"step": "progress", "progress": 10, "message": "Fetching existing page…"})
 
@@ -4017,6 +4025,11 @@ EXISTING PAGE (use as reference — preserve accurate facts, fix everything else
 
             for pass_num in range(2, MAX_AUTO_PASSES + 1):
                 if inline_score >= 90:
+                    break
+                # Skip retry if already past 90s to stay well under the 150s edge function timeout
+                _elapsed = time.monotonic() - _worker_start
+                if _elapsed > 90:
+                    logger.info(f"auto-retry pass {pass_num} skipped — elapsed {_elapsed:.0f}s > 90s budget")
                     break
                 pct = min(92, 78 + pass_num * 3)
                 await q.put({
