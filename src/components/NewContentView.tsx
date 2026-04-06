@@ -164,6 +164,9 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   const [selectedForCreate, setSelectedForCreate] = useState<Set<string>>(new Set());
   const [bulkCreating, setBulkCreating] = useState(false);
   const [bulkProgress, setBulkProgress] = useState<{ current: number; total: number; currentKw: string } | null>(null);
+  const [bulkPageProgress, setBulkPageProgress] = useState<{ progress: number; step: string }>({ progress: 0, step: "" });
+  const [bulkElapsed, setBulkElapsed] = useState(0);
+  const bulkElapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [bulkDone, setBulkDone] = useState(0);
   const [bulkFailed, setBulkFailed] = useState(0);
   const [manualUrl, setManualUrl] = useState("");
@@ -469,7 +472,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
   };
 
   // Creates + auto-saves a page for the given keyword without navigating away (bulk flow)
-  const createAndSavePage = async (kw: string, signal?: AbortSignal): Promise<boolean> => {
+  const createAndSavePage = async (kw: string, signal?: AbortSignal, onProgress?: (progress: number, step: string) => void): Promise<boolean> => {
     const b = businesses.find(b => b.id === selectedBusinessId);
     if (!b) return false;
     try {
@@ -489,6 +492,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         signal,
       );
       for await (const evt of stream) {
+        if (evt.progress !== undefined && onProgress) onProgress(evt.progress, evt.message ?? "");
         if ("step" in evt && evt.step === "error") {
           await supabase.rpc("refund_failed_generation", {
             p_amount: 2, p_endpoint: "/generate-page", p_business_id: selectedBusinessId,
@@ -541,16 +545,24 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     bulkCancelledRef.current = false;
     setBulkCreating(true);
     setBulkDone(0);
+    setBulkElapsed(0);
+    setBulkPageProgress({ progress: 0, step: "" });
+    bulkElapsedRef.current = setInterval(() => setBulkElapsed(s => s + 1), 1000);
     let done = 0;
     let failed = 0;
     for (let i = 0; i < queue.length; i++) {
       if (bulkCancelledRef.current) break;
       setBulkProgress({ current: i + 1, total: queue.length, currentKw: queue[i] });
-      const ok = await createAndSavePage(queue[i], abortRef.current?.signal);
+      setBulkPageProgress({ progress: 0, step: "Starting…" });
+      const ok = await createAndSavePage(queue[i], abortRef.current?.signal, (progress, step) => {
+        setBulkPageProgress({ progress, step });
+      });
       if (ok) done++; else failed++;
     }
+    if (bulkElapsedRef.current) { clearInterval(bulkElapsedRef.current); bulkElapsedRef.current = null; }
     setBulkCreating(false);
     setBulkProgress(null);
+    setBulkPageProgress({ progress: 0, step: "" });
     setBulkDone(done);
     setBulkFailed(failed);
     setSelectedForCreate(new Set());
@@ -561,6 +573,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     bulkCancelledRef.current = true;
     abortRef.current?.abort();
     abortRef.current = null;
+    if (bulkElapsedRef.current) { clearInterval(bulkElapsedRef.current); bulkElapsedRef.current = null; }
   };
 
   const handleScoreManualUrl = async () => {
@@ -669,17 +682,50 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         )}
         {selectedForCreate.size > 0 && (
           <div className="px-4 py-3 border-t border-border bg-muted/20 space-y-2">
-            <Button className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold"
-              onClick={handleBulkCreate} disabled={bulkCreating}>
-              {bulkCreating && bulkProgress
-                ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Creating {bulkProgress.currentKw} ({bulkProgress.current}/{bulkProgress.total})…</>
-                : <><Sparkles className="w-4 h-4 mr-2" />Create {selectedForCreate.size} Selected Page{selectedForCreate.size > 1 ? "s" : ""}</>}
-            </Button>
-            {bulkCreating && (
-              <button onClick={cancelBulk} className="w-full text-xs text-muted-foreground hover:text-destructive transition-colors text-center py-0.5">
-                Cancel
-              </button>
-            )}
+            {!bulkCreating ? (
+              <Button className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold"
+                onClick={handleBulkCreate}>
+                <Sparkles className="w-4 h-4 mr-2" />Create {selectedForCreate.size} Selected Page{selectedForCreate.size > 1 ? "s" : ""}
+              </Button>
+            ) : bulkProgress ? (
+              <div className="space-y-2.5">
+                {/* Header row */}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-accent" />
+                    <span className="truncate max-w-[220px]">{bulkProgress.currentKw}</span>
+                  </div>
+                  <span className="text-xs text-muted-foreground shrink-0 ml-2">
+                    {bulkProgress.current} / {bulkProgress.total}
+                    {bulkProgress.current > 1 && bulkElapsed > 0 && (() => {
+                      const avgSec = bulkElapsed / (bulkProgress.current - 1);
+                      const remaining = Math.round(avgSec * (bulkProgress.total - bulkProgress.current + 1));
+                      return remaining > 0 ? ` · ~${remaining >= 60 ? `${Math.round(remaining / 60)}m` : `${remaining}s`} left` : null;
+                    })()}
+                  </span>
+                </div>
+                {/* Overall pages progress */}
+                <div className="space-y-1">
+                  <div className="flex gap-1">
+                    {Array.from({ length: bulkProgress.total }).map((_, idx) => (
+                      <div key={idx} className={`h-1.5 flex-1 rounded-full transition-all duration-300 ${idx < bulkProgress.current - 1 ? "bg-green-500" : idx === bulkProgress.current - 1 ? "bg-accent" : "bg-muted"}`} />
+                    ))}
+                  </div>
+                </div>
+                {/* Per-page progress bar */}
+                <div className="space-y-1">
+                  <div className="w-full h-1 bg-muted rounded-full overflow-hidden">
+                    <div className="h-full bg-accent/70 rounded-full transition-all duration-500" style={{ width: `${bulkPageProgress.progress}%` }} />
+                  </div>
+                  {bulkPageProgress.step && (
+                    <p className="text-xs text-muted-foreground truncate">{bulkPageProgress.step}</p>
+                  )}
+                </div>
+                <button onClick={cancelBulk} className="w-full text-xs text-muted-foreground hover:text-destructive transition-colors text-center py-0.5">
+                  Cancel
+                </button>
+              </div>
+            ) : null}
           </div>
         )}
         {(bulkDone > 0 || bulkFailed > 0) && !bulkCreating && (
