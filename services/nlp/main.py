@@ -3794,7 +3794,7 @@ ICP: {icp}
         current_html   = content_html
         current_schema = schema_json
         current_title  = page_title
-        MAX_AUTO_PASSES = 5
+        MAX_AUTO_PASSES = 2
 
         await q.put({"step": "progress", "progress": 78, "message": "Scoring your page…"})
         try:
@@ -4003,7 +4003,7 @@ EXISTING PAGE (use as reference — preserve accurate facts, fix everything else
         current_html   = content_html
         current_schema = schema_json
         current_title  = page_title
-        MAX_AUTO_PASSES = 5
+        MAX_AUTO_PASSES = 2
 
         await q.put({"step": "progress", "progress": 78, "message": "Scoring your page…"})
         try:
