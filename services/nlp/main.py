@@ -1977,7 +1977,7 @@ TITLE TAG FORMULA (follow exactly — do not deviate):
 - Brand Name: the business name
 - Justification: a short phrase using 1–2 Google entities that validates the claim (e.g. "Serving Anaheim Hills & Orange County")
 - Additional persuasion: a benefit or proof point that includes 1–2 more entities (e.g. "Same-Day Response, No Overtime Fees")
-- Total title length: 60–70 characters ideal, 80 max
+- Total title length: no character limit — prioritise keyword density and entity coverage over brevity
 
 AEO / LLM WRITING RULES — apply throughout every section
 
