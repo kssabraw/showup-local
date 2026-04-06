@@ -3296,7 +3296,7 @@ async def _build_seo_checklist(
             ("h2_h3",      "H2/H3 subheadings"),
             ("paragraphs", "Paragraph text"),
         ]:
-            terms = [t["term"] for t in rk.get(zone_key, [])[:8]]
+            terms = [t["term"] for t in rk.get(zone_key, [])[:12]]
             target = zt.get(zone_key, {}).get("target", 0)
             if terms and target:
                 lines.append(f'  • {zone_label}: include ≥{target} of: {", ".join(terms)}')
@@ -3318,7 +3318,7 @@ async def _build_seo_checklist(
             lines.append(f'  • Business name + service + city must co-occur in ≥3 sections')
 
         if quadgrams:
-            phrases = [q["phrase"] for q in quadgrams[:6]]
+            phrases = [q["phrase"] for q in quadgrams[:10]]
             lines.append(f'  • Competitor 4-word phrases — include these EXACT phrases verbatim in paragraph text (do NOT paraphrase): {", ".join(phrases)}')
 
     # ── SERP SIGNAL COVERAGE — deterministic engine (15% of composite) ────────
@@ -3803,6 +3803,7 @@ class GeneratePageRequest(BaseModel):
     phone: Optional[str] = None
     website: Optional[str] = None
     hours: Optional[str] = None
+    gbp_description: Optional[str] = None
     differentiators: Optional[List[dict]] = None
     icp_type: Optional[str] = None
     brand_voice: Optional[dict] = None
@@ -3942,13 +3943,20 @@ async def generate_page(request: Request, body: GeneratePageRequest):
             client=client,
         )
 
+        gbp_description_text = (
+            f"GBP Description: {body.gbp_description}"
+            if body.gbp_description else
+            "GBP Description: Not provided"
+        )
+
         user_prompt = f"""BUSINESS DATA
 Name: {body.business_name}
 Category: {body.gbp_category}
 Address: {body.address}
 Phone: {body.phone or "Not provided — use [PHONE] as placeholder"}
-Website: {body.website or ""}
+Website: {body.website or "Not provided"}
 Hours: {body.hours or "Not provided"}
+{gbp_description_text}
 Primary keyword: {body.keyword}
 Target city: {city}
 Full location: {body.location}
@@ -4014,66 +4022,22 @@ ICP: {icp}
         else:
             schema_json = after_html
 
-        # ── Auto-retry: score inline and reoptimize up to 5 total passes if < 90 ──
-        current_html   = content_html
-        current_schema = schema_json
-        current_title  = page_title
-        MAX_AUTO_PASSES = 4
-
+        # ── Score the generated page (single pass — no retry loop) ──────────────
+        # The generation prompt is designed to hit 100/100 in one pass when all
+        # business data is present. If the score is below 100, the content_gaps
+        # report tells the user exactly what data is missing and what to add.
         await q.put({"step": "progress", "progress": 78, "message": "Scoring your page…"})
+        inline_score = None
         try:
-            inline_score, inline_defs, _, score_tok = await _score_html_inline(
-                current_html, body.keyword, body.location, body.business_name,
+            inline_score, _, _, score_tok = await _score_html_inline(
+                content_html, body.keyword, body.location, body.business_name,
                 body.gbp_category, body.address, serp_analysis_dict, client,
             )
             token_rec["input_tokens"]  += score_tok["input_tokens"]
             token_rec["output_tokens"] += score_tok["output_tokens"]
             token_rec["cost_usd"]       = round(token_rec["cost_usd"] + score_tok["cost_usd"], 6)
-
-            for pass_num in range(2, MAX_AUTO_PASSES + 1):
-                if inline_score >= 90:
-                    break
-                pct = min(92, 78 + pass_num * 3)
-                await q.put({
-                    "step": "progress",
-                    "progress": pct,
-                    "message": f"Score {inline_score}/100 — optimizing (pass {pass_num} of {MAX_AUTO_PASSES})…",
-                })
-                try:
-                    new_html, new_schema, new_title, reopt_tok = await _reoptimize_html_inline(
-                        current_html, body.keyword, body.location, city,
-                        body.business_name, body.gbp_category, body.address, body.phone,
-                        inline_defs, serp_analysis_dict, seo_checklist, client,
-                    )
-                    token_rec["input_tokens"]  += reopt_tok["input_tokens"]
-                    token_rec["output_tokens"] += reopt_tok["output_tokens"]
-                    token_rec["cost_usd"]       = round(token_rec["cost_usd"] + reopt_tok["cost_usd"], 6)
-                    current_html   = new_html
-                    current_schema = new_schema if new_schema is not None else current_schema
-                    if new_title:
-                        current_title = new_title
-                except Exception as _re:
-                    logger.warning(f"generate-page auto-retry pass {pass_num} reoptimize failed: {_re}")
-                    break
-
-                try:
-                    inline_score, inline_defs, _, score_tok = await _score_html_inline(
-                        current_html, body.keyword, body.location, body.business_name,
-                        body.gbp_category, body.address, serp_analysis_dict, client,
-                    )
-                    token_rec["input_tokens"]  += score_tok["input_tokens"]
-                    token_rec["output_tokens"] += score_tok["output_tokens"]
-                    token_rec["cost_usd"]       = round(token_rec["cost_usd"] + score_tok["cost_usd"], 6)
-                except Exception as _se:
-                    logger.warning(f"generate-page auto-retry pass {pass_num} score failed: {_se}")
-                    break
-
         except Exception as _ae:
-            logger.warning(f"generate-page: auto-retry loop failed: {_ae}")
-
-        content_html = current_html
-        schema_json  = current_schema
-        page_title   = current_title
+            logger.warning(f"generate-page: scoring failed: {_ae}")
 
         # Build combined cost breakdown
         ac = (serp_analysis_dict or {}).get("analysis_cost", {})
