@@ -2305,20 +2305,31 @@ def _compute_serp_signal_coverage(page_html: str, serp_analysis: Optional[dict])
 
     kw_score = (sum(zone_scores) / len(zone_scores) * 100) if zone_scores else 50.0
 
-    # ── 2. Google NLP entity coverage  (30% of engine score) ────────────────────
-    top_entities = sorted(entities, key=lambda e: e.get("page_spread", 0), reverse=True)[:10]
+    # ── 2. Google NLP entity coverage per zone  (50% of engine score) ──────────
+    top_entities = sorted(entities, key=lambda e: e.get("page_spread", 0), reverse=True)[:15]
+    ent_zone_scores: list[float] = []
     if top_entities:
-        found_ents   = [e["name"] for e in top_entities if e["name"].lower() in page_text_lower]
-        missing_ents = [e["name"] for e in top_entities if e["name"].lower() not in page_text_lower]
-        ent_score = (len(found_ents) / len(top_entities)) * 100
-        if missing_ents:
-            issues.append(
-                f"Missing {len(missing_ents)}/{len(top_entities)} top Google NLP entities: "
-                f"{', '.join(missing_ents[:6])}"
-            )
-            recommendations.append(
-                f"Incorporate these entities naturally: {', '.join(missing_ents[:6])}"
-            )
+        for zone_key in ("title", "h1", "h2_h3", "paragraphs"):
+            entity_target = zt.get(zone_key, {}).get("entity_target", 0)
+            if not entity_target:
+                continue
+            zone_text = zones[zone_key]
+            found_ents   = [e["name"] for e in top_entities if e["name"].lower() in zone_text]
+            missing_ents = [e["name"] for e in top_entities if e["name"].lower() not in zone_text]
+            coverage = min(len(found_ents) / max(entity_target, 1), 1.0)
+            ent_zone_scores.append(coverage)
+            gap = max(0, entity_target - len(found_ents))
+            if gap > 0 and missing_ents:
+                zlabel = zone_label_map[zone_key]
+                issues.append(
+                    f"{zlabel.capitalize()}: {len(found_ents)}/{entity_target} entity targets met — "
+                    f"missing: {', '.join(missing_ents[:5])}"
+                )
+                recommendations.append(
+                    f"Add {gap} more {'entity' if gap == 1 else 'entities'} to {zlabel}: "
+                    f"{', '.join(missing_ents[:5])}"
+                )
+        ent_score = (sum(ent_zone_scores) / len(ent_zone_scores) * 100) if ent_zone_scores else 75.0
     else:
         ent_score = 75.0
 
