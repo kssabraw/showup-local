@@ -340,7 +340,7 @@ export default function GeneratedPageView({
     }
   };
 
-  const wordCount = contentHtml
+  const wordCount = (contentHtml ?? "")
     .replace(/<[^>]+>/g, " ")
     .split(/\s+/)
     .filter(Boolean).length;

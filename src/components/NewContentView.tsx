@@ -439,11 +439,21 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
               { onConflict: "business_id,keyword,location" },
             );
           }
+          if (!genData.content_html) {
+            setError("Generation returned empty content. Your credits have been refunded. Please try again.");
+            setCheckState({ status: "not_found" });
+            await supabase.rpc("refund_failed_generation", {
+              p_amount: 2, p_endpoint: "/generate-page", p_business_id: selectedBusinessId,
+            });
+            invalidateCredits();
+            setView({ kind: "form" });
+            return;
+          }
           setView({
             kind: "generated",
             mode: "generate",
             contentHtml: genData.content_html,
-            schemaJson: genData.schema_json,
+            schemaJson: genData.schema_json ?? "",
             pageTitle: genData.page_title ?? "",
             tokenUsage: genData.token_usage,
             costBreakdown: genData.cost_breakdown ?? {},
@@ -454,11 +464,14 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           return;
         }
       }
-      // Stream ended without done event — refund
+      // Stream ended without done event — refund and show error
       await supabase.rpc("refund_failed_generation", {
         p_amount: 2, p_endpoint: "/generate-page", p_business_id: selectedBusinessId,
       });
       invalidateCredits();
+      setError("Generation failed — the service may be temporarily unavailable. Your credits have been refunded. Please try again.");
+      setCheckState({ status: "not_found" });
+      setView({ kind: "form" });
     } catch (e: any) {
       if ((e as Error).name === "AbortError") { setView({ kind: "form" }); setCheckState({ status: "idle" }); return; }
       if (e instanceof InsufficientCreditsError) { setShowCreditModal(true); setCheckState({ status: "idle" }); setView({ kind: "form" }); return; }

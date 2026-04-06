@@ -345,17 +345,6 @@ export const nlp = {
     gbp_embed_html: string | null;
     token_usage: Record<string, unknown>;
   }>("/generate-press-release", body, signal),
-
-  checkRankability: (
-    body: { keyword: string; location: string; gbp_category: string },
-    signal?: AbortSignal,
-  ) => nlpPost<{
-    verdict: string;
-    match_count: number;
-    total_results: number;
-    ranking_categories: { category: string; count: number }[];
-    message: string;
-  }>("/check-rankability", body, signal),
 };
 
 /** Purchase a credit top-up pack. Returns a Stripe Checkout URL once Stripe is configured. */
