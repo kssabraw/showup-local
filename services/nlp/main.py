@@ -2705,6 +2705,238 @@ def _reopt_serp_context(page_zones: dict, serp_analysis: Optional[dict]) -> str:
 
     return "\n".join(parts)
 
+
+# ── Strategy-3 SEO checklist ──────────────────────────────────────────────────
+
+def _detect_icp_from_keyword(keyword: str) -> tuple[str, str, str]:
+    """Returns (icp_label, tone_instruction, cta_instruction) based on keyword modifiers."""
+    kw = keyword.lower()
+    if any(w in kw for w in ["emergency", "urgent", "24/7", "same day", "same-day", "asap", "immediate"]):
+        return (
+            "Emergency Homeowner (fear/urgency-driven)",
+            "urgency and reassurance — they are stressed and need immediate help",
+            '"Call now — we\'re available 24/7" / "Available right now" / "Don\'t wait — call us"',
+        )
+    if any(w in kw for w in ["commercial", "business", "office", "property", "hoa", "industrial"]):
+        return (
+            "Commercial Client (B2B, professional)",
+            "professional and businesslike — emphasise reliability, insurance, minimal disruption",
+            '"Request a commercial quote" / "Schedule a site assessment"',
+        )
+    if any(w in kw for w in ["cheap", "affordable", "budget", "low cost", "low-cost", "inexpensive"]):
+        return (
+            "Budget-Conscious Homeowner",
+            "transparent and value-focused — lead with pricing clarity and no hidden fees",
+            '"Get a free, no-obligation estimate"',
+        )
+    return (
+        "General Homeowner (professional/reliable)",
+        "confident and trustworthy — emphasise expertise, safety, and quality",
+        '"Get a free estimate" / "Call for a quote"',
+    )
+
+
+async def _fetch_zip_codes_for_city(city: str, state: str, address: Optional[str], client) -> str:
+    """Return a comma-separated list of ZIP codes for the city via a tiny Haiku call."""
+    # Try extracting from address first
+    zip_from_addr = None
+    if address:
+        m = re.search(r'\b(\d{5})\b', address)
+        if m:
+            zip_from_addr = m.group(1)
+
+    location_str = f"{city}, {state}".strip(", ") or city
+    try:
+        msg = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=80,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"List 6 real ZIP codes that serve {location_str}. "
+                    "Return ONLY a comma-separated list of 5-digit ZIP codes, nothing else."
+                ),
+            }],
+        )
+        raw = msg.content[0].text.strip()
+        zips = [z.strip() for z in raw.replace("\n", ",").split(",") if re.match(r'^\d{5}$', z.strip())]
+        if zip_from_addr and zip_from_addr not in zips:
+            zips = [zip_from_addr] + zips
+        return ", ".join(zips[:6]) if zips else (zip_from_addr or f"local ZIP codes for {city}")
+    except Exception:
+        return zip_from_addr or f"local ZIP codes for {city}"
+
+
+async def _build_seo_checklist(
+    keyword: str,
+    location: str,
+    address: Optional[str],
+    phone: Optional[str],
+    gbp_category: str,
+    serp_analysis: Optional[dict],
+    client,   # Anthropic client — used for ZIP lookup
+) -> str:
+    """
+    Build a concrete, data-driven SEO checklist from scoring rubric + SERP data + business data.
+    Maps every engine requirement to specific values so Claude knows exactly what to produce.
+    """
+    city = location.split(",")[0].strip()
+    state_parts = location.split(",")
+    state = state_parts[1].strip() if len(state_parts) > 1 else ""
+
+    icp_label, icp_tone, icp_cta = _detect_icp_from_keyword(keyword)
+    is_emergency = "Emergency" in icp_label
+
+    # ── Geo entities from SERP ───────────────────────────────────────────────
+    geo_names: list[str] = []
+    if serp_analysis:
+        for e in serp_analysis.get("google_entities", []):
+            if e.get("entity_type") in ("LOCATION", "OTHER") and e.get("page_spread", 0) >= 3:
+                name = e["name"]
+                if name.lower() != city.lower() and len(name) > 2:
+                    geo_names.append(name)
+            if len(geo_names) >= 6:
+                break
+
+    # ── ZIP codes ────────────────────────────────────────────────────────────
+    zip_codes = await _fetch_zip_codes_for_city(city, state, address, client)
+
+    # ── Street reference from address ────────────────────────────────────────
+    street_ref = ""
+    if address:
+        street_ref = address.split(",")[0].strip()
+
+    # ── FAQ question suggestions from competitor headings ────────────────────
+    faq_suggestions: list[str] = []
+    if serp_analysis:
+        for h in serp_analysis.get("competitor_headings", []):
+            text = h.get("text", "")
+            if "?" in text or any(text.lower().startswith(w) for w in
+                                  ["how", "what", "when", "where", "why", "do ", "can ", "is ", "are ", "will "]):
+                faq_suggestions.append(f'"{text}"')
+            if len(faq_suggestions) >= 4:
+                break
+
+    # ── Build checklist ──────────────────────────────────────────────────────
+    lines = [
+        "━" * 60,
+        "SEO SCORING CHECKLIST — satisfy ALL items below to score 90+.",
+        "These are derived from the exact rubric used to grade your page.",
+        "━" * 60,
+        "",
+        "【KEYWORD PLACEMENT — organic_ranking 20%】",
+        f'  • <title> tag: must contain "{keyword}" and "{city}"',
+        f'  • <h1>: must contain "{keyword}"',
+        f'  • Opening paragraph: mention "{keyword}" within the first 2 sentences',
+        f'  • Page tone: transactional/service (NOT informational or blog-style)',
+        f'  • CTA and {phone or "phone number"} visible without scrolling',
+        "",
+        "【GBP / LOCAL SIGNALS — gbp_maps 25%】",
+        f'  • Exact city name "{city}" in title, H1, and opening paragraph',
+        f'  • Reference GBP category: "{gbp_category}"',
+        f'  • Business name + service type + "{city}" must co-occur in ≥3 separate sections',
+    ]
+
+    if phone:
+        lines.append(f'  • NAP: include phone {phone} in the page')
+    if address:
+        lines.append(f'  • NAP: include address "{address}"')
+
+    lines += [
+        "",
+        "【GEOGRAPHIC LEGITIMACY — geographic_legitimacy 10%】",
+        f'  • "{city}" must appear in title, H1, and opening paragraph',
+    ]
+    if geo_names:
+        lines.append(f'  • Neighborhoods/areas to mention in sentence context (use ≥2): {", ".join(geo_names)}')
+    else:
+        lines.append(f'  • Include ≥2 neighborhood or district references near {city} in sentence context')
+    lines += [
+        f'  • ZIP codes — embed ≥3 of these in visible body text: {zip_codes}',
+        f'  • Include ≥1 local landmark, street name, or recognizable reference near {city}',
+        f'  • Geo signals must appear across ≥3 separate page sections (not all bunched together)',
+    ]
+    if street_ref:
+        lines.append(f'  • Street reference available from business address: "{street_ref}"')
+
+    lines += [
+        "",
+        "【NEAR-ME INTENT — nearme_intent 10%】",
+    ]
+    if phone:
+        lines.append(f'  • {phone} must appear ABOVE THE FOLD (in the hero/header section)')
+    if is_emergency:
+        lines.append('  • Opening block must include availability language: "available 24/7", "emergency response", or "same-day service"')
+        lines.append('  • State explicit response time: e.g. "arrive within 2 hours", "on-site within 60 minutes"')
+    else:
+        lines.append('  • Include availability/responsiveness language near the top of the page')
+        lines.append('  • Mention a service timeframe (e.g. "same-week appointments", "respond within 24 hours")')
+    lines += [
+        '  • Include ≥2 blocks combining: [neighborhood name] + [service] + [availability signal]',
+        '  • Include ≥2 FAQ entries on coverage area, response time, or service availability (proximity FAQs)',
+    ]
+    if street_ref:
+        lines.append(f'  • Include street-level reference: "{street_ref}" or nearby street names')
+
+    lines += [
+        "",
+        "【AEO / LLM RETRIEVAL STRUCTURE — aeo_llm_retrieval 10%】",
+        '  • Answer-first format: lead every section with the direct claim or answer BEFORE the explanation',
+        '  • FAQ section: ≥4 entries; each entry must OPEN with a direct yes/no or factual statement',
+        '  • ≥2 of those FAQ entries must be proximity FAQs (coverage area, response time, emergency availability)',
+    ]
+    if faq_suggestions:
+        lines.append(f'  • Suggested FAQ questions from top-ranking competitors: {", ".join(faq_suggestions)}')
+    lines += [
+        '  • ≥1 bulleted list with outcome-first bullets (benefit or result stated first)',
+        '  • ≥1 numbered list for a process, steps, or how-it-works section',
+        '  • Each content section ≤300 words — split longer topics into multiple H2 subsections',
+        '  • Use question-format H3s where the content is naturally Q&A',
+        '  • Include specific operational facts: named places, response times, certifications, service counts',
+    ]
+
+    lines += [
+        "",
+        f'【ICP ALIGNMENT — icp_alignment 10%】',
+        f'  • Detected ICP: {icp_label}',
+        f'  • Tone: {icp_tone}',
+        f'  • Primary CTA must match ICP intent: {icp_cta}',
+        f'  • Address the ICP\'s primary pain point directly in the first 2 sections',
+    ]
+
+    # ── SERP keyword + entity targets (entity_establishment 15%) ────────────
+    if serp_analysis:
+        rk = serp_analysis.get("related_keywords", {})
+        zt = serp_analysis.get("zone_targets", {})
+        entities = serp_analysis.get("google_entities", [])
+        quadgrams = serp_analysis.get("top_quadgrams", [])
+
+        lines.append("")
+        lines.append("【KEYWORD & ENTITY TARGETS — entity_establishment 15%】")
+        for zone_key, zone_label in [
+            ("title",      "Title tag"),
+            ("h1",         "H1 heading"),
+            ("h2_h3",      "H2/H3 subheadings"),
+            ("paragraphs", "Paragraph text"),
+        ]:
+            terms = [t["term"] for t in rk.get(zone_key, [])[:8]]
+            target = zt.get(zone_key, {}).get("target", 0)
+            if terms and target:
+                lines.append(f'  • {zone_label}: include ≥{target} of: {", ".join(terms)}')
+
+        if entities:
+            top_ents = [e["name"] for e in sorted(entities, key=lambda e: e["page_spread"], reverse=True)[:8]]
+            lines.append(f'  • Named entities to weave in (Google NLP — these establish topical authority): {", ".join(top_ents)}')
+            lines.append(f'  • Business name + service + city must co-occur in ≥3 sections')
+
+        if quadgrams:
+            phrases = [q["phrase"] for q in quadgrams[:6]]
+            lines.append(f'  • Competitor 4-word phrases to use naturally in paragraphs: {", ".join(phrases)}')
+
+    lines += ["", "━" * 60]
+    return "\n".join(lines)
+
+
 class FindPageRequest(BaseModel):
     website_url: str
     keyword: str
@@ -3247,6 +3479,17 @@ async def generate_page(request: Request, body: GeneratePageRequest):
                         lines.append(f"    Trust signals: {'; '.join(pain[:2])}")
                 icp_text = "\n".join(lines)
 
+        await q.put({"step": "progress", "progress": 60, "message": "Building SEO checklist…"})
+        seo_checklist = await _build_seo_checklist(
+            keyword=body.keyword,
+            location=body.location,
+            address=body.address,
+            phone=body.phone,
+            gbp_category=body.gbp_category,
+            serp_analysis=serp_analysis_dict,
+            client=client,
+        )
+
         user_prompt = f"""BUSINESS DATA
 Name: {body.business_name}
 Category: {body.gbp_category}
@@ -3263,7 +3506,9 @@ ICP: {icp}
 {icp_text}
 {diff_text}
 {reviews_text}
-{serp_ctx}"""
+{serp_ctx}
+
+{seo_checklist}"""
 
         await q.put({"step": "progress", "progress": 65, "message": "Generating your page…"})
 
@@ -3384,6 +3629,17 @@ async def reoptimize_page(request: Request, body: ReoptimizePageRequest):
         page_zones = _parse_page_zones(existing_html)
         serp_ctx = _reopt_serp_context(page_zones, body.serp_analysis)
 
+        await q.put({"step": "progress", "progress": 25, "message": "Building SEO checklist…"})
+        seo_checklist = await _build_seo_checklist(
+            keyword=body.keyword,
+            location=body.location,
+            address=body.address,
+            phone=body.phone,
+            gbp_category=body.gbp_category,
+            serp_analysis=body.serp_analysis,
+            client=client,
+        )
+
         deficiency_text = "\n".join(
             f"  Engine: {d['engine']} (score: {d['score']}/100)\n"
             f"  Issues: {'; '.join(d.get('issues', []))}\n"
@@ -3396,6 +3652,8 @@ KEYWORD: {body.keyword} | CITY: {city}
 PHONE: {body.phone or "[PHONE]"}
 ADDRESS: {body.address or "Not provided"}
 {serp_ctx}
+
+{seo_checklist}
 
 SEO DEFICIENCIES TO FIX (these must all be addressed in the rewrite):
 {deficiency_text}
