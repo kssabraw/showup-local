@@ -2051,11 +2051,11 @@ optimised for Answer Engine Optimisation. Follow all of them in every section.
     - Section 10 (Local): full geo block (neighborhoods, landmark, ZIPs, coverage, response time)
     - Section 12 (FAQ): ≥2 answers reference a specific city or neighborhood
 
-12. RESPONSE TIME — ALWAYS SPECIFIC: Never write "quickly", "promptly", "fast response", or
-    "soon". Every response time claim must include a specific number:
-    ✗ "We respond quickly."         → ✓ "We arrive within 2–4 hours."
-    ✗ "Same-day service available." → ✓ "Same-day appointments available — book by 2pm."
-    Include at least one explicit response time in Section 1 and at least two in Section 12 FAQ answers.
+12. RESPONSE TIME — SPECIFIC IF DATA IS AVAILABLE: If response time or availability data is
+    present in the business data (GBP description, hours, or reviews), state it specifically
+    (e.g. "arrive within 2 hours", "available 24/7"). If no such data is provided, use
+    availability language like "same-day service", "call us anytime", or "available now" —
+    do NOT invent specific timeframes that aren't in the business data.
 
 13. PHONE NUMBER PLACEMENT: The phone number must appear in Section 1 (intro paragraph).
     This ensures it is visible above the fold. It must also appear in Sections 4, 8, and 11.
@@ -2096,7 +2096,7 @@ Section 1 — Intro / Direct Answer Block (100–150 words)
 <section id="intro">
   <h1>[Exact Match Keyword] + [1–2 entities that reinforce location or service scope]</h1>
   H1 FORMULA: Write the primary keyword verbatim, then append relevant entities naturally (e.g. "Emergency Plumber Anaheim — Serving Anaheim Hills, Yorba Linda & Orange County")
-  <p>[Brand] provides [service] to [city] — [primary differentiator stated in first sentence]. [Availability signal with specific timeframe, e.g. "available 24/7 with crews on-site within 2 hours".] [Phone number as a CTA, e.g. "Call [phone] now".] [Close with direct service claim + city + 1 neighborhood.]</p>
+  <p>[Brand] provides [service] to [city] — [primary differentiator stated in first sentence]. [Availability signal — use a specific timeframe if the business data provides one, otherwise use availability language like "available 24/7", "same-day service", or "call us anytime".] [Phone number as a CTA, e.g. "Call [phone] now".] [Close with direct service claim + city + 1 neighborhood.]</p>
   NOTE: Phone number MUST appear in this paragraph. This section must mention city + ≥1 neighborhood.
 </section>
 
@@ -2176,9 +2176,9 @@ Section 12 — FAQ (min 4, max 7 entries — 40–80 words each)
     Q: "Do you serve [specific neighborhood or city]?"
     A: "Yes, [Brand] serves [neighborhood] with [specific availability/response time, e.g. 'same-day service' or '24/7 emergency response']."
     Q: "How quickly can you respond to [city/neighborhood]?"
-    A: "[Specific timeframe] — e.g. 'Crews arrive within 2 hours in Anaheim and surrounding areas.'"
-  REQUIRED TOPICS (spread remaining entries across): availability, response time, coverage area, emergency service, pricing, process.
-  Each answer must include a specific fact (time, place, number) — no vague claims.
+    A: "[Use a specific timeframe if provided in business data, otherwise use availability language — e.g. 'We serve Anaheim with same-day availability — call us to schedule.']"
+  REQUIRED TOPICS (spread remaining entries across): availability, coverage area, emergency service, pricing, process.
+  Each answer must include a specific fact (place, service detail, or availability signal) — avoid vague filler.
 </section>
 
 Section 13 — Schema (delivered AFTER </article> as a separate <script> block)
@@ -2197,7 +2197,7 @@ HARD RULES — NEVER:
 - Fabricate reviews
 - Use vague differentiators ("trusted", "professional", "high quality") without a mechanism
 - Invent or guess phone numbers, addresses, hours, zip codes, street names, or landmarks not explicitly provided in the business data
-- Use vague response language ("quickly", "promptly", "fast", "soon") — always use a specific timeframe
+- Use vague filler words ("quickly", "promptly", "fast", "soon") with no supporting detail — replace with specific availability language or omit
 - Ignore the GBP_CATEGORY provided in the SEO checklist — the exact category label must appear naturally in title, H1, and ≥2 body sections
 
 FACTUAL ACCURACY — CRITICAL
@@ -2309,7 +2309,7 @@ SCORING CRITERIA — score each engine 0–100:
 
 6. geographic_legitimacy (weight 10%): city in title+H1+opening ¶; ≥2 neighborhood references in sentence context; ≥1 landmark reference; ≥3 zip codes in visible content; geo signals in ≥3 page sections.
 
-7. nearme_intent (weight 10%): phone above fold; availability language in opening block ("available now", "same-day", "emergency response"); response time stated explicitly (e.g. "arrive within 2 hours", "respond in 15 minutes"); ≥2 neighborhood+service+availability blocks; ≥1 street reference; ≥2 proximity FAQs (availability/response/coverage/emergency).
+7. nearme_intent (weight 10%): phone above fold; availability language in opening block ("available now", "same-day", "emergency response", "call us anytime"); if a specific response time is present in the business data reward it, but do NOT penalise its absence — availability language is sufficient; ≥2 neighborhood+service+availability blocks; ≥1 street reference; ≥2 proximity FAQs (availability/coverage/emergency).
 
 Return ONLY valid JSON — no markdown, no explanation:
 {
@@ -3235,7 +3235,7 @@ async def _build_seo_checklist(
         lines.append(f'  • {phone} must appear ABOVE THE FOLD (in the hero/header section)')
     if is_emergency:
         lines.append('  • Opening block must include availability language: "available 24/7", "emergency response", or "same-day service"')
-        lines.append('  • State explicit response time: e.g. "arrive within 2 hours", "on-site within 60 minutes"')
+        lines.append('  • If the business data includes a specific response time, state it explicitly; otherwise use strong availability language ("available 24/7", "call now — we respond fast") — do NOT invent a timeframe')
     else:
         lines.append('  • Include availability/responsiveness language near the top of the page')
         lines.append('  • Mention a service timeframe (e.g. "same-week appointments", "respond within 24 hours")')
