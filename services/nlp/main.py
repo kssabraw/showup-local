@@ -3226,7 +3226,7 @@ async def _build_seo_checklist(
         "",
         "【AEO / LLM RETRIEVAL STRUCTURE — aeo_llm_retrieval 20% ★ HIGHEST WEIGHT】",
         '  • Answer-first format: lead every section with the direct claim or answer BEFORE the explanation',
-        '  • FAQ section: ≥4 entries; each entry must OPEN with a direct yes/no or factual statement',
+        '  • FAQ section: ≥6 entries; each entry must OPEN with a direct yes/no or factual statement',
         '  • ≥2 of those FAQ entries must be proximity FAQs (coverage area, response time, emergency availability)',
     ]
     if faq_suggestions:
