@@ -531,6 +531,8 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             content_html: genData.content_html,
             schema_json: genData.schema_json ?? null,
             content_gaps: genData.content_gaps ?? [],
+            composite_score: genData.composite_score ?? null,
+            scored_at: genData.composite_score != null ? new Date().toISOString() : null,
           });
           if (saveError) {
             console.error("bulk create: failed to save page for keyword", kw, saveError);

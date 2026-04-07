@@ -112,6 +112,7 @@ export interface GeneratePageResult {
   content_html: string;
   schema_json: string;
   page_title: string;
+  composite_score?: number | null;
   token_usage: TokenUsage;
   cost_breakdown: CostBreakdown;
   serp_analysis?: AnalysisResult;
