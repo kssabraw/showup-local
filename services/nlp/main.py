@@ -4026,63 +4026,22 @@ ICP: {icp}
         else:
             schema_json = after_html
 
-        # ── Auto-retry: score inline and reoptimize up to MAX_AUTO_PASSES if < 90 ─
-        await q.put({"step": "progress", "progress": 78, "message": "Scoring your page…"})
+        # ── Score the generated page (single pass) ───────────────────────────────
+        # Structural requirements (keywords, entities, FAQ, geo, AEO) are covered
+        # by the generation prompt. Any remaining gaps are business-data gaps that
+        # retrying cannot fix — those are reported in content_gaps instead.
+        await q.put({"step": "progress", "progress": 90, "message": "Scoring your page…"})
         inline_score = None
-        current_html   = content_html
-        current_schema = schema_json
-        current_title  = page_title
-        MAX_AUTO_PASSES = 4
         try:
-            inline_score, inline_defs, _, score_tok = await _score_html_inline(
+            inline_score, _, _, score_tok = await _score_html_inline(
                 content_html, body.keyword, body.location, body.business_name,
                 body.gbp_category, body.address, serp_analysis_dict, client,
             )
             token_rec["input_tokens"]  += score_tok["input_tokens"]
             token_rec["output_tokens"] += score_tok["output_tokens"]
             token_rec["cost_usd"]       = round(token_rec["cost_usd"] + score_tok["cost_usd"], 6)
-
-            for pass_num in range(2, MAX_AUTO_PASSES + 1):
-                if inline_score >= 90:
-                    break
-                pct = min(92, 78 + pass_num * 3)
-                await q.put({
-                    "step": "progress", "progress": pct,
-                    "message": f"Score {inline_score}/100 — optimizing (pass {pass_num} of {MAX_AUTO_PASSES})…",
-                })
-                try:
-                    new_html, new_schema, new_title, reopt_tok = await _reoptimize_html_inline(
-                        current_html, inline_defs, body.keyword, body.location,
-                        body.business_name, body.gbp_category, body.address, body.phone,
-                        serp_analysis_dict, client,
-                    )
-                    token_rec["input_tokens"]  += reopt_tok["input_tokens"]
-                    token_rec["output_tokens"] += reopt_tok["output_tokens"]
-                    token_rec["cost_usd"]       = round(token_rec["cost_usd"] + reopt_tok["cost_usd"], 6)
-                    current_html   = new_html
-                    current_schema = new_schema or current_schema
-                    current_title  = new_title or current_title
-                except Exception as _re:
-                    logger.warning(f"generate-page auto-retry pass {pass_num} reoptimize failed: {_re}")
-                    break
-                try:
-                    inline_score, inline_defs, _, score_tok = await _score_html_inline(
-                        current_html, body.keyword, body.location, body.business_name,
-                        body.gbp_category, body.address, serp_analysis_dict, client,
-                    )
-                    token_rec["input_tokens"]  += score_tok["input_tokens"]
-                    token_rec["output_tokens"] += score_tok["output_tokens"]
-                    token_rec["cost_usd"]       = round(token_rec["cost_usd"] + score_tok["cost_usd"], 6)
-                except Exception as _se:
-                    logger.warning(f"generate-page auto-retry pass {pass_num} score failed: {_se}")
-                    break
-
         except Exception as _ae:
             logger.warning(f"generate-page: scoring failed: {_ae}")
-
-        content_html = current_html
-        schema_json  = current_schema
-        page_title   = current_title
 
         # Build combined cost breakdown
         ac = (serp_analysis_dict or {}).get("analysis_cost", {})
