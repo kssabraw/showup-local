@@ -2557,6 +2557,36 @@ async def _score_html_inline(
     return composite, deficiencies, scores, token_rec
 
 
+def _extract_reopt_parts(raw: str) -> tuple:
+    """Extract (content_html, schema_json) from a reoptimized page HTML string.
+
+    Real website pages have JSON-LD in the <head>, so a simple string split at
+    '<script type="application/ld+json">' would cut off everything in <head> and
+    leave content_html as just the head HTML (which renders as nothing visible).
+    This function uses BeautifulSoup to properly extract body content and schemas.
+    """
+    from bs4 import BeautifulSoup as _BS
+    soup = _BS(raw, 'html.parser')
+
+    # Collect all JSON-LD scripts from anywhere in the doc
+    ld_scripts = soup.find_all('script', type='application/ld+json')
+    if ld_scripts:
+        schema_json = '\n'.join(str(s) for s in ld_scripts)
+        for s in ld_scripts:
+            s.decompose()
+    else:
+        schema_json = None
+
+    # Prefer body content; fall back to the full (modified) HTML
+    body = soup.find('body')
+    if body:
+        content_html = body.decode_contents().strip()
+    else:
+        content_html = str(soup).strip()
+
+    return content_html, schema_json
+
+
 async def _reoptimize_html_inline(
     existing_html: str,
     keyword: str,
@@ -2612,13 +2642,7 @@ EXISTING PAGE (use as reference — preserve accurate facts, fix everything else
     title_match = re.search(r'<title>(.*?)</title>', raw, re.IGNORECASE | re.DOTALL)
     page_title = title_match.group(1).strip() if title_match else ""
 
-    schema_split = raw.find('<script type="application/ld+json">')
-    if schema_split != -1:
-        content_html = raw[:schema_split].strip()
-        schema_json = raw[schema_split:].strip()
-    else:
-        content_html = raw
-        schema_json = None
+    content_html, schema_json = _extract_reopt_parts(raw)
 
     return content_html, schema_json, page_title, token_rec
 
@@ -4220,14 +4244,8 @@ EXISTING PAGE (use as reference — preserve accurate facts, fix everything else
         title_match = re.search(r'<title>(.*?)</title>', raw, re.IGNORECASE | re.DOTALL)
         page_title = title_match.group(1).strip() if title_match else ""
 
-        # Split schema from content
-        schema_split = raw.find('<script type="application/ld+json">')
-        if schema_split != -1:
-            content_html = raw[:schema_split].strip()
-            schema_json = raw[schema_split:].strip()
-        else:
-            content_html = raw
-            schema_json = None
+        # Extract body content and JSON-LD schemas (handles schemas in <head>)
+        content_html, schema_json = _extract_reopt_parts(raw)
 
         # ── Auto-retry: score inline and reoptimize up to 5 total passes if < 90 ──
         current_html   = content_html
