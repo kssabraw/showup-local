@@ -3326,14 +3326,35 @@ async def _build_seo_checklist(
     is_emergency = "Emergency" in icp_label
 
     # ── Geo entities from SERP ───────────────────────────────────────────────
+    # Extract LOCATION-type entities found across competitor pages — these are
+    # real, verified local areas (neighborhoods, districts, nearby cities) that
+    # top-ranking pages reference. More reliable than Claude's training knowledge.
     geo_names: list[str] = []
     if serp_analysis:
-        for e in serp_analysis.get("google_entities", []):
-            if e.get("entity_type") in ("LOCATION", "OTHER") and e.get("page_spread", 0) >= 3:
-                name = e["name"]
-                if name.lower() != city.lower() and len(name) > 2:
-                    geo_names.append(name)
-            if len(geo_names) >= 6:
+        state_lower = (state or "").lower()
+        country_terms = {"united states", "us", "usa", "california", "texas", "florida", "new york",
+                         "illinois", "ohio", "georgia", "north carolina", "michigan", "new jersey",
+                         "virginia", "washington", "arizona", "massachusetts", "tennessee", "indiana",
+                         "missouri", "maryland", "wisconsin", "colorado", "minnesota", "south carolina",
+                         "alabama", "louisiana", "kentucky", "oregon", "connecticut", "utah", "iowa",
+                         "nevada", "arkansas", "mississippi", "kansas", "new mexico", "nebraska",
+                         "idaho", "west virginia", "hawaii", "new hampshire", "maine", "montana",
+                         "rhode island", "delaware", "south dakota", "north dakota", "alaska",
+                         "vermont", "wyoming", state_lower}
+        for e in sorted(serp_analysis.get("google_entities", []),
+                        key=lambda x: (-x.get("page_spread", 0), -x.get("mean_salience", 0))):
+            if e.get("entity_type") != "LOCATION":
+                continue
+            name = e["name"].strip()
+            name_lower = name.lower()
+            # Skip the target city itself, state, country-level terms, and very short strings
+            if name_lower == city.lower() or name_lower in country_terms or len(name) < 3:
+                continue
+            # Skip strings that are just numbers (ZIP codes handled separately)
+            if name.isdigit():
+                continue
+            geo_names.append(name)
+            if len(geo_names) >= 15:
                 break
 
     # ── ZIP codes ────────────────────────────────────────────────────────────
@@ -4206,6 +4227,15 @@ async def generate_page(request: Request, body: GeneratePageRequest):
                     )
             except Exception as _we:
                 logger.info(f"generate-page: website scrape skipped for {body.website}: {_we}")
+
+        # If scraping yielded nothing, tell Claude explicitly so it can surface
+        # certifications/credentials as a content gap rather than silently omitting them
+        if body.website and not website_text:
+            website_text = (
+                f"BUSINESS WEBSITE NOTE: The website ({body.website}) could not be scraped "
+                f"(JS-rendered or blocked). Certifications, license numbers, and credentials "
+                f"were NOT available from the website — flag these as content gaps."
+            )
 
         await q.put({"step": "progress", "progress": 60, "message": "Building SEO checklist…"})
         seo_checklist = await _build_seo_checklist(

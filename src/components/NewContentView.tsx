@@ -1235,6 +1235,22 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
               <FilePlus className="w-3.5 h-3.5 mt-0.5 shrink-0" />
               <span>No existing page found for <span className="font-medium">"{keyword}"</span> on {selectedBusiness?.website} — creating a new page is recommended.</span>
             </div>
+            {/* Missing GBP data warnings */}
+            {selectedBusiness && (() => {
+              const missing = [];
+              if (!selectedBusiness.hours) missing.push("business hours");
+              if (!selectedBusiness.reviews || (Array.isArray(selectedBusiness.reviews) && (selectedBusiness.reviews as any[]).length === 0)) missing.push("customer reviews");
+              if (missing.length === 0) return null;
+              return (
+                <div className="flex items-start gap-2 px-3 py-2.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs text-amber-700">
+                  <span className="mt-0.5 shrink-0">⚠</span>
+                  <span>
+                    Missing <span className="font-medium">{missing.join(" and ")}</span> — go to the business profile and click <span className="font-medium">Update</span> to pull the latest data from GBP before generating.
+                  </span>
+                </div>
+              );
+            })()}
+
             <Button
               className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
               onClick={handleCreateNewPage}
