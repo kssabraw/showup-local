@@ -29,6 +29,7 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
   const [analyzingIds, setAnalyzingIds] = useState<Set<string>>(new Set());
+  const [refreshingIds, setRefreshingIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     fetchBusinesses();
@@ -150,6 +151,47 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
     }
   };
 
+  const handleRefreshGBP = async (e: React.MouseEvent, b: BusinessProfile) => {
+    e.stopPropagation();
+    if (refreshingIds.has(b.id)) return;
+    setRefreshingIds((prev) => new Set(prev).add(b.id));
+    try {
+      const { data, error } = await supabase.functions.invoke("google-places", {
+        body: { action: "details", place_id: b.gbp_place_id },
+      });
+      if (error) throw new Error(error.message || "Edge function error");
+      if (!data?.details) throw new Error(data?.error || "No details returned from GBP");
+      const d = data.details;
+      const updates = {
+        business_name: d.name || b.business_name,
+        description: d.description || b.description,
+        address: d.address || b.address,
+        phone: d.phone || b.phone,
+        website: d.website || b.website,
+        logo: d.logo || b.logo,
+        photo: d.photo || b.photo,
+        gbp_category: d.category || b.gbp_category,
+        gbp_categories: d.categories ?? b.gbp_categories,
+        gbp_rating: d.rating ?? b.gbp_rating,
+        gbp_review_count: d.review_count ?? b.gbp_review_count,
+        google_maps_uri: d.google_maps_uri || b.google_maps_uri,
+        hours: d.hours ?? null,
+        reviews: d.reviews ?? null,
+        analysis_status: null, // clear failed status
+      };
+      await supabase.from("business_profiles").update(updates).eq("id", b.id);
+      setBusinesses((prev) => prev.map((x) => x.id === b.id ? { ...x, ...updates } : x));
+    } catch (err) {
+      console.error("GBP refresh error:", err);
+    } finally {
+      setRefreshingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(b.id);
+        return next;
+      });
+    }
+  };
+
   const confirmBusiness = businesses.find((b) => b.id === confirmId);
 
   if (loading) {
@@ -256,27 +298,28 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
                   const isRunning = analyzingIds.has(b.id) || b.analysis_status === "running";
                   const isDone = !isRunning && b.analysis_status === "complete";
                   const isFailed = !isRunning && b.analysis_status === "failed";
+                  const isRefreshing = refreshingIds.has(b.id);
                   return (
                     <div className="mt-3 pt-3 border-t border-border flex items-center justify-between">
                       <div className="flex items-center gap-1.5">
-                        {isRunning && <Loader2 className="w-3.5 h-3.5 text-accent animate-spin" />}
-                        {isDone && <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />}
-                        {isFailed && <AlertCircle className="w-3.5 h-3.5 text-destructive" />}
+                        {(isRunning || isRefreshing) && <Loader2 className="w-3.5 h-3.5 text-accent animate-spin" />}
+                        {isDone && !isRefreshing && <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />}
+                        {isFailed && !isRefreshing && <AlertCircle className="w-3.5 h-3.5 text-destructive" />}
                         <span className="text-[11px] text-muted-foreground">
-                          {isRunning ? "Analyzing…" : isDone ? "Analysis complete" : isFailed ? "Analysis failed" : "Not analyzed"}
+                          {isRefreshing ? "Updating from GBP…" : isRunning ? "Analyzing…" : isDone ? "Analysis complete" : isFailed ? "Analysis failed" : "Not analyzed"}
                         </span>
                       </div>
                       <button
-                        onClick={(e) => handleRunAnalysis(e, b)}
-                        disabled={isRunning}
+                        onClick={(e) => isFailed ? handleRefreshGBP(e, b) : handleRunAnalysis(e, b)}
+                        disabled={isRunning || isRefreshing}
                         className="flex items-center gap-1 text-[11px] font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
                       >
-                        {isRunning ? null : isDone || isFailed ? (
+                        {(isRunning || isRefreshing) ? null : isDone || isFailed ? (
                           <RefreshCw className="w-3 h-3" />
                         ) : (
                           <Sparkles className="w-3 h-3" />
                         )}
-                        {isRunning ? null : isDone ? "Re-run" : isFailed ? "Retry" : "Run Analysis"}
+                        {(isRunning || isRefreshing) ? null : isDone ? "Re-run" : isFailed ? "Update from GBP" : "Run Analysis"}
                       </button>
                     </div>
                   );
