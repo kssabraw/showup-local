@@ -3720,9 +3720,17 @@ class ScorePageResponse(BaseModel):
     analysis_cost: Optional[dict] = None   # cost of the inline SERP analysis
 
 
-@app.post('/score-page', response_model=ScorePageResponse, dependencies=[Depends(verify_api_key)])
+@app.post('/score-page', response_model=ScorePageResponse)
 @limiter.limit("10/minute")
 async def score_page(request: Request, body: ScorePageRequest):
+    # Dual auth: X-API-Key (proxied) OR Authorization Bearer JWT (direct)
+    api_key = request.headers.get("X-API-Key")
+    if api_key:
+        if not NLP_API_KEY or api_key != NLP_API_KEY:
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    else:
+        await _verify_jwt_get_user(request.headers.get("Authorization", ""))
+
     if not ANTHROPIC_API_KEY:
         raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
 
