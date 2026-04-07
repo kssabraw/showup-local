@@ -167,12 +167,17 @@ export default function GeneratedPageView({
       ? ({ composite_score: initialScore, composite_status: scoreStatus(initialScore) } as ScoreResult)
       : null
   );
-  const [autoScoring, setAutoScoring] = useState(initialScore == null);
+  // Auto-score only for newly generated pages (isNew=true). Saved pages already
+  // have their score stored in the DB — we show it via initialScore and never
+  // re-run scoring automatically.
+  const [autoScoring, setAutoScoring] = useState(isNew === true && initialScore == null);
   const [scoreFailed, setScoreFailed] = useState(false);
   const scoredRef = useRef(false);
 
   useEffect(() => {
-    // Skip the API call if generation already returned a score
+    // Only auto-score on newly generated pages
+    if (!isNew) return;
+    // Skip if generation already returned a score
     if (initialScore != null) return;
     if (scoredRef.current) return;
     scoredRef.current = true;

@@ -206,6 +206,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
       tokenUsage: {},
       costBreakdown: {},
       isNew: false,
+      initialScore: page.composite_score ?? null,
     });
   };
 
