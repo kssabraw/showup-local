@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, Trash2, Sparkles, RefreshCw, CheckCircle2, AlertCircle } from "lucide-react";
+import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, Trash2, Sparkles, RefreshCw, CheckCircle2, AlertCircle, Pencil, Check, X } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 
 const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
@@ -29,6 +29,9 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
   const [analyzingIds, setAnalyzingIds] = useState<Set<string>>(new Set());
+  const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
+  const [categoryDraft, setCategoryDraft] = useState("");
+  const [savingCategoryId, setSavingCategoryId] = useState<string | null>(null);
 
   useEffect(() => {
     fetchBusinesses();
@@ -150,6 +153,21 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
     }
   };
 
+  const saveCategory = async (id: string) => {
+    const trimmed = categoryDraft.trim();
+    if (!trimmed) return;
+    setSavingCategoryId(id);
+    try {
+      await supabase.from("business_profiles").update({ gbp_category: trimmed }).eq("id", id);
+      setBusinesses((prev) => prev.map((x) => x.id === id ? { ...x, gbp_category: trimmed } : x));
+      setEditingCategoryId(null);
+    } catch (err) {
+      console.error("Failed to update category:", err);
+    } finally {
+      setSavingCategoryId(null);
+    }
+  };
+
   const confirmBusiness = businesses.find((b) => b.id === confirmId);
 
   if (loading) {
@@ -201,7 +219,42 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <h3 className="text-sm font-semibold text-foreground">{b.business_name}</h3>
-                    <p className="text-xs text-muted-foreground mt-0.5">{b.gbp_category}</p>
+                    {editingCategoryId === b.id ? (
+                      <div className="flex items-center gap-1 mt-0.5" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          autoFocus
+                          value={categoryDraft}
+                          onChange={(e) => setCategoryDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") saveCategory(b.id);
+                            if (e.key === "Escape") setEditingCategoryId(null);
+                          }}
+                          className="text-xs border border-input rounded px-1.5 py-0.5 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent w-44"
+                        />
+                        <button
+                          onClick={() => saveCategory(b.id)}
+                          disabled={savingCategoryId === b.id}
+                          className="text-green-600 hover:text-green-700 p-0.5"
+                          title="Save"
+                        >
+                          {savingCategoryId === b.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                        </button>
+                        <button onClick={() => setEditingCategoryId(null)} className="text-muted-foreground hover:text-foreground p-0.5" title="Cancel">
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1 mt-0.5 group/cat">
+                        <p className="text-xs text-muted-foreground">{b.gbp_category}</p>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setEditingCategoryId(b.id); setCategoryDraft(b.gbp_category); }}
+                          className="opacity-0 group-hover/cat:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-0.5"
+                          title="Edit category"
+                        >
+                          <Pencil className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
                     {b.gbp_rating != null && (
