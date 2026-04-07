@@ -735,7 +735,7 @@ export default function GeneratedPageView({
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
                   <h3 className="text-sm font-semibold text-foreground">GBP Posts</h3>
-                  <span className="text-xs text-muted-foreground">≤200 words each</span>
+                  <span className="text-xs text-muted-foreground">Please add to your GBP</span>
                 </div>
                 <div className="space-y-2">
                   {socialPosts.gbp.map((post, i) => {
