@@ -4299,7 +4299,7 @@ ICP: {icp}
         try:
             claude_msg = await client.messages.create(
                 model=GENERATION_MODEL,
-                max_tokens=8000,
+                max_tokens=16000,
                 system=[{"type": "text", "text": _GEN_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": user_prompt}],
             )
@@ -4321,30 +4321,28 @@ ICP: {icp}
             raw = raw[:title_match.start()] + raw[title_match.end():]
             raw = raw.strip()
 
-        # Split content_html from schema_json, then extract content_gaps report
-        schema_split = raw.find('<script type="application/ld+json">')
-        if schema_split != -1:
-            content_html = raw[:schema_split].strip()
-            after_html   = raw[schema_split:].strip()
-        else:
-            content_html = raw
-            after_html   = ""
-
-        # Extract CONTENT_GAPS_REPORT block
+        # Extract CONTENT_GAPS_REPORT from raw first (it may appear before or after JSON-LD)
         content_gaps: list = []
-        gaps_start = after_html.find("CONTENT_GAPS_REPORT_START")
-        gaps_end   = after_html.find("CONTENT_GAPS_REPORT_END")
-        if gaps_start != -1 and gaps_end != -1:
-            gaps_json_str = after_html[gaps_start + len("CONTENT_GAPS_REPORT_START"):gaps_end].strip()
-            schema_json   = after_html[:gaps_start].strip()
+        gaps_start_raw = raw.find("CONTENT_GAPS_REPORT_START")
+        gaps_end_raw   = raw.find("CONTENT_GAPS_REPORT_END")
+        if gaps_start_raw != -1 and gaps_end_raw != -1:
+            gaps_json_str = raw[gaps_start_raw + len("CONTENT_GAPS_REPORT_START"):gaps_end_raw].strip()
+            raw = (raw[:gaps_start_raw] + raw[gaps_end_raw + len("CONTENT_GAPS_REPORT_END"):]).strip()
             try:
                 content_gaps = json.loads(gaps_json_str)
                 if not isinstance(content_gaps, list):
                     content_gaps = []
             except Exception:
                 content_gaps = []
+
+        # Split content_html from schema_json
+        schema_split = raw.find('<script type="application/ld+json">')
+        if schema_split != -1:
+            content_html = raw[:schema_split].strip()
+            schema_json  = raw[schema_split:].strip()
         else:
-            schema_json = after_html
+            content_html = raw
+            schema_json  = ""
 
         # Linkify phone numbers in generated HTML
         content_html = _linkify_phones(content_html, body.phone)
