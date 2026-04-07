@@ -3985,28 +3985,85 @@ async def generate_page(request: Request, body: GeneratePageRequest):
                         lines.append(f"    Trust signals: {'; '.join(pain[:2])}")
                 icp_text = "\n".join(lines)
 
-        # Scrape the business website for factual context (certifications, services, team info)
+        # Scrape the business website for factual context (certifications, services, team info).
+        # Hits homepage + up to 2 key subpages (about, services, certifications, team).
+        # Uses direct httpx (no ScrapeOwl cost). Total budget: 8,000 chars across all pages.
         website_text = ""
         if body.website:
+            _SUBPAGE_KEYWORDS = ["about", "service", "certif", "team", "staff", "what-we-do", "our-work", "credential"]
+            _WEBSITE_CHAR_BUDGET = 8000
+            _PER_PAGE_LIMIT = 4000  # homepage gets up to this; subpages share the remainder
+
+            def _extract_page_text(html: str) -> str:
+                _s = BeautifulSoup(html, "html.parser")
+                for _t in _s(["script", "style", "nav", "footer", "head"]):
+                    _t.decompose()
+                return _s.get_text(separator=" ", strip=True)
+
+            def _find_subpage_urls(html: str, base: str) -> list:
+                """Return up to 3 internal links that look like key subpages."""
+                _s = BeautifulSoup(html, "html.parser")
+                _base_netloc = _urlparse.urlparse(base).netloc
+                _base_path = _urlparse.urlparse(base).path.rstrip("/")
+                _seen: set = set()
+                _matches: list = []
+                for _a in _s.find_all("a", href=True):
+                    _href = _a["href"].strip()
+                    _full = _urlparse.urljoin(base, _href)
+                    _p = _urlparse.urlparse(_full)
+                    if _p.netloc != _base_netloc:
+                        continue
+                    _path = _p.path.rstrip("/").lower()
+                    if _path in _seen or _path == _base_path:
+                        continue
+                    if any(kw in _path for kw in _SUBPAGE_KEYWORDS):
+                        _seen.add(_path)
+                        _matches.append(_full)
+                    if len(_matches) >= 3:
+                        break
+                return _matches
+
             try:
-                async with httpx.AsyncClient(
-                    follow_redirects=True,
-                    timeout=10.0,
-                    headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"},
-                ) as _wc:
-                    _wr = await _wc.get(body.website)
-                if _wr.status_code == 200 and _wr.text:
-                    _wsoup = BeautifulSoup(_wr.text, "html.parser")
-                    # Remove script/style/nav/footer noise
-                    for _tag in _wsoup(["script", "style", "nav", "footer", "head"]):
-                        _tag.decompose()
-                    _wtext = _wsoup.get_text(separator=" ", strip=True)
-                    # Truncate to 3000 chars to limit prompt size
-                    if len(_wtext) > 3000:
-                        _wtext = _wtext[:3000] + "…"
-                    if len(_wtext.strip()) > 100:
-                        website_text = f"BUSINESS WEBSITE CONTENT (use factual details found here — certifications, service areas, team info, etc.):\n{_wtext.strip()}"
-                        logger.info(f"generate-page: scraped {len(_wtext)} chars from {body.website}")
+                _headers = {"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"}
+                async with httpx.AsyncClient(follow_redirects=True, timeout=12.0, headers=_headers) as _wc:
+                    # Homepage
+                    _home_r = await _wc.get(body.website)
+                    _home_html = _home_r.text if _home_r.status_code == 200 else ""
+                    _home_text = _extract_page_text(_home_html)[:_PER_PAGE_LIMIT] if _home_html else ""
+
+                    # Detect and fetch subpages concurrently
+                    _subpage_urls = _find_subpage_urls(_home_html, body.website) if _home_html else []
+                    _remaining_budget = _WEBSITE_CHAR_BUDGET - len(_home_text)
+                    _per_sub = max(1000, _remaining_budget // max(len(_subpage_urls), 1)) if _subpage_urls else 0
+
+                    _sub_texts: list = []
+                    if _subpage_urls and _per_sub > 0:
+                        _sub_resps = await asyncio.gather(
+                            *[_wc.get(u) for u in _subpage_urls], return_exceptions=True
+                        )
+                        for _u, _r in zip(_subpage_urls, _sub_resps):
+                            if isinstance(_r, Exception) or _r.status_code != 200:
+                                continue
+                            _st = _extract_page_text(_r.text)[:_per_sub]
+                            if len(_st.strip()) > 100:
+                                _sub_texts.append(f"[{_u}]\n{_st.strip()}")
+
+                _sections: list = []
+                if len(_home_text.strip()) > 100:
+                    _sections.append(f"[{body.website}]\n{_home_text.strip()}")
+                _sections.extend(_sub_texts)
+
+                if _sections:
+                    _combined = "\n\n".join(_sections)
+                    website_text = (
+                        "BUSINESS WEBSITE CONTENT (extract and use factual details — certifications, "
+                        "license numbers, service areas, team credentials, specialties, etc.):\n"
+                        + _combined
+                    )
+                    logger.info(
+                        f"generate-page: scraped {len(_combined)} chars from {body.website} "
+                        f"({len(_sections)} page(s), {len(_subpage_urls)} subpage(s) found)"
+                    )
             except Exception as _we:
                 logger.info(f"generate-page: website scrape skipped for {body.website}: {_we}")
 
