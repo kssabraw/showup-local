@@ -21,6 +21,8 @@ interface BusinessProfile {
   gbp_review_count: number | null;
   google_maps_uri: string | null;
   analysis_status: string | null;
+  hours: any | null;
+  reviews: any | null;
   created_at: string;
 }
 
@@ -94,8 +96,8 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
         gbp_rating: d.rating ?? b.gbp_rating,
         gbp_review_count: d.review_count ?? b.gbp_review_count,
         google_maps_uri: d.google_maps_uri || b.google_maps_uri,
-        hours: d.hours ?? null,
-        reviews: d.reviews ?? null,
+        hours: d.hours ?? b.hours,
+        reviews: (Array.isArray(d.reviews) && d.reviews.length > 0) ? d.reviews : b.reviews,
         analysis_status: null, // clear failed status
       };
       await supabase.from("business_profiles").update(updates).eq("id", b.id);

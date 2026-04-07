@@ -1246,7 +1246,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
                 <div className="flex items-start gap-2 px-3 py-2.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs text-amber-700">
                   <span className="mt-0.5 shrink-0">⚠</span>
                   <span>
-                    Missing <span className="font-medium">{missing.join(" and ")}</span> — go to the business profile and click <span className="font-medium">Update</span> to pull the latest data from GBP before generating.
+                    <span className="font-medium">{missing.join(" and ")}</span> not found in this business profile — the page will still generate but may score lower. Add this info to your GBP listing to improve results.
                   </span>
                 </div>
               );
