@@ -253,16 +253,6 @@ export default function PlanningView({ onCreatePage }: Props) {
                           {item.status === "found" ? "Exists" : "Missing"}
                         </Badge>
 
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="shrink-0 text-xs text-muted-foreground h-7 px-2"
-                          onClick={() => handleCheckRankability(item.keyword)}
-                          disabled={rankLoading}
-                        >
-                          {rankLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : rank ? "Recheck" : "Check Maps"}
-                        </Button>
-
                         {item.status === "missing" && (
                           <Button
                             size="sm"
