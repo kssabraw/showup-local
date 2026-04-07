@@ -90,6 +90,30 @@ async function nlpPost<T>(
   return res.json() as Promise<T>;
 }
 
+/** Non-streaming POST directly to Railway — bypasses Supabase edge function. */
+async function nlpPostDirect<T>(
+  endpoint: string,
+  body: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
+  const authHeader = await getAuthHeader();
+  const res = await fetch(`${NLP_SERVICE_URL}${endpoint}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(authHeader ? { Authorization: authHeader } : {}),
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    throwIfInsufficientCredits(res, d);
+    throw new Error((d as { detail?: string; error?: string }).detail || (d as { detail?: string; error?: string }).error || `NLP error: ${res.status}`);
+  }
+  return res.json() as Promise<T>;
+}
+
 /**
  * Streaming POST — yields typed SSE events from /generate-page or
  * /reoptimize-page.  Each event is newline-delimited JSON prefixed "data: ".
@@ -205,7 +229,7 @@ export const nlp = {
       serp_analysis?: AnalysisResult;
     },
     signal?: AbortSignal,
-  ) => nlpPost<ScoreResult>("/score-page", body, signal),
+  ) => nlpPostDirect<ScoreResult>("/score-page", body, signal),
 
   generatePage: (
     body: {
