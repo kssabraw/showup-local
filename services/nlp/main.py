@@ -804,7 +804,7 @@ async def _run_serp_analysis(
     google_entities: List[dict] = []
     nlp_chars = 0
     if GOOGLE_NLP_API_KEY:
-        para_texts = [t for t in zone_buckets["paragraphs"] if len(t) > 100][:5]
+        para_texts = [t for t in zone_buckets["paragraphs"] if len(t) > 100]
         if para_texts:
             try:
                 google_entities = await get_google_entities(para_texts)
