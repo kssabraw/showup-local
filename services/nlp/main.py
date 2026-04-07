@@ -178,6 +178,23 @@ async def _deduct_credits_direct(user_id: str, amount: int, endpoint: str, descr
         return False
     return r.json() is True
 
+
+async def _refund_credits_direct(user_id: str, amount: int, endpoint: str) -> None:
+    """Refund credits via Supabase service role. Fire-and-forget on failure."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as hx:
+            await hx.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/refund_credits",
+                headers={
+                    "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={"p_user_id": user_id, "p_amount": amount, "p_endpoint": endpoint},
+            )
+    except Exception as exc:
+        logger.warning(f"_refund_credits_direct failed: {exc}")
+
 GOOGLE_NLP_ENDPOINT  = "https://language.googleapis.com/v1/documents:analyzeEntities"
 DATAFORSEO_ENDPOINT  = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced"
 SCRAPEOWL_ENDPOINT   = "https://api.scrapeowl.com/v1/scrape"
@@ -3922,7 +3939,13 @@ async def score_page(request: Request, body: ScorePageRequest):
         if not NLP_API_KEY or api_key != NLP_API_KEY:
             raise HTTPException(status_code=401, detail="Invalid or missing API key")
     else:
-        await _verify_jwt_get_user(request.headers.get("Authorization", ""))
+        user_id = await _verify_jwt_get_user(request.headers.get("Authorization", ""))
+        ok = await _deduct_credits_direct(user_id, 1, "/score-page", "Page scoring")
+        if not ok:
+            raise HTTPException(
+                status_code=402,
+                detail=json.dumps({"error": "Insufficient credits", "credits_required": 1, "code": "INSUFFICIENT_CREDITS"}),
+            )
 
     if not ANTHROPIC_API_KEY:
         raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")

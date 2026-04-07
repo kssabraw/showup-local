@@ -9,6 +9,7 @@ import LocationDetailView from "@/components/LocationDetailView";
 import LoginView from "@/components/LoginView";
 import SettingsView from "@/components/SettingsView";
 import PressReleasesView from "@/components/PressReleasesView";
+import ScoreMyPageView from "@/components/ScoreMyPageView";
 import AdminView from "@/components/AdminView";
 import NotificationBell from "@/components/NotificationBell";
 import { supabase } from "@/integrations/supabase/client";
@@ -230,6 +231,7 @@ const Index = () => {
               }}
             />
           )}
+          {activeItem === "score-my-page" && <ScoreMyPageView />}
           {activeItem === "press-releases" && <PressReleasesView />}
           {activeItem === "admin" && isAdmin && <AdminView />}
           {activeItem === "settings" && session && (
