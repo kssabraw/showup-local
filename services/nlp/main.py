@@ -3986,8 +3986,8 @@ async def generate_page(request: Request, body: GeneratePageRequest):
                 icp_text = "\n".join(lines)
 
         # Scrape the business website for factual context (certifications, services, team info).
-        # Hits homepage + up to 2 key subpages (about, services, certifications, team).
-        # Uses direct httpx (no ScrapeOwl cost). Total budget: 8,000 chars across all pages.
+        # Strategy: ScrapeOwl no-JS → ScrapeOwl JS (if thin) → direct httpx (if ScrapeOwl unavailable).
+        # Hits homepage + up to 3 key subpages concurrently. Total budget: 8,000 chars.
         website_text = ""
         if body.website:
             _SUBPAGE_KEYWORDS = ["about", "service", "certif", "team", "staff", "what-we-do", "our-work", "credential"]
@@ -4023,28 +4023,47 @@ async def generate_page(request: Request, body: GeneratePageRequest):
                         break
                 return _matches
 
+            async def _fetch_html_for_website(url: str, so_client: httpx.AsyncClient) -> Optional[str]:
+                """Fetch a page via ScrapeOwl (no-JS first, JS fallback), then direct httpx."""
+                if SCRAPEOWL_API_KEY:
+                    html = await _scrape_one(url, so_client, render_js=False)
+                    if not html:
+                        # JS fallback for Wix/Squarespace/Webflow sites
+                        html = await _scrape_one(url, so_client, render_js=True)
+                    if html:
+                        return html
+                # Last resort: direct httpx (no cost, but misses JS-rendered content)
+                try:
+                    _r = await so_client.get(
+                        url,
+                        headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"},
+                        follow_redirects=True,
+                    )
+                    return _r.text if _r.status_code == 200 else None
+                except Exception:
+                    return None
+
             try:
-                _headers = {"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"}
-                async with httpx.AsyncClient(follow_redirects=True, timeout=12.0, headers=_headers) as _wc:
+                async with httpx.AsyncClient(timeout=45.0) as _so_client:
                     # Homepage
-                    _home_r = await _wc.get(body.website)
-                    _home_html = _home_r.text if _home_r.status_code == 200 else ""
+                    _home_html = await _fetch_html_for_website(body.website, _so_client)
                     _home_text = _extract_page_text(_home_html)[:_PER_PAGE_LIMIT] if _home_html else ""
 
-                    # Detect and fetch subpages concurrently
+                    # Detect subpages from homepage links, fetch concurrently
                     _subpage_urls = _find_subpage_urls(_home_html, body.website) if _home_html else []
                     _remaining_budget = _WEBSITE_CHAR_BUDGET - len(_home_text)
                     _per_sub = max(1000, _remaining_budget // max(len(_subpage_urls), 1)) if _subpage_urls else 0
 
                     _sub_texts: list = []
                     if _subpage_urls and _per_sub > 0:
-                        _sub_resps = await asyncio.gather(
-                            *[_wc.get(u) for u in _subpage_urls], return_exceptions=True
+                        _sub_htmls = await asyncio.gather(
+                            *[_fetch_html_for_website(u, _so_client) for u in _subpage_urls],
+                            return_exceptions=True,
                         )
-                        for _u, _r in zip(_subpage_urls, _sub_resps):
-                            if isinstance(_r, Exception) or _r.status_code != 200:
+                        for _u, _h in zip(_subpage_urls, _sub_htmls):
+                            if isinstance(_h, Exception) or not _h:
                                 continue
-                            _st = _extract_page_text(_r.text)[:_per_sub]
+                            _st = _extract_page_text(_h)[:_per_sub]
                             if len(_st.strip()) > 100:
                                 _sub_texts.append(f"[{_u}]\n{_st.strip()}")
 
