@@ -4205,17 +4205,6 @@ async def reoptimize_page(request: Request, body: ReoptimizePageRequest):
         page_zones = _parse_page_zones(existing_html)
         serp_ctx = _reopt_serp_context(page_zones, body.serp_analysis)
 
-        await q.put({"step": "progress", "progress": 25, "message": "Building SEO checklist…"})
-        seo_checklist = await _build_seo_checklist(
-            keyword=body.keyword,
-            location=body.location,
-            address=body.address,
-            phone=body.phone,
-            gbp_category=body.gbp_category,
-            serp_analysis=body.serp_analysis,
-            client=client,
-        )
-
         deficiency_text = "\n".join(
             f"  Engine: {d['engine']} (score: {d['score']}/100)\n"
             f"  Issues: {'; '.join(d.get('issues', []))}\n"
@@ -4233,8 +4222,6 @@ Target city: {city}
 Full location: {body.location}
 
 {serp_ctx}
-
-{seo_checklist}
 
 SEO DEFICIENCIES TO FIX — address ALL of these in the new page:
 {deficiency_text}
@@ -4278,11 +4265,13 @@ EXISTING PAGE CONTENT (extract accurate business facts from this — do NOT inve
             content_html = raw
             schema_json  = None
 
-        # ── Auto-retry: score inline and reoptimize up to 5 total passes if < 90 ──
+        # ── Auto-retry: one scoring pass + one reoptimize pass if score < 90 ──
+        # Reoptimize already has deficiency context so one retry is enough.
+        # Keeping passes low reduces cost significantly vs. the generate-page flow.
         current_html   = content_html
         current_schema = schema_json
         current_title  = page_title
-        MAX_AUTO_PASSES = 4
+        MAX_AUTO_PASSES = 2
 
         await q.put({"step": "progress", "progress": 78, "message": "Scoring your page…"})
         try:
