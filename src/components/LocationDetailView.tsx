@@ -119,6 +119,7 @@ const LocationDetailView = ({
         gbp_review_count: d.review_count ?? business.gbp_review_count,
         google_maps_uri: d.google_maps_uri || business.google_maps_uri,
         hours: d.hours ?? business.hours,
+        reviews: d.reviews ?? business.reviews,
       };
       await supabase.from("business_profiles").update(updates).eq("id", business.id);
       await fetchBusiness();

@@ -3876,6 +3876,31 @@ async def generate_page(request: Request, body: GeneratePageRequest):
                         lines.append(f"    Trust signals: {'; '.join(pain[:2])}")
                 icp_text = "\n".join(lines)
 
+        # Scrape the business website for factual context (certifications, services, team info)
+        website_text = ""
+        if body.website:
+            try:
+                async with httpx.AsyncClient(
+                    follow_redirects=True,
+                    timeout=10.0,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"},
+                ) as _wc:
+                    _wr = await _wc.get(body.website)
+                if _wr.status_code == 200 and _wr.text:
+                    _wsoup = BeautifulSoup(_wr.text, "html.parser")
+                    # Remove script/style/nav/footer noise
+                    for _tag in _wsoup(["script", "style", "nav", "footer", "head"]):
+                        _tag.decompose()
+                    _wtext = _wsoup.get_text(separator=" ", strip=True)
+                    # Truncate to 3000 chars to limit prompt size
+                    if len(_wtext) > 3000:
+                        _wtext = _wtext[:3000] + "…"
+                    if len(_wtext.strip()) > 100:
+                        website_text = f"BUSINESS WEBSITE CONTENT (use factual details found here — certifications, service areas, team info, etc.):\n{_wtext.strip()}"
+                        logger.info(f"generate-page: scraped {len(_wtext)} chars from {body.website}")
+            except Exception as _we:
+                logger.info(f"generate-page: website scrape skipped for {body.website}: {_we}")
+
         await q.put({"step": "progress", "progress": 60, "message": "Building SEO checklist…"})
         seo_checklist = await _build_seo_checklist(
             keyword=body.keyword,
@@ -3903,6 +3928,7 @@ ICP: {icp}
 {icp_text}
 {diff_text}
 {reviews_text}
+{website_text}
 {serp_ctx}
 
 {seo_checklist}"""
