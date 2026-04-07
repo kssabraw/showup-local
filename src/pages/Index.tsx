@@ -81,6 +81,7 @@ const Index = () => {
             gbp_categories: business.categories,
             gbp_rating: business.rating,
             gbp_review_count: business.review_count,
+            reviews: business.reviews ?? [],
             latitude: business.latitude,
             longitude: business.longitude,
             hours: business.hours,

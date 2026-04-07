@@ -114,12 +114,13 @@ serve(async (req) => {
         });
       }
 
-      // Look up by place_id directly
+      // Look up by place_id directly — request up to 5 reviews
       const params = new URLSearchParams({
         query: place_id,
         organizationsPerQueryLimit: '1',
         language: 'en',
         async: 'false',
+        reviewsLimit: '5',
       });
 
       const response = await fetch(`${OUTSCRAPER_BASE}/maps/search-v3?${params}`, {
@@ -172,6 +173,20 @@ serve(async (req) => {
         cleanWebsite = /^https?:\/\//i.test(decoded) ? decoded : '';
       }
 
+      // Extract reviews — Outscraper returns reviews_data when reviewsLimit > 0
+      const rawReviews: any[] = Array.isArray(p.reviews_data) ? p.reviews_data : [];
+      const reviews = rawReviews
+        .filter((r: any) => r.review_text && r.review_rating >= 4)
+        .slice(0, 5)
+        .map((r: any) => ({
+          reviewer: r.author_title || 'Anonymous',
+          rating: r.review_rating,
+          text: r.review_text,
+          date: r.review_datetime_utc
+            ? r.review_datetime_utc.split(' ')[0]   // "YYYY-MM-DD HH:MM:SS UTC" → "YYYY-MM-DD"
+            : '',
+        }));
+
       const details = {
         place_id: p.place_id || p.google_id || '',
         name: p.name || '',
@@ -186,6 +201,7 @@ serve(async (req) => {
         types: p.type ? [p.type, ...rawSubtypes] : rawSubtypes,
         rating: p.rating ?? null,
         review_count: p.reviews ?? null,
+        reviews,
         latitude: p.latitude ?? null,
         longitude: p.longitude ?? null,
         hours: p.working_hours ? Object.entries(p.working_hours).map(([day, hrs]) => `${day}: ${hrs}`) : null,

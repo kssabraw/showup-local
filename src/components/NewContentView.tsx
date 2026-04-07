@@ -413,6 +413,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           differentiators: b.differentiators,
           brand_voice: b.brand_voice,
           detected_icp: b.detected_icp,
+          reviews: Array.isArray(b.reviews) ? b.reviews : (b.reviews ? [b.reviews] : undefined),
         },
         signal,
       );
@@ -509,6 +510,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
           differentiators: b.differentiators,
           brand_voice: b.brand_voice,
           detected_icp: b.detected_icp,
+          reviews: Array.isArray(b.reviews) ? b.reviews : (b.reviews ? [b.reviews] : undefined),
         },
         signal,
       );
