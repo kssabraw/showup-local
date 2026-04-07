@@ -2577,12 +2577,22 @@ def _extract_reopt_parts(raw: str) -> tuple:
     else:
         schema_json = None
 
-    # Prefer body content; fall back to the full (modified) HTML
+    # Remove <head> entirely — we only want visible body content for the preview
+    head = soup.find('head')
+    if head:
+        head.decompose()
+
+    # Prefer body content; fall back to entire soup output
     body = soup.find('body')
     if body:
         content_html = body.decode_contents().strip()
     else:
         content_html = str(soup).strip()
+
+    # Final fallback: if extraction somehow produced nothing, return raw as-is
+    if not content_html:
+        logger.warning("_extract_reopt_parts: body extraction yielded empty content; falling back to raw")
+        content_html = raw
 
     return content_html, schema_json
 
@@ -4281,10 +4291,15 @@ EXISTING PAGE (use as reference — preserve accurate facts, fix everything else
                     token_rec["input_tokens"]  += reopt_tok["input_tokens"]
                     token_rec["output_tokens"] += reopt_tok["output_tokens"]
                     token_rec["cost_usd"]       = round(token_rec["cost_usd"] + reopt_tok["cost_usd"], 6)
-                    current_html   = new_html
-                    current_schema = new_schema if new_schema is not None else current_schema
-                    if new_title:
-                        current_title = new_title
+                    # Guard: only update if we got non-empty content
+                    if new_html:
+                        current_html   = new_html
+                        current_schema = new_schema if new_schema is not None else current_schema
+                        if new_title:
+                            current_title = new_title
+                    else:
+                        logger.warning(f"reoptimize-page auto-retry pass {pass_num} returned empty HTML; keeping previous")
+                        break
                 except Exception as _re:
                     logger.warning(f"reoptimize-page auto-retry pass {pass_num} reoptimize failed: {_re}")
                     break
@@ -4307,6 +4322,9 @@ EXISTING PAGE (use as reference — preserve accurate facts, fix everything else
         content_html = current_html
         schema_json  = current_schema
         page_title   = current_title
+
+        if not content_html:
+            raise Exception("Reoptimization produced empty content. Please try again.")
 
         await q.put({"step": "progress", "progress": 95, "message": "Finishing up…"})
         await q.put({
