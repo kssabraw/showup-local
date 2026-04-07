@@ -133,10 +133,11 @@ function scoreBadge(score?: number, status?: string) {
 }
 
 function scoreStatus(score: number): string {
-  if (score >= 90) return "strong";
-  if (score >= 75) return "good";
-  if (score >= 60) return "needs_work";
-  return "poor";
+  if (score >= 90) return "excellent";
+  if (score >= 80) return "good";
+  if (score >= 70) return "needs_improvement";
+  if (score >= 60) return "below_standard";
+  return "fail";
 }
 
 export default function GeneratedPageView({
@@ -167,6 +168,7 @@ export default function GeneratedPageView({
       : null
   );
   const [autoScoring, setAutoScoring] = useState(initialScore == null);
+  const [scoreFailed, setScoreFailed] = useState(false);
   const scoredRef = useRef(false);
 
   useEffect(() => {
@@ -185,7 +187,7 @@ export default function GeneratedPageView({
     }).then(result => {
       setAutoScore(result);
     }).catch(() => {
-      // Non-fatal — score display stays hidden
+      setScoreFailed(true);
     }).finally(() => {
       setAutoScoring(false);
     });
@@ -438,6 +440,10 @@ export default function GeneratedPageView({
         <div className="flex items-center gap-2 px-4 py-3 bg-muted/40 border border-border rounded-xl text-sm text-muted-foreground">
           <Loader2 className="w-4 h-4 animate-spin shrink-0" />
           Scoring your page…
+        </div>
+      ) : scoreFailed ? (
+        <div className="flex items-center gap-2 px-4 py-3 bg-muted/40 border border-border rounded-xl text-sm text-muted-foreground">
+          Score unavailable — the scoring service didn't respond. Your page was still generated successfully.
         </div>
       ) : autoScore ? (
         <div className={`flex items-center gap-4 px-5 py-4 rounded-xl border ${
