@@ -234,7 +234,7 @@ export default function PageScoreView({
           </Button>
           {scoring && (
             <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
-              <span className="opacity-70">{serp_analysis ? "Usually 20–40 seconds" : "Usually 60–90 seconds (includes competitor analysis)"}</span>
+              <span className="opacity-70">{serp_analysis ? "Usually 20–40 seconds" : "Usually 2-4 minutes (includes competitor analysis)"}</span>
               <button onClick={cancelOperation} className="hover:text-destructive transition-colors">Cancel</button>
             </div>
           )}
@@ -347,7 +347,7 @@ export default function PageScoreView({
                 </Button>
                 {reoptimizing && (
                   <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
-                    <span className="opacity-70">Usually 60–90 seconds</span>
+                    <span className="opacity-70">Usually 2-4 minutes</span>
                     <button onClick={cancelOperation} className="hover:text-destructive transition-colors">Cancel</button>
                   </div>
                 )}
