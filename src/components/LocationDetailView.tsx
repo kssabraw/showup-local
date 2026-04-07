@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, RefreshCw, CheckCircle2, AlertCircle, Sparkles, Plus, Trash2, X } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { nlp } from "@/lib/nlp-client";
+import { BUSINESS_PROFILES_KEY } from "@/hooks/useBusinessProfiles";
 
 interface BusinessProfile {
   id: string;
@@ -55,6 +57,7 @@ const LocationDetailView = ({
   onBack: () => void;
 }) => {
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [business, setBusiness] = useState<BusinessProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<Tab>("Overview");
@@ -123,6 +126,7 @@ const LocationDetailView = ({
       };
       await supabase.from("business_profiles").update(updates).eq("id", business.id);
       await fetchBusiness();
+      queryClient.invalidateQueries({ queryKey: BUSINESS_PROFILES_KEY });
       setGbpRefreshStatus("success");
       setTimeout(() => setGbpRefreshStatus("idle"), 3000);
     } catch (err) {

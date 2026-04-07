@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, Trash2, RefreshCw } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { BUSINESS_PROFILES_KEY } from "@/hooks/useBusinessProfiles";
 
 
 interface BusinessProfile {
@@ -23,6 +25,7 @@ interface BusinessProfile {
 }
 
 const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) => void }) => {
+  const queryClient = useQueryClient();
   const [businesses, setBusinesses] = useState<BusinessProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [confirmId, setConfirmId] = useState<string | null>(null);
@@ -97,6 +100,7 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
       };
       await supabase.from("business_profiles").update(updates).eq("id", b.id);
       setBusinesses((prev) => prev.map((x) => x.id === b.id ? { ...x, ...updates } : x));
+      queryClient.invalidateQueries({ queryKey: BUSINESS_PROFILES_KEY });
     } catch (err) {
       console.error("GBP refresh error:", err);
     } finally {
