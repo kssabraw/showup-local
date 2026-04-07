@@ -1987,7 +1987,7 @@ optimised for Answer Engine Optimisation. Follow all of them in every section.
 1. ANSWER-FIRST: Open every section, paragraph, and FAQ answer with a direct claim.
    State the conclusion before the explanation.
    ✗ Bad:  "Tree service is a complex process that requires professional expertise..."
-   ✓ Good: "[Brand] removes trees same-day in Anaheim — including emergency situations."
+   ✓ Good: "[Brand] handles tree removal in Anaheim — including emergency situations."
 
 2. ONE IDEA PER PARAGRAPH: Each <p> covers exactly one point. 3–5 sentences max.
    Wall-of-text paragraphs are not cited by LLMs. Short, focused paragraphs are.
@@ -2033,9 +2033,9 @@ optimised for Answer Engine Optimisation. Follow all of them in every section.
    - Precede every table with a <p> sentence introducing what it shows
 
 8. SPECIFIC FACTS OVER VAGUE CLAIMS — LLMs cite specificity, not generalities:
-   ✗ "We respond quickly."              → ✓ "Crews arrive within 2–4 hours for Anaheim emergencies."
+   ✗ "We respond quickly."              → ✓ "Call us to confirm response time in Anaheim." (only use a specific timeframe if it is in the business data)
    ✗ "Serving the local area."          → ✓ "Serving Anaheim, Anaheim Hills, Yorba Linda & Orange County."
-   ✗ "Competitive pricing."             → ✓ "Free estimates — no trip fee within a 15-mile radius."
+   ✗ "Competitive pricing."             → ✓ "Free estimates — no trip fee within a 15-mile radius." (only if stated in business data)
 
 9. ENTITY TRIPLETS in ≥3 sections: [Brand] + [service] + [city] must co-occur in the
    intro, the main services body, the local section, and the FAQ. This establishes the
@@ -2051,11 +2051,13 @@ optimised for Answer Engine Optimisation. Follow all of them in every section.
     - Section 10 (Local): full geo block (neighborhoods, landmark, ZIPs, coverage, response time)
     - Section 12 (FAQ): ≥2 answers reference a specific city or neighborhood
 
-12. RESPONSE TIME — ALWAYS SPECIFIC: Never write "quickly", "promptly", "fast response", or
-    "soon". Every response time claim must include a specific number:
-    ✗ "We respond quickly."         → ✓ "We arrive within 2–4 hours."
-    ✗ "Same-day service available." → ✓ "Same-day appointments available — book by 2pm."
-    Include at least one explicit response time in Section 1 and at least two in Section 12 FAQ answers.
+12. RESPONSE TIME — ONLY FROM BUSINESS DATA: Never write "quickly", "promptly", "fast response",
+    or "soon". If response time IS in the business data (hours, GBP description, or reviews),
+    state it with a specific number: ✓ "We arrive within 2–4 hours." ✓ "Same-day — book by 2pm."
+    If response time is NOT in the business data, do NOT invent one. Write "Call us for availability"
+    or omit the claim entirely. Add it to the Content Gaps report instead.
+    NEVER fabricate: "same-day", "within X hours", "call before noon", or any specific time window
+    that is not explicitly stated in the provided business data.
 
 13. PHONE NUMBER PLACEMENT: The phone number must appear in Section 1 (intro paragraph).
     This ensures it is visible above the fold. It must also appear in Sections 4, 8, and 11.
@@ -2162,7 +2164,7 @@ Section 9 — Getting Started (150–200 words)
 Section 10 — Geographic / Local SEO Section (200–300 words)
 <section id="local">
   <h2>[City + service in heading]</h2>
-  [City + min 3 neighborhoods in sentence context (not just a list) + min 1 landmark + min 2 streets + zip codes (min 3). Use only real, verifiable geographic details. If neighborhood/landmark/street/zip data is not provided in the business data, include only what you are certain is accurate for the target city. Do not invent or guess street names, zip codes, or landmarks. Coverage + response time.]
+  [City + min 3 neighborhoods in sentence context (not just a list) + min 1 landmark + min 2 streets + zip codes (min 3). Use only real, verifiable geographic details. If neighborhood/landmark/street/zip data is not provided in the business data, include only what you are certain is accurate for the target city. Do not invent or guess street names, zip codes, or landmarks. Coverage area required. Response time: ONLY include if explicitly stated in business hours, GBP description, or reviews — otherwise write "Call us for availability" or omit entirely.]
 </section>
 
 Section 11 — CTA Block Tertiary (50–75 words — urgency-forward)
@@ -2174,11 +2176,13 @@ Section 12 — FAQ (min 4, max 7 entries — 40–80 words each)
   [Min 4, max 7 FAQ entries. Every answer opens with a direct yes/no or factual statement.]
   REQUIRED PROXIMITY FAQs — at least 2 entries must follow this pattern:
     Q: "Do you serve [specific neighborhood or city]?"
-    A: "Yes, [Brand] serves [neighborhood] with [specific availability/response time, e.g. 'same-day service' or '24/7 emergency response']."
+    A: "Yes, [Brand] serves [neighborhood]." (add availability language ONLY if explicitly in business data)
     Q: "How quickly can you respond to [city/neighborhood]?"
-    A: "[Specific timeframe] — e.g. 'Crews arrive within 2 hours in Anaheim and surrounding areas.'"
-  REQUIRED TOPICS (spread remaining entries across): availability, response time, coverage area, emergency service, pricing, process.
-  Each answer must include a specific fact (time, place, number) — no vague claims.
+    A: If response time IS in business data: state it specifically (e.g. "Crews arrive within 2 hours").
+       If response time is NOT in business data: "Contact us directly to confirm scheduling and availability in [neighborhood]."
+       NEVER invent a timeframe — not "same-day", not "within X hours", not "call before noon".
+  REQUIRED TOPICS (spread remaining entries across): coverage area, service process, what to expect, pricing (only if stated), emergency service (only if offered per business data).
+  Each answer must include a specific verifiable fact — city name, service name, or process step. Do NOT invent specific times, prices, or credentials.
 </section>
 
 Section 13 — Schema (delivered AFTER </article> as a separate <script> block)
@@ -2212,11 +2216,15 @@ Do NOT invent or assume:
 - Specific sub-services beyond what appears in the GBP category, GBP description, or reviews
 
 You MAY include:
-- Standard industry capabilities implied by the GBP category (e.g. a "Plumber" category implies drain cleaning, pipe repair)
+- Standard industry service types implied by the GBP category (e.g. "Plumber" implies drain cleaning, pipe repair — but NOT "licensed plumber" or specific credentials)
 - Geographic facts (city, neighborhoods, zip codes) provided in the SEO checklist
 - Competitor-informed topic structure (headings, sections) without copying their specific claims
-- For response times and availability: only use explicit values from GBP hours, description, or reviews;
-  if no data is available write "Contact us for response times" or omit the claim
+- For response times and availability: ONLY use explicit values from GBP hours, description, or reviews; if not available write "Contact us for availability" or omit the claim entirely
+
+You MUST NOT imply or state:
+- Certifications, credentials, or professional designations (e.g. "certified arborist", "licensed contractor", "NATE-certified", "ISA member") unless explicitly in business data — these are NOT implied by GBP category
+- Insurance, bonding, or licensing status unless explicitly stated in business data
+- Response times, scheduling windows, or availability promises (e.g. "same-day", "call before noon", "within 2 hours", "next-day") unless explicitly stated in business data
 
 CONTENT GAPS REPORT — REQUIRED OUTPUT
 After the JSON-LD </script> block, on a new line output:
@@ -3233,7 +3241,7 @@ async def _build_seo_checklist(
         f'  • DISTRIBUTION RULE: do NOT save ZIP codes and neighborhood names only for Section 10.',
         f'    – Section 6 (services): mention {city} + at least 1 neighborhood in at least one H3 body paragraph',
         f'    – Section 12 (FAQ): at least 2 FAQ answers must reference a specific neighborhood or ZIP code',
-        f'    – Section 10 (local): full geo block with all neighborhoods, landmarks, ZIPs, streets, response time',
+        f'    – Section 10 (local): full geo block with all neighborhoods, landmarks, ZIPs, streets. Response time only if in business data.',
     ]
     if street_ref:
         lines.append(f'  • Street reference available from business address: "{street_ref}"')
@@ -3245,11 +3253,10 @@ async def _build_seo_checklist(
     if phone:
         lines.append(f'  • {phone} must appear ABOVE THE FOLD (in the hero/header section)')
     if is_emergency:
-        lines.append('  • Opening block must include availability language: "available 24/7", "emergency response", or "same-day service"')
-        lines.append('  • State explicit response time: e.g. "arrive within 2 hours", "on-site within 60 minutes"')
+        lines.append('  • Opening block must include availability language — ONLY use what is in business data (e.g. hours show 24/7 → use "available 24/7"). If not in business data, write "Contact us for emergency availability" — do NOT invent "same-day" or response windows.')
     else:
-        lines.append('  • Include availability/responsiveness language near the top of the page')
-        lines.append('  • Mention a service timeframe (e.g. "same-week appointments", "respond within 24 hours")')
+        lines.append('  • Include availability language near the top ONLY if supported by business hours or GBP description.')
+        lines.append('  • If no scheduling/response data is available, omit time claims and add them to the Content Gaps report.')
     lines += [
         '  • Include ≥2 blocks combining: [neighborhood name] + [service] + [availability signal]',
         '  • Include ≥2 FAQ entries on coverage area, response time, or service availability (proximity FAQs)',
