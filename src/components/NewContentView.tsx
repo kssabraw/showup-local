@@ -209,6 +209,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
       initialScore: page.composite_score ?? null,
       savedPageId: page.id,
       initialSocialPosts: (page.social_posts as { gbp: string[] } | null) ?? null,
+      contentGaps: (page.content_gaps as import("@/lib/nlp-types").ContentGap[] | null) ?? [],
     });
   };
 

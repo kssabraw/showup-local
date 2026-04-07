@@ -286,6 +286,7 @@ export default function GeneratedPageView({
         composite_score: autoScore?.composite_score ?? null,
         composite_status: autoScore?.composite_status ?? null,
         social_posts: socialPosts ?? null,
+        content_gaps: contentGaps ?? [],
       }).select("id").single();
       if (error) throw error;
       // Track the row ID so fetchSocialPosts can update it if posts arrive later

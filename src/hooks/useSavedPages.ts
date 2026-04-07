@@ -16,6 +16,7 @@ export type SavedPage = Pick<
   | "composite_score"
   | "composite_status"
   | "social_posts"
+  | "content_gaps"
 >;
 
 const PAGE_SIZE = 25;
@@ -31,7 +32,7 @@ export function useSavedPages(page = 0) {
       const { data, error } = await supabase
         .from("generated_pages")
         .select(
-          "id, business_id, keyword, location, mode, page_title, content_html, schema_json, created_at, composite_score, composite_status, social_posts",
+          "id, business_id, keyword, location, mode, page_title, content_html, schema_json, created_at, composite_score, composite_status, social_posts, content_gaps",
         )
         .order("created_at", { ascending: false })
         .range(from, to + 1); // fetch one extra to detect hasMore
