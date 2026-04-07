@@ -141,7 +141,7 @@ function scoreStatus(score: number): string {
 }
 
 export default function GeneratedPageView({
-  keyword, location, mode, contentHtml, schemaJson, pageTitle, htmlCssNotes, contentGaps,
+  keyword, location, mode, isNew, contentHtml, schemaJson, pageTitle, htmlCssNotes, contentGaps,
   tokenUsage, costBreakdown,
   businessId, businessName, website, gbpCategory, address,
   phone, differentiators, detected_icp, brand_voice, serp_analysis,
