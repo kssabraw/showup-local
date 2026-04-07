@@ -89,6 +89,7 @@ interface Props {
   keyword: string;
   location: string;
   mode: "generate" | "reoptimize";
+  isNew?: boolean;
   contentHtml: string;
   schemaJson: string;
   pageTitle: string;
@@ -108,6 +109,10 @@ interface Props {
   serp_analysis?: unknown;
   prevScore?: number | null;
   initialScore?: number | null;
+  /** ID of the already-saved DB row (if any) — used to persist social posts */
+  savedPageId?: string | null;
+  /** Pre-loaded social posts from DB — skip generation if provided */
+  initialSocialPosts?: { gbp: string[] } | null;
   onBack: () => void;
   onNewPage: () => void;
   onRelatedAction?: (action: { mode: "reoptimize" | "new"; keyword: string; existingUrl?: string }) => void;
@@ -145,7 +150,7 @@ export default function GeneratedPageView({
   tokenUsage, costBreakdown,
   businessId, businessName, website, gbpCategory, address,
   phone, differentiators, detected_icp, brand_voice, serp_analysis,
-  prevScore, initialScore,
+  prevScore, initialScore, savedPageId: savedPageIdProp, initialSocialPosts,
   onBack, onNewPage, onRelatedAction,
 }: Props) {
   const invalidateSavedPages = useInvalidateSavedPages();
@@ -202,9 +207,11 @@ export default function GeneratedPageView({
   const [relatedLoading, setRelatedLoading] = useState(false);
   const [relatedItems, setRelatedItems] = useState<RelatedPageItem[] | null>(null);
   const [relatedError, setRelatedError] = useState("");
-  // Social posts state
-  const [socialPosts, setSocialPosts] = useState<{ gbp: string[] } | null>(null);
+  // Social posts state — seed from DB if already saved
+  const [socialPosts, setSocialPosts] = useState<{ gbp: string[] } | null>(initialSocialPosts ?? null);
   const [socialLoading, setSocialLoading] = useState(false);
+  // Track which DB row to update with social posts once generated
+  const savedPageIdRef = useRef<string | null>(savedPageIdProp ?? null);
   const [copiedPost, setCopiedPost] = useState<string | null>(null);
   const [selections, setSelections] = useState<RelatedSelection>({});
 
@@ -268,7 +275,7 @@ export default function GeneratedPageView({
     setSaving(true);
     setSaveError("");
     try {
-      const { error } = await supabase.from("generated_pages").insert({
+      const { data: saved, error } = await supabase.from("generated_pages").insert({
         business_id: businessId,
         keyword,
         location,
@@ -278,8 +285,11 @@ export default function GeneratedPageView({
         schema_json: schemaJson || null,
         composite_score: autoScore?.composite_score ?? null,
         composite_status: autoScore?.composite_status ?? null,
-      });
+        social_posts: socialPosts ?? null,
+      }).select("id").single();
       if (error) throw error;
+      // Track the row ID so fetchSocialPosts can update it if posts arrive later
+      if (saved?.id) savedPageIdRef.current = saved.id;
       setSaved(true);
       invalidateSavedPages(); // refresh saved pages list + dashboard stats
     } catch (e: any) {
@@ -343,7 +353,16 @@ export default function GeneratedPageView({
         brand_voice,
         serp_analysis,
       });
-      setSocialPosts({ gbp: data.gbp });
+      const posts = { gbp: data.gbp };
+      setSocialPosts(posts);
+      // Persist to DB so we don't regenerate on next view
+      if (savedPageIdRef.current) {
+        supabase
+          .from("generated_pages")
+          .update({ social_posts: posts })
+          .eq("id", savedPageIdRef.current)
+          .then(() => {});  // fire-and-forget
+      }
     } catch {
       // Non-fatal — social tab will show a retry button
     } finally {

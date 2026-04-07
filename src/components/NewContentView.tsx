@@ -50,7 +50,7 @@ type ViewState =
   | { kind: "form" }
   | { kind: "creating" }
   | { kind: "score"; pageMatch: { url: string; title: string; h1?: string }; serpAnalysis?: AnalysisResult; initialScoreResult?: ScoreResult }
-  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; contentGaps?: import("@/lib/nlp-types").ContentGap[]; tokenUsage: Partial<TokenUsage>; costBreakdown: Partial<CostBreakdown>; isNew?: boolean; serpAnalysis?: AnalysisResult; prevScore?: number | null; initialScore?: number | null }
+  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; contentGaps?: import("@/lib/nlp-types").ContentGap[]; tokenUsage: Partial<TokenUsage>; costBreakdown: Partial<CostBreakdown>; isNew?: boolean; serpAnalysis?: AnalysisResult; prevScore?: number | null; initialScore?: number | null; savedPageId?: string | null; initialSocialPosts?: { gbp: string[] } | null }
   | { kind: "analysis"; result: AnalysisResult };
 
 // ANALYSIS_CACHE_MAX_AGE_DAYS — cached keyword analyses older than this are ignored
@@ -207,6 +207,8 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
       costBreakdown: {},
       isNew: false,
       initialScore: page.composite_score ?? null,
+      savedPageId: page.id,
+      initialSocialPosts: (page.social_posts as { gbp: string[] } | null) ?? null,
     });
   };
 
@@ -911,6 +913,8 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         serp_analysis={view.serpAnalysis ?? undefined}
         prevScore={view.prevScore ?? null}
         initialScore={view.initialScore ?? null}
+        savedPageId={view.savedPageId ?? null}
+        initialSocialPosts={view.initialSocialPosts ?? null}
         onBack={() => setView({ kind: "form" })}
         onNewPage={() => { setView({ kind: "form" }); setKeyword(""); setCheckState({ status: "idle" }); }}
         onRelatedAction={handleRelatedAction}

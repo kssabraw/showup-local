@@ -119,6 +119,7 @@ export type Database = {
           page_title: string | null
           schema_json: string | null
           scored_at: string | null
+          social_posts: Json | null
           updated_at: string
         }
         Insert: {
@@ -135,6 +136,7 @@ export type Database = {
           page_title?: string | null
           schema_json?: string | null
           scored_at?: string | null
+          social_posts?: Json | null
           updated_at?: string
         }
         Update: {
@@ -151,6 +153,7 @@ export type Database = {
           page_title?: string | null
           schema_json?: string | null
           scored_at?: string | null
+          social_posts?: Json | null
           updated_at?: string
         }
         Relationships: [
