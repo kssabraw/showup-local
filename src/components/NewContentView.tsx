@@ -806,7 +806,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
     const steps = [
       { label: "Fetching top search results",           detail: "Pulling the top ranking pages for your keyword",              done: generateProgress >= 40, active: generateProgress < 40 },
       { label: "Scraping & analysing competitor pages", detail: "Reading competitor pages to find patterns and topics",         done: generateProgress >= 65, active: generateProgress >= 15 && generateProgress < 65 },
-      { label: "Generating page",                       detail: "13-section structure + JSON-LD schema",                       done: generateProgress >= 100, active: generateProgress >= 65 },
+      { label: "Generating page",                       detail: "AEO, SEO, CRO + JSON-LD schema",                       done: generateProgress >= 100, active: generateProgress >= 65 },
     ];
     const mins = Math.floor(elapsedSeconds / 60);
     const secs = elapsedSeconds % 60;
@@ -1282,7 +1282,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             },
             {
               label: "Generating page",
-              detail: "13-section structure + JSON-LD schema",
+              detail: "AEO, SEO, CRO + JSON-LD schema",
               done: generateProgress >= 100,
               active: generateProgress >= 65,
             },
