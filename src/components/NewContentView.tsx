@@ -50,7 +50,7 @@ type ViewState =
   | { kind: "form" }
   | { kind: "creating" }
   | { kind: "score"; pageMatch: { url: string; title: string; h1?: string }; serpAnalysis?: AnalysisResult; initialScoreResult?: ScoreResult }
-  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; contentGaps?: import("@/lib/nlp-types").ContentGap[]; tokenUsage: Partial<TokenUsage>; costBreakdown: Partial<CostBreakdown>; isNew?: boolean; serpAnalysis?: AnalysisResult; prevScore?: number | null }
+  | { kind: "generated"; mode: "generate" | "reoptimize"; contentHtml: string; schemaJson: string; pageTitle: string; htmlCssNotes?: string[]; contentGaps?: import("@/lib/nlp-types").ContentGap[]; tokenUsage: Partial<TokenUsage>; costBreakdown: Partial<CostBreakdown>; isNew?: boolean; serpAnalysis?: AnalysisResult; prevScore?: number | null; initialScore?: number | null }
   | { kind: "analysis"; result: AnalysisResult };
 
 // ANALYSIS_CACHE_MAX_AGE_DAYS — cached keyword analyses older than this are ignored
@@ -460,6 +460,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             contentGaps: genData.content_gaps ?? [],
             isNew: true,
             serpAnalysis: genData.serp_analysis ?? undefined,
+            initialScore: genData.composite_score ?? null,
           });
           return;
         }
@@ -879,6 +880,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         brand_voice={selectedBusiness?.brand_voice ?? undefined}
         serp_analysis={view.serpAnalysis ?? undefined}
         prevScore={view.prevScore ?? null}
+        initialScore={view.initialScore ?? null}
         onBack={() => setView({ kind: "form" })}
         onNewPage={() => { setView({ kind: "form" }); setKeyword(""); setCheckState({ status: "idle" }); }}
         onRelatedAction={handleRelatedAction}

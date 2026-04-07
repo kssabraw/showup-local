@@ -107,6 +107,7 @@ interface Props {
   brand_voice?: unknown;
   serp_analysis?: unknown;
   prevScore?: number | null;
+  initialScore?: number | null;
   onBack: () => void;
   onNewPage: () => void;
   onRelatedAction?: (action: { mode: "reoptimize" | "new"; keyword: string; existingUrl?: string }) => void;
@@ -131,12 +132,19 @@ function scoreBadge(score?: number, status?: string) {
   );
 }
 
+function scoreStatus(score: number): string {
+  if (score >= 90) return "strong";
+  if (score >= 75) return "good";
+  if (score >= 60) return "needs_work";
+  return "poor";
+}
+
 export default function GeneratedPageView({
   keyword, location, mode, contentHtml, schemaJson, pageTitle, htmlCssNotes, contentGaps,
   tokenUsage, costBreakdown,
   businessId, businessName, website, gbpCategory, address,
   phone, differentiators, detected_icp, brand_voice, serp_analysis,
-  prevScore,
+  prevScore, initialScore,
   onBack, onNewPage, onRelatedAction,
 }: Props) {
   const invalidateSavedPages = useInvalidateSavedPages();
@@ -152,12 +160,18 @@ export default function GeneratedPageView({
   // Rich-text div ref — set innerHTML via effect to avoid React reconciliation issues
   const richTextRef = useRef<HTMLDivElement>(null);
 
-  // Auto-score the generated/reoptimized page in the background
-  const [autoScore, setAutoScore] = useState<ScoreResult | null>(null);
-  const [autoScoring, setAutoScoring] = useState(true);
+  // Score display — seed from the generation response if available (avoids a second API call)
+  const [autoScore, setAutoScore] = useState<ScoreResult | null>(
+    initialScore != null
+      ? ({ composite_score: initialScore, composite_status: scoreStatus(initialScore) } as ScoreResult)
+      : null
+  );
+  const [autoScoring, setAutoScoring] = useState(initialScore == null);
   const scoredRef = useRef(false);
 
   useEffect(() => {
+    // Skip the API call if generation already returned a score
+    if (initialScore != null) return;
     if (scoredRef.current) return;
     scoredRef.current = true;
     nlp.scorePage({
@@ -196,31 +210,43 @@ export default function GeneratedPageView({
 
   const copyRichText = async () => {
     const el = richTextRef.current;
-    if (el) {
-      // Select all content in the contentEditable div and use execCommand so the
-      // browser copies genuine rendered rich text (preserves bold, headings, lists, tables).
+    if (!el) {
+      setCopiedRichText(true);
+      setTimeout(() => setCopiedRichText(false), 2000);
+      return;
+    }
+
+    // Build full HTML — title note + content body
+    const titleHtml = pageTitle
+      ? `<p><strong>SEO Title:</strong> ${pageTitle}</p><hr>`
+      : "";
+    const fullHtml = titleHtml + el.innerHTML;
+    const fullText = pageTitle
+      ? `SEO Title: ${pageTitle}\n\n${el.innerText}`
+      : el.innerText;
+
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([fullHtml], { type: "text/html" }),
+          "text/plain": new Blob([fullText], { type: "text/plain" }),
+        }),
+      ]);
+    } catch {
+      // execCommand fallback — temporarily inject title into the div, select all, copy, restore
+      const titleNode = document.createElement("div");
+      titleNode.innerHTML = titleHtml;
+      el.insertBefore(titleNode, el.firstChild);
       const sel = window.getSelection();
       const range = document.createRange();
       range.selectNodeContents(el);
       sel?.removeAllRanges();
       sel?.addRange(range);
-      try {
-        document.execCommand("copy");
-      } catch {
-        // execCommand fallback failed — try clipboard API
-        try {
-          await navigator.clipboard.write([
-            new ClipboardItem({
-              "text/html": new Blob([el.innerHTML], { type: "text/html" }),
-              "text/plain": new Blob([el.innerText], { type: "text/plain" }),
-            }),
-          ]);
-        } catch {
-          await navigator.clipboard.writeText(el.innerText);
-        }
-      }
+      try { document.execCommand("copy"); } catch { /* ignore */ }
       sel?.removeAllRanges();
+      el.removeChild(titleNode);
     }
+
     setCopiedRichText(true);
     setTimeout(() => setCopiedRichText(false), 2000);
   };
