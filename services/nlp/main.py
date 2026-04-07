@@ -345,6 +345,55 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
         return []
 
 
+# ── Phone number linkification ────────────────────────────────────────────────
+
+_PHONE_RE = re.compile(
+    r'(?<!["\'/=])'                        # not inside an attribute or URL
+    r'(\+?1[\s.\-]?)?'                     # optional country code
+    r'(\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4})'  # core 10-digit pattern
+    r'(?![^<]*>)'                          # not inside an HTML tag
+)
+
+def _linkify_phones(html: str, phone: Optional[str] = None) -> str:
+    """
+    Wrap bare phone numbers in <a href="tel:..."> links.
+    Already-linked numbers (inside <a href="tel:...">...</a>) are left alone.
+    If `phone` is provided it is used to build the canonical tel: digits;
+    otherwise digits are extracted directly from the matched text.
+    """
+    if not html:
+        return html
+
+    # Build canonical digits from the business phone if available
+    canonical_digits: Optional[str] = None
+    if phone:
+        canonical_digits = re.sub(r'\D', '', phone)
+        if len(canonical_digits) == 11 and canonical_digits.startswith('1'):
+            canonical_digits = canonical_digits[1:]  # strip leading 1
+
+    def _replace(m: re.Match) -> str:
+        matched = m.group(0)
+        digits = re.sub(r'\D', '', matched)
+        # Use last 10 digits to handle +1 prefix
+        digits = digits[-10:] if len(digits) >= 10 else digits
+        if len(digits) < 10:
+            return matched  # not a real phone number, leave alone
+        tel = canonical_digits if (canonical_digits and canonical_digits == digits) else digits
+        return f'<a href="tel:{tel}">{matched}</a>'
+
+    # Split on existing tel: links so we don't double-wrap
+    _TEL_LINK_RE = re.compile(r'(<a\s[^>]*href=["\']tel:[^>]*>.*?</a>)', re.IGNORECASE | re.DOTALL)
+    parts = _TEL_LINK_RE.split(html)
+    result = []
+    for i, part in enumerate(parts):
+        if i % 2 == 1:
+            # This is an existing tel: link — leave untouched
+            result.append(part)
+        else:
+            result.append(_PHONE_RE.sub(_replace, part))
+    return "".join(result)
+
+
 # ── Step 2: ScrapeOwl — fetch raw HTML for each URL ──────────────────────────
 
 async def _scrape_one(url: str, client: httpx.AsyncClient, render_js: bool = False) -> Optional[str]:
@@ -2653,6 +2702,7 @@ EXISTING PAGE (use as reference — preserve accurate facts, fix everything else
     page_title = title_match.group(1).strip() if title_match else ""
 
     content_html, schema_json = _extract_reopt_parts(raw)
+    content_html = _linkify_phones(content_html, phone)
 
     return content_html, schema_json, page_title, token_rec
 
@@ -4177,6 +4227,9 @@ ICP: {icp}
         else:
             schema_json = after_html
 
+        # Linkify phone numbers in generated HTML
+        content_html = _linkify_phones(content_html, body.phone)
+
         # ── Score the generated page (single pass) ───────────────────────────────
         # Structural requirements (keywords, entities, FAQ, geo, AEO) are covered
         # by the generation prompt. Any remaining gaps are business-data gaps that
@@ -4366,6 +4419,9 @@ EXISTING PAGE CONTENT (extract accurate business facts from this — do NOT inve
         else:
             content_html = raw
             schema_json  = None
+
+        # Linkify phone numbers in reoptimized HTML
+        content_html = _linkify_phones(content_html, body.phone)
 
         # ── Auto-retry: one scoring pass + one reoptimize pass if score < 90 ──
         # Reoptimize already has deficiency context so one retry is enough.
