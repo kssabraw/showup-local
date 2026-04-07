@@ -1,8 +1,7 @@
 import { useState, useEffect } from "react";
-import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, Trash2, Sparkles, RefreshCw, CheckCircle2, AlertCircle } from "lucide-react";
+import { MapPin, Phone, Globe, Star, Building2, Loader2, ExternalLink, Trash2, RefreshCw } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 
-const NLP_SERVICE_URL = import.meta.env.VITE_NLP_SERVICE_URL ?? "https://showup-local-production.up.railway.app";
 
 interface BusinessProfile {
   id: string;
@@ -28,7 +27,6 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
   const [loading, setLoading] = useState(true);
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
-  const [analyzingIds, setAnalyzingIds] = useState<Set<string>>(new Set());
   const [refreshingIds, setRefreshingIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
@@ -66,88 +64,6 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
     } finally {
       setRemoving(false);
       setConfirmId(null);
-    }
-  };
-
-  const handleRunAnalysis = async (e: React.MouseEvent, b: BusinessProfile) => {
-    e.stopPropagation();
-    if (analyzingIds.has(b.id)) return;
-
-    setAnalyzingIds((prev) => new Set(prev).add(b.id));
-    setBusinesses((prev) =>
-      prev.map((x) => x.id === b.id ? { ...x, analysis_status: "running" } : x)
-    );
-
-    try {
-      // If no website stored, try fetching it from GBP
-      let website = b.website;
-      if (!website) {
-        const { data } = await supabase.functions.invoke("google-places", {
-          body: { action: "details", place_id: b.gbp_place_id },
-        });
-        website = data?.details?.website || null;
-        if (website) {
-          await supabase.from("business_profiles").update({ website }).eq("id", b.id);
-          setBusinesses((prev) =>
-            prev.map((x) => x.id === b.id ? { ...x, website } : x)
-          );
-        }
-      }
-
-      if (!website) {
-        throw new Error("No website URL available for this business");
-      }
-
-      await supabase
-        .from("business_profiles")
-        .update({ analysis_status: "running" })
-        .eq("id", b.id);
-
-      const response = await fetch(`${NLP_SERVICE_URL}/analyze-business`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          website_url: website,
-          business_name: b.business_name,
-          gbp_category: b.gbp_category,
-          gbp_categories: b.gbp_categories || [],
-        }),
-      });
-
-      if (!response.ok) {
-        const errBody = await response.json().catch(() => ({}));
-        throw new Error(`Analysis failed: ${response.status} — ${errBody.detail || JSON.stringify(errBody)}`);
-      }
-      const result = await response.json();
-
-      await supabase
-        .from("business_profiles")
-        .update({
-          existing_pages: result.existing_pages,
-          detected_icp: result.detected_icp,
-          differentiators: result.differentiators,
-          analysis_status: result.analysis_status,
-        })
-        .eq("id", b.id);
-
-      setBusinesses((prev) =>
-        prev.map((x) => x.id === b.id ? { ...x, analysis_status: result.analysis_status } : x)
-      );
-    } catch (err) {
-      console.error("Analysis error:", err);
-      await supabase
-        .from("business_profiles")
-        .update({ analysis_status: "failed" })
-        .eq("id", b.id);
-      setBusinesses((prev) =>
-        prev.map((x) => x.id === b.id ? { ...x, analysis_status: "failed" } : x)
-      );
-    } finally {
-      setAnalyzingIds((prev) => {
-        const next = new Set(prev);
-        next.delete(b.id);
-        return next;
-      });
     }
   };
 
@@ -294,36 +210,17 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
                   <p className="text-xs text-muted-foreground mt-2 line-clamp-2">{b.description}</p>
                 )}
 
-                {(() => {
-                  const isRunning = analyzingIds.has(b.id) || b.analysis_status === "running";
-                  const isDone = !isRunning && b.analysis_status === "complete";
-                  const isFailed = !isRunning && b.analysis_status === "failed";
-                  const isRefreshing = refreshingIds.has(b.id);
-                  return (
-                    <div className="mt-3 pt-3 border-t border-border flex items-center justify-between">
-                      <div className="flex items-center gap-1.5">
-                        {(isRunning || isRefreshing) && <Loader2 className="w-3.5 h-3.5 text-accent animate-spin" />}
-                        {isDone && !isRefreshing && <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />}
-                        {isFailed && !isRefreshing && <AlertCircle className="w-3.5 h-3.5 text-destructive" />}
-                        <span className="text-[11px] text-muted-foreground">
-                          {isRefreshing ? "Updating from GBP…" : isRunning ? "Analyzing…" : isDone ? "Analysis complete" : isFailed ? "Analysis failed" : "Not analyzed"}
-                        </span>
-                      </div>
-                      <button
-                        onClick={(e) => isFailed ? handleRefreshGBP(e, b) : handleRunAnalysis(e, b)}
-                        disabled={isRunning || isRefreshing}
-                        className="flex items-center gap-1 text-[11px] font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        {(isRunning || isRefreshing) ? null : isDone || isFailed ? (
-                          <RefreshCw className="w-3 h-3" />
-                        ) : (
-                          <Sparkles className="w-3 h-3" />
-                        )}
-                        {(isRunning || isRefreshing) ? null : isDone ? "Re-run" : isFailed ? "Update from GBP" : "Run Analysis"}
-                      </button>
-                    </div>
-                  );
-                })()}
+                <div className="mt-3 pt-3 border-t border-border flex items-center justify-end">
+                  <button
+                    onClick={(e) => handleRefreshGBP(e, b)}
+                    disabled={refreshingIds.has(b.id)}
+                    className="flex items-center gap-1 text-[11px] font-medium text-accent hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {refreshingIds.has(b.id)
+                      ? <><Loader2 className="w-3 h-3 animate-spin" /> Updating…</>
+                      : <><RefreshCw className="w-3 h-3" /> Update from GBP</>}
+                  </button>
+                </div>
               </div>
             </div>
           ))}
