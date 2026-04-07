@@ -2639,10 +2639,11 @@ async def _score_html_inline(
 ) -> tuple:
     """Score a page in-process (no HTTP). Returns (composite_score, deficiencies, scores, token_rec)."""
     from bs4 import BeautifulSoup as _BS
+    html_structure = _detect_html_structure(page_html)
     page_text = _BS(page_html, "html.parser").get_text(separator="\n", strip=True)
     city = location.split(",")[0].strip()
     serp_ctx = _serp_context(serp_analysis_dict)
-    user_prompt = _build_score_prompt(business_name, gbp_category, keyword, city, address, serp_ctx, page_text)
+    user_prompt = _build_score_prompt(business_name, gbp_category, keyword, city, address, serp_ctx, page_text, html_structure)
 
     msg = await client.messages.create(
         model=SCORE_MODEL,
@@ -2866,6 +2867,20 @@ def compute_zone_targets(
     return targets
 
 
+def _detect_html_structure(page_html: str) -> str:
+    """Return a plain-English summary of HTML structural elements present/missing."""
+    from bs4 import BeautifulSoup as _BS
+    soup = _BS(page_html, "html.parser")
+    uls   = len(soup.find_all("ul"))
+    ols   = len(soup.find_all("ol"))
+    tables = len(soup.find_all("table"))
+    lines = ["HTML STRUCTURE FACTS (deterministic — do NOT override):"]
+    lines.append(f"  • <ul> (bulleted lists): {uls} found" + (" ✓" if uls >= 1 else " ✗ MISSING"))
+    lines.append(f"  • <ol> (numbered lists): {ols} found" + (" ✓" if ols >= 1 else " ✗ MISSING"))
+    lines.append(f"  • <table> elements: {tables} found" + (" ✓" if tables >= 1 else " — not required unless content is comparative"))
+    return "\n".join(lines)
+
+
 def _build_score_prompt(
     business_name: str,
     gbp_category: str,
@@ -2874,17 +2889,18 @@ def _build_score_prompt(
     address: Optional[str],
     serp_ctx: str,
     page_text: str,
+    html_structure: str = "",
 ) -> str:
     """Returns the dynamic user-message portion of the scoring prompt.
     The static system instructions are in _SCORE_SYSTEM_PROMPT (cached separately)."""
+    structure_block = f"\n{html_structure}\n" if html_structure else ""
     return f"""CONTEXT
 Business: {business_name}
 Category: {gbp_category}
 Keyword: {keyword}
 City: {city}
 Address: {address or "Not provided"}
-{serp_ctx}
-
+{serp_ctx}{structure_block}
 PAGE CONTENT (first 8,000 chars):
 {page_text}"""
 
@@ -3025,9 +3041,10 @@ async def _score_page_for_related(
                               headers={"User-Agent": "Mozilla/5.0 (compatible; ShowUPBot/1.0)"})
         _resp.raise_for_status()
         page_html = _resp.text
+    html_structure = _detect_html_structure(page_html)
     page_text = _BS2(page_html, "html.parser").get_text(separator="\n", strip=True)
     city = location.split(",")[0].strip()
-    user_prompt = _build_score_prompt(business_name, gbp_category, keyword, city, address, "", page_text)
+    user_prompt = _build_score_prompt(business_name, gbp_category, keyword, city, address, "", page_text, html_structure)
     msg = await haiku_client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=4096,
@@ -3939,11 +3956,12 @@ async def score_page(request: Request, body: ScorePageRequest):
             raise HTTPException(status_code=422, detail="Could not fetch the provided page URL. Check that it is correct and publicly accessible.")
     if not page_html:
         raise HTTPException(status_code=422, detail="Either page_content or page_url is required")
+    html_structure = _detect_html_structure(page_html)
     page_text = _BS(page_html, "html.parser").get_text(separator="\n", strip=True)
     city = body.location.split(",")[0].strip()
     serp_ctx = _serp_context(serp_analysis_dict)
 
-    user_prompt = _build_score_prompt(body.business_name, body.gbp_category, body.keyword, city, body.address, serp_ctx, page_text)
+    user_prompt = _build_score_prompt(body.business_name, body.gbp_category, body.keyword, city, body.address, serp_ctx, page_text, html_structure)
 
     scores = None
     token_rec = None
