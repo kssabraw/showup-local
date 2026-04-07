@@ -28,6 +28,8 @@ interface RankabilityResult {
 
 interface Props {
   onCreatePage: (keyword: string, location: string) => void;
+  initialKeyword?: string;
+  initialLocation?: string;
 }
 
 // Map API group names to display labels
@@ -38,13 +40,13 @@ const GROUP_LABELS: Record<string, string> = {
 };
 const GROUP_ORDER = ["parents", "siblings", "children"];
 
-export default function PlanningView({ onCreatePage }: Props) {
+export default function PlanningView({ onCreatePage, initialKeyword = "", initialLocation = "" }: Props) {
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [businessesLoaded, setBusinessesLoaded] = useState(false);
   const [selectedBusinessId, setSelectedBusinessId] = useState("");
-  const [keyword, setKeyword] = useState("");
-  const [location, setLocation] = useState("");
-  const [locationInput, setLocationInput] = useState("");
+  const [keyword, setKeyword] = useState(initialKeyword);
+  const [location, setLocation] = useState(initialLocation);
+  const [locationInput, setLocationInput] = useState(initialLocation);
   const [scanning, setScanning] = useState(false);
   const [results, setResults] = useState<RelatedPageItem[]>([]);
   const [error, setError] = useState("");
