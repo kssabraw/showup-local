@@ -19,6 +19,7 @@ const corsHeaders = {
 };
 
 const OUTSCRAPER_BASE = 'https://api.app.outscraper.com';
+const DATAFORSEO_BASE = 'https://api.dataforseo.com/v3';
 
 const unauthorized = () =>
   new Response(JSON.stringify({ error: "Unauthorized" }), {
@@ -173,19 +174,64 @@ serve(async (req) => {
         cleanWebsite = /^https?:\/\//i.test(decoded) ? decoded : '';
       }
 
-      // Extract reviews — Outscraper returns reviews_data when reviewsLimit > 0
-      const rawReviews: any[] = Array.isArray(p.reviews_data) ? p.reviews_data : [];
-      const reviews = rawReviews
-        .filter((r: any) => r.review_text && r.review_rating >= 4)
-        .slice(0, 5)
-        .map((r: any) => ({
-          reviewer: r.author_title || 'Anonymous',
-          rating: r.review_rating,
-          text: r.review_text,
-          date: r.review_datetime_utc
-            ? r.review_datetime_utc.split(' ')[0]   // "YYYY-MM-DD HH:MM:SS UTC" → "YYYY-MM-DD"
-            : '',
-        }));
+      // Fetch reviews via DataForSEO (preferred) or fall back to Outscraper reviews_data
+      const dfsLogin = Deno.env.get('DATAFORSEO_LOGIN');
+      const dfsPassword = Deno.env.get('DATAFORSEO_PASSWORD');
+      const gbpPlaceId = p.place_id || p.google_id || '';
+
+      let reviews: any[] = [];
+
+      if (dfsLogin && dfsPassword && gbpPlaceId) {
+        try {
+          const dfsAuth = btoa(`${dfsLogin}:${dfsPassword}`);
+          const dfsResp = await fetch(`${DATAFORSEO_BASE}/business_data/google/reviews/live`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Basic ${dfsAuth}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify([{
+              place_id: gbpPlaceId,
+              depth: 10,
+              sort_by: 'most_relevant',
+              language_name: 'English',
+            }]),
+          });
+          if (dfsResp.ok) {
+            const dfsData = await dfsResp.json();
+            const items: any[] = dfsData?.tasks?.[0]?.result?.[0]?.items ?? [];
+            reviews = items
+              .filter((r: any) => r.review_text && (r.review_rating?.value ?? r.rating ?? 0) >= 4)
+              .slice(0, 5)
+              .map((r: any) => ({
+                reviewer: r.profile_name || r.author_title || 'Anonymous',
+                rating: r.review_rating?.value ?? r.rating ?? 5,
+                text: r.review_text,
+                date: r.timestamp
+                  ? r.timestamp.split('T')[0]
+                  : (r.review_datetime_utc ? r.review_datetime_utc.split(' ')[0] : ''),
+              }));
+          }
+        } catch (dfsErr) {
+          console.warn('DataForSEO reviews fetch failed, falling back to Outscraper:', dfsErr);
+        }
+      }
+
+      // Fallback: Outscraper reviews_data
+      if (reviews.length === 0) {
+        const rawReviews: any[] = Array.isArray(p.reviews_data) ? p.reviews_data : [];
+        reviews = rawReviews
+          .filter((r: any) => r.review_text && r.review_rating >= 4)
+          .slice(0, 5)
+          .map((r: any) => ({
+            reviewer: r.author_title || 'Anonymous',
+            rating: r.review_rating,
+            text: r.review_text,
+            date: r.review_datetime_utc
+              ? r.review_datetime_utc.split(' ')[0]
+              : '',
+          }));
+      }
 
       const details = {
         place_id: p.place_id || p.google_id || '',
