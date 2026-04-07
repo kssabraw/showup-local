@@ -4194,6 +4194,13 @@ async def reoptimize_page(request: Request, body: ReoptimizePageRequest):
         if not existing_html:
             raise Exception("Either existing_page_html or existing_page_url is required")
 
+        # Extract plain text from the existing page — used as reference for facts,
+        # not as HTML to preserve.  Real-world pages are often JS-rendered shells
+        # that produce blank output when injected into our preview.  Instead we
+        # generate a fresh clean <article> page (same format as /generate-page)
+        # informed by the deficiency analysis.
+        existing_page_text = BeautifulSoup(existing_html, "html.parser").get_text(separator="\n", strip=True)
+
         # Parse existing page zones and compute delta-based SERP context
         page_zones = _parse_page_zones(existing_html)
         serp_ctx = _reopt_serp_context(page_zones, body.serp_analysis)
@@ -4216,19 +4223,24 @@ async def reoptimize_page(request: Request, body: ReoptimizePageRequest):
             for d in body.deficiencies
         )
 
-        user_prompt = f"""BUSINESS: {body.business_name} | CATEGORY: {body.gbp_category}
-KEYWORD: {body.keyword} | CITY: {city}
-PHONE: {body.phone or "[PHONE]"}
-ADDRESS: {body.address or "Not provided"}
+        user_prompt = f"""BUSINESS DATA
+Name: {body.business_name}
+Category: {body.gbp_category}
+Address: {body.address or "Not provided"}
+Phone: {body.phone or "Not provided — use [PHONE] as placeholder"}
+Primary keyword: {body.keyword}
+Target city: {city}
+Full location: {body.location}
+
 {serp_ctx}
 
 {seo_checklist}
 
-SEO DEFICIENCIES TO FIX (these must all be addressed in the rewrite):
+SEO DEFICIENCIES TO FIX — address ALL of these in the new page:
 {deficiency_text}
 
-EXISTING PAGE (use as reference — preserve accurate facts, fix everything else):
-{existing_html}"""
+EXISTING PAGE CONTENT (extract accurate business facts from this — do NOT invent any facts not present here):
+{existing_page_text[:4000]}"""
 
         await q.put({"step": "progress", "progress": 40, "message": "Rewriting your page…"})
 
@@ -4236,7 +4248,7 @@ EXISTING PAGE (use as reference — preserve accurate facts, fix everything else
             claude_msg = await client.messages.create(
                 model=GENERATION_MODEL,
                 max_tokens=8000,
-                system=[{"type": "text", "text": _REOPT_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                system=[{"type": "text", "text": _GEN_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": user_prompt}],
             )
         except Exception as e:
@@ -4250,12 +4262,21 @@ EXISTING PAGE (use as reference — preserve accurate facts, fix everything else
             raw = re.sub(r'\n?```$', '', raw)
             raw = raw.strip()
 
-        # Extract title tag if present
+        # Extract <title> tag (same as generate-page)
         title_match = re.search(r'<title>(.*?)</title>', raw, re.IGNORECASE | re.DOTALL)
         page_title = title_match.group(1).strip() if title_match else ""
+        if title_match:
+            raw = raw[:title_match.start()] + raw[title_match.end():]
+            raw = raw.strip()
 
-        # Extract body content and JSON-LD schemas (handles schemas in <head>)
-        content_html, schema_json = _extract_reopt_parts(raw)
+        # Split content_html from schema_json (our <article> format always has JSON-LD at the end)
+        schema_split = raw.find('<script type="application/ld+json">')
+        if schema_split != -1:
+            content_html = raw[:schema_split].strip()
+            schema_json  = raw[schema_split:].strip()
+        else:
+            content_html = raw
+            schema_json  = None
 
         # ── Auto-retry: score inline and reoptimize up to 5 total passes if < 90 ──
         current_html   = content_html
