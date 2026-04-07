@@ -1240,7 +1240,6 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             {selectedBusiness && (() => {
               const missing = [];
               if (!selectedBusiness.hours) missing.push("business hours");
-              if (!selectedBusiness.reviews || (Array.isArray(selectedBusiness.reviews) && (selectedBusiness.reviews as any[]).length === 0)) missing.push("customer reviews");
               if (missing.length === 0) return null;
               return (
                 <div className="flex items-start gap-2 px-3 py-2.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs text-amber-700">
