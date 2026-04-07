@@ -862,7 +862,7 @@ const LocationDetailView = ({
                 <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Personality</p>
                 <div className="flex flex-wrap gap-1.5">
                   {v.personality.map((t: string, i: number) => (
-                    <span key={i} className="text-xs px-2.5 py-1 rounded-full bg-accent/10 text-accent-foreground font-medium">{t}</span>
+                    <span key={i} className="text-xs px-2.5 py-1 rounded-full bg-accent/10 text-foreground font-medium">{t}</span>
                   ))}
                 </div>
               </div>
