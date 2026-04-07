@@ -274,6 +274,7 @@ class AnalysisResponse(BaseModel):
     related_keywords: ZoneKeywords
     top_quadgrams: List[dict]
     google_entities: List[dict]
+    serp_bold_keywords: List[dict] = []       # bolded terms from SERP snippets + competitor usage
     zone_targets: Dict[str, dict] = {}        # max term/entity counts per zone across competitors
     competitor_headings: List[dict] = []      # H2/H3 strings scraped from competitor pages
     analysis_cost: dict = {}                  # estimated API costs for this analysis run
@@ -281,15 +282,17 @@ class AnalysisResponse(BaseModel):
 
 # ── Step 1: DataForSEO — fetch top organic SERP URLs ─────────────────────────
 
-async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient, location_code: Optional[int] = None) -> List[str]:
+async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient, location_code: Optional[int] = None) -> tuple:
     """
     Calls DataForSEO organic live/advanced to get the top SERP_RESULT_COUNT
-    organic URLs for keyword + location. Filters out skip-listed domains and
-    non-HTML resources. Returns [] on any error.
+    organic URLs for keyword + location. Also extracts highlighted/bold terms
+    from SERP titles and descriptions.
+
+    Returns (urls: List[str], bold_terms: List[str]).
     """
     if not DATAFORSEO_LOGIN or not DATAFORSEO_PASSWORD:
         logger.warning("DataForSEO credentials not set — skipping SERP fetch")
-        return []
+        return [], []
 
     credentials = base64.b64encode(
         f"{DATAFORSEO_LOGIN}:{DATAFORSEO_PASSWORD}".encode()
@@ -318,6 +321,10 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
         data = response.json()
 
         urls = []
+        bold_terms_raw: set = set()
+        kw_lower = keyword.lower().strip()
+        kw_words = set(kw_lower.split())
+
         for task in (data.get("tasks") or []):
             for result in (task.get("result") or []):
                 for item in (result.get("items") or []):
@@ -333,16 +340,25 @@ async def fetch_serp_urls(keyword: str, location: str, client: httpx.AsyncClient
                     domain = re.sub(r'^www\.', '', httpx.URL(url).host)
                     if any(domain == d or domain.endswith('.' + d) for d in SKIP_DOMAINS):
                         continue
+
+                    # Extract highlighted/bold terms from this item
+                    for hl in (item.get("highlighted") or []):
+                        hl_clean = hl.strip().lower()
+                        # Skip if it's just the exact keyword or a subset of keyword words
+                        if hl_clean and hl_clean != kw_lower and set(hl_clean.split()) != kw_words:
+                            bold_terms_raw.add(hl_clean)
+
                     urls.append(url)
                     if len(urls) >= SERP_RESULT_COUNT:
                         break
 
-        logger.info(f"DataForSEO returned {len(urls)} usable URLs for '{keyword}'")
-        return urls
+        bold_terms = sorted(bold_terms_raw)
+        logger.info(f"DataForSEO returned {len(urls)} usable URLs, {len(bold_terms)} bold terms for '{keyword}'")
+        return urls, bold_terms
 
     except Exception as e:
         logger.warning(f"DataForSEO error: {e}")
-        return []
+        return [], []
 
 
 # ── Phone number linkification ────────────────────────────────────────────────
@@ -737,13 +753,14 @@ async def _run_serp_analysis(
     Shared SERP analysis pipeline used by both /analyze and /score-page.
     Runs DataForSEO → ScrapeOwl (hybrid JS retry) → TF-IDF → quadgrams → Google NLP.
     """
-    # Step 1: get URLs
+    # Step 1: get URLs + bold terms from SERP snippets
+    bold_terms_from_serp: List[str] = []
     if urls:
         serp_urls = urls
         logger.info(f"Using {len(serp_urls)} manually provided URLs")
     else:
         async with httpx.AsyncClient() as client:
-            serp_urls = await fetch_serp_urls(keyword, location, client, location_code)
+            serp_urls, bold_terms_from_serp = await fetch_serp_urls(keyword, location, client, location_code)
         if not serp_urls:
             raise HTTPException(status_code=502, detail="DataForSEO returned no usable URLs")
 
@@ -760,6 +777,8 @@ async def _run_serp_analysis(
     h2_per_page: List[List[str]] = []
     h3_per_page: List[List[str]] = []
     scraped_urls: List[str] = []
+    # Store full page text per page for bold keyword counting
+    full_page_texts: List[str] = []
     for url, html in zip(serp_urls, pages):
         zones = extract_zones(html)
         for z in ZONES:
@@ -767,6 +786,10 @@ async def _run_serp_analysis(
         h2_per_page.append(zones.get("h2_list", []))
         h3_per_page.append(zones.get("h3_list", []))
         scraped_urls.append(url)
+        # Combine all text zones for bold term counting
+        full_page_texts.append(
+            " ".join(zones[z] for z in ("title", "h1", "h2_h3", "paragraphs") if zones.get(z)).lower()
+        )
 
     # Step 4: NLP analysis
     related = ZoneKeywords(
@@ -790,10 +813,42 @@ async def _run_serp_analysis(
             except Exception as _nlp_err:
                 logger.warning(f"Google NLP failed (non-fatal): {_nlp_err}")
 
+    # Step 6: SERP bold keyword analysis — count usage across competitor pages
+    serp_bold_keywords: List[dict] = []
+    total_pages = len(scraped_urls)
+    if bold_terms_from_serp and full_page_texts:
+        min_bold_spread = max(2, int(np.ceil(total_pages * 0.30)))  # 30% threshold (lower than entities — bolding is a direct Google signal)
+        for term in bold_terms_from_serp:
+            # Count occurrences per page
+            page_counts: List[int] = []
+            pages_with_term = 0
+            # Build regex for whole-word matching
+            term_re = re.compile(r'\b' + re.escape(term) + r'\b', re.IGNORECASE)
+            for page_text in full_page_texts:
+                count = len(term_re.findall(page_text))
+                page_counts.append(count)
+                if count > 0:
+                    pages_with_term += 1
+            if pages_with_term < min_bold_spread:
+                continue
+            max_uses = max(page_counts)
+            avg_uses = round(sum(page_counts) / len(page_counts), 1)
+            # recommended_mentions = max competitor usage (benchmark to beat)
+            serp_bold_keywords.append({
+                "term": term,
+                "page_spread": pages_with_term,
+                "page_spread_pct": round(pages_with_term / total_pages, 2),
+                "max_competitor_uses": max_uses,
+                "avg_uses": avg_uses,
+                "recommended_mentions": max_uses,
+            })
+        serp_bold_keywords.sort(key=lambda x: (-x["page_spread"], -x["max_competitor_uses"]))
+        serp_bold_keywords = serp_bold_keywords[:25]  # cap at 25 terms
+        logger.info(f"SERP bold keywords: {len(serp_bold_keywords)} qualifying terms from {len(bold_terms_from_serp)} extracted")
+
     zone_targets = compute_zone_targets(zone_buckets, related, google_entities)
 
     # Aggregate competitor headings by page spread
-    total_pages = len(scraped_urls)
     competitor_headings: List[dict] = []
     for tag_type, per_page in (("h2", h2_per_page), ("h3", h3_per_page)):
         canonical: Dict[str, str] = {}
@@ -842,6 +897,7 @@ async def _run_serp_analysis(
         related_keywords=related,
         top_quadgrams=quadgrams,
         google_entities=google_entities,
+        serp_bold_keywords=serp_bold_keywords,
         zone_targets=zone_targets,
         competitor_headings=competitor_headings,
         analysis_cost=analysis_cost,
@@ -3004,6 +3060,7 @@ def _serp_context(serp_analysis: Optional[dict]) -> str:
     zt = serp_analysis.get("zone_targets", {})
     entities = serp_analysis.get("google_entities", [])
     quadgrams = serp_analysis.get("top_quadgrams", [])
+    total_pages = len(serp_analysis.get("serp_urls", [])) or 10
 
     zone_labels = [
         ("title",      "PAGE TITLE (<title> tag)"),
@@ -3053,6 +3110,20 @@ using it once counts toward both the keyword target and the entity target for th
     if quadgrams:
         parts.append(f"\nTOP COMPETITOR PHRASES (4-word phrases — use naturally in body):")
         parts.append(f"  {', '.join(q['phrase'] for q in quadgrams[:15])}")
+
+    # SERP bold keywords — terms Google highlights in search results
+    bold_kws = serp_analysis.get("serp_bold_keywords", [])
+    if bold_kws:
+        parts.append(
+            "\nGOOGLE-BOLDED KEYWORDS — these are the exact terms Google highlights in SERP "
+            "snippets for this query. Use each term at least as many times as the top competitor:"
+        )
+        for bk in bold_kws[:20]:
+            parts.append(
+                f"  \"{bk['term']}\" — use ≥{bk['recommended_mentions']}× "
+                f"(top competitor: {bk['max_competitor_uses']}×, "
+                f"appears on {bk['page_spread']}/{total_pages} pages)"
+            )
 
     headings = serp_analysis.get("competitor_headings", [])
     if headings:

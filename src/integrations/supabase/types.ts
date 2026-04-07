@@ -176,6 +176,7 @@ export type Database = {
           keyword: string
           location: string
           related_keywords: Json | null
+          serp_bold_keywords: Json | null
           serp_urls: Json | null
           top_quadgrams: Json | null
           updated_at: string
@@ -190,6 +191,7 @@ export type Database = {
           keyword: string
           location: string
           related_keywords?: Json | null
+          serp_bold_keywords?: Json | null
           serp_urls?: Json | null
           top_quadgrams?: Json | null
           updated_at?: string
@@ -204,6 +206,7 @@ export type Database = {
           keyword?: string
           location?: string
           related_keywords?: Json | null
+          serp_bold_keywords?: Json | null
           serp_urls?: Json | null
           top_quadgrams?: Json | null
           updated_at?: string

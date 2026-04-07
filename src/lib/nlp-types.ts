@@ -56,6 +56,15 @@ export interface HeadingItem {
   headings: string[];
 }
 
+export interface BoldKeywordItem {
+  term: string;
+  page_spread: number;
+  page_spread_pct: number;
+  max_competitor_uses: number;
+  avg_uses: number;
+  recommended_mentions: number;
+}
+
 export interface AnalysisResult {
   keyword: string;
   location: string;
@@ -70,6 +79,7 @@ export interface AnalysisResult {
   };
   top_quadgrams: QuadgramItem[];
   google_entities: EntityItem[];
+  serp_bold_keywords?: BoldKeywordItem[];
   zone_targets: Record<string, { target: number }>;
   competitor_headings: HeadingItem[];
   analysis_cost?: Record<string, number>;
