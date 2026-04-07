@@ -817,12 +817,12 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
       <div className="max-w-2xl mx-auto space-y-6">
         <div>
           <h1 className="text-2xl font-display font-bold text-foreground">Creating Your Page</h1>
-          <p className="text-muted-foreground text-sm mt-1">Hang tight — this usually takes 60–120 seconds.</p>
+          <p className="text-muted-foreground text-sm mt-1">Hang tight — this usually takes 2-4 minutes.</p>
         </div>
         <div className="bg-card border border-border rounded-xl px-6 py-6 space-y-4">
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span className="font-medium">Building your page… <span className="tabular-nums">{elapsed}</span></span>
-            <span className="opacity-70">Usually 60–120 seconds</span>
+            <span className="opacity-70">Usually 2-4 minutes</span>
           </div>
           <div className="space-y-3">
             {steps.map((step, i) => (
@@ -1296,7 +1296,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             <div className="px-4 py-4 bg-muted/30 rounded-lg space-y-3">
               <div className="flex items-center justify-between text-xs text-muted-foreground">
                 <span className="font-medium">Building your page… <span className="tabular-nums">{elapsed}</span></span>
-                <span className="opacity-70">Usually 60–120 seconds</span>
+                <span className="opacity-70">Usually 2-4 minutes</span>
               </div>
               <div className="space-y-2">
                 {steps.map((step, i) => (
