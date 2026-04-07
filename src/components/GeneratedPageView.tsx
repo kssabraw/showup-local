@@ -149,6 +149,9 @@ export default function GeneratedPageView({
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState("");
 
+  // Rich-text div ref — set innerHTML via effect to avoid React reconciliation issues
+  const richTextRef = useRef<HTMLDivElement>(null);
+
   // Auto-score the generated/reoptimized page in the background
   const [autoScore, setAutoScore] = useState<ScoreResult | null>(null);
   const [autoScoring, setAutoScoring] = useState(true);
@@ -192,22 +195,31 @@ export default function GeneratedPageView({
   };
 
   const copyRichText = async () => {
-    try {
-      // Copy as rich text (text/html) so it pastes with formatting into WordPress, Google Docs, etc.
-      await navigator.clipboard.write([
-        new ClipboardItem({
-          "text/html": new Blob([contentHtml], { type: "text/html" }),
-          "text/plain": new Blob(
-            [new DOMParser().parseFromString(contentHtml, "text/html").body.innerText],
-            { type: "text/plain" }
-          ),
-        }),
-      ]);
-    } catch {
-      // Fallback: plain text
-      await navigator.clipboard.writeText(
-        new DOMParser().parseFromString(contentHtml, "text/html").body.innerText
-      );
+    const el = richTextRef.current;
+    if (el) {
+      // Select all content in the contentEditable div and use execCommand so the
+      // browser copies genuine rendered rich text (preserves bold, headings, lists, tables).
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      try {
+        document.execCommand("copy");
+      } catch {
+        // execCommand fallback failed — try clipboard API
+        try {
+          await navigator.clipboard.write([
+            new ClipboardItem({
+              "text/html": new Blob([el.innerHTML], { type: "text/html" }),
+              "text/plain": new Blob([el.innerText], { type: "text/plain" }),
+            }),
+          ]);
+        } catch {
+          await navigator.clipboard.writeText(el.innerText);
+        }
+      }
+      sel?.removeAllRanges();
     }
     setCopiedRichText(true);
     setTimeout(() => setCopiedRichText(false), 2000);
@@ -264,6 +276,13 @@ export default function GeneratedPageView({
       setRelatedLoading(false);
     }
   };
+
+  // Populate the contentEditable rich-text div whenever the tab is active
+  useEffect(() => {
+    if (activeTab === "raw-text" && richTextRef.current) {
+      richTextRef.current.innerHTML = DOMPurify.sanitize(contentHtml);
+    }
+  }, [activeTab, contentHtml]);
 
   // Start fetching related pages + social posts in the background on mount
   useEffect(() => {
@@ -557,30 +576,46 @@ export default function GeneratedPageView({
         </div>
       )}
 
-      {/* Raw Text tab */}
+      {/* Raw Text tab — WordPress-ready rich text */}
       {activeTab === "raw-text" && (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <p className="text-xs text-muted-foreground">
-              Select all and copy, then paste directly into WordPress, Google Docs, or any editor — formatting is preserved.
-            </p>
-            <Button variant="outline" size="sm" onClick={copyRichText}>
-              {copiedRichText ? <><Check className="w-4 h-4 mr-1" /> Copied!</> : <><Copy className="w-4 h-4 mr-1" /> Copy All</>}
+        <div className="space-y-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium text-foreground">WordPress-Ready Rich Text</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Click <span className="font-medium">Copy for WordPress</span>, then paste into your editor — headings, lists, bold, and tables are preserved.
+              </p>
+            </div>
+            <Button variant="outline" size="sm" className="shrink-0" onClick={copyRichText}>
+              {copiedRichText ? <><Check className="w-4 h-4 mr-1" /> Copied!</> : <><Copy className="w-4 h-4 mr-1" /> Copy for WordPress</>}
             </Button>
           </div>
+
+          {/* WordPress paste instructions */}
+          <div className="bg-blue-500/5 border border-blue-500/20 rounded-lg px-4 py-3 text-xs text-muted-foreground space-y-1">
+            <p className="font-semibold text-foreground mb-1">Where to paste in WordPress:</p>
+            <p><span className="font-medium text-foreground">Gutenberg (block editor)</span> — Add a <span className="font-mono bg-muted px-1 rounded">Classic</span> block, then paste. Or add a <span className="font-mono bg-muted px-1 rounded">Custom HTML</span> block and use the HTML tab instead.</p>
+            <p><span className="font-medium text-foreground">Classic editor</span> — Open the Visual tab, then paste.</p>
+          </div>
+
           {pageTitle && (
             <div className="flex items-start gap-3 px-4 py-3 bg-muted/40 rounded-lg border border-border">
               <span className="text-xs font-mono text-muted-foreground shrink-0 mt-0.5">&lt;title&gt;</span>
               <span className="text-sm text-foreground">{pageTitle}</span>
             </div>
           )}
+
+          {/* contentEditable div — browser copies genuine rich text on Ctrl+C or execCommand */}
           <div
+            ref={richTextRef}
+            contentEditable
+            suppressContentEditableWarning
+            spellCheck={false}
             className="bg-white rounded-xl border border-border p-8 prose prose-sm max-w-none
                        prose-headings:text-gray-900 prose-p:text-gray-800 prose-li:text-gray-800
                        prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg
                        prose-headings:font-bold prose-strong:font-bold
-                       select-all cursor-text"
-            dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(contentHtml) }}
+                       focus:outline-none focus:ring-2 focus:ring-accent/30 cursor-text"
           />
         </div>
       )}
