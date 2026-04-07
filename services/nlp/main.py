@@ -4032,16 +4032,21 @@ ICP: {icp}
         # retrying cannot fix — those are reported in content_gaps instead.
         await q.put({"step": "progress", "progress": 90, "message": "Scoring your page…"})
         inline_score = None
-        try:
-            inline_score, _, _, score_tok = await _score_html_inline(
-                content_html, body.keyword, body.location, body.business_name,
-                body.gbp_category, body.address, serp_analysis_dict, client,
-            )
-            token_rec["input_tokens"]  += score_tok["input_tokens"]
-            token_rec["output_tokens"] += score_tok["output_tokens"]
-            token_rec["cost_usd"]       = round(token_rec["cost_usd"] + score_tok["cost_usd"], 6)
-        except Exception as _ae:
-            logger.warning(f"generate-page: scoring failed: {_ae}")
+        for _score_attempt in range(3):
+            try:
+                inline_score, _, _, score_tok = await _score_html_inline(
+                    content_html, body.keyword, body.location, body.business_name,
+                    body.gbp_category, body.address, serp_analysis_dict, client,
+                )
+                token_rec["input_tokens"]  += score_tok["input_tokens"]
+                token_rec["output_tokens"] += score_tok["output_tokens"]
+                token_rec["cost_usd"]       = round(token_rec["cost_usd"] + score_tok["cost_usd"], 6)
+                break  # scoring succeeded
+            except Exception as _ae:
+                if _score_attempt < 2:
+                    await asyncio.sleep(2 ** _score_attempt)  # 1s then 2s
+                else:
+                    logger.warning(f"generate-page: scoring failed after 3 attempts: {_ae}")
 
         # Build combined cost breakdown
         ac = (serp_analysis_dict or {}).get("analysis_cost", {})

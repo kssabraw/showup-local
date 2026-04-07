@@ -525,24 +525,51 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         }
         if ("step" in evt && evt.step === "done" && evt.result) {
           const genData = evt.result;
-          const { error: saveError } = await supabase.from("generated_pages").insert({
-            business_id: selectedBusinessId,
-            keyword: kw.trim(),
-            location: location.trim(),
-            mode: "generate",
-            page_title: genData.page_title ?? kw,
-            content_html: genData.content_html,
-            schema_json: genData.schema_json ?? null,
-            content_gaps: genData.content_gaps ?? [],
-            composite_score: genData.composite_score ?? null,
-            scored_at: genData.composite_score != null ? new Date().toISOString() : null,
-          });
+          const { error: saveError, data: savedRow } = await supabase
+            .from("generated_pages")
+            .insert({
+              business_id: selectedBusinessId,
+              keyword: kw.trim(),
+              location: location.trim(),
+              mode: "generate",
+              page_title: genData.page_title ?? kw,
+              content_html: genData.content_html,
+              schema_json: genData.schema_json ?? null,
+              content_gaps: genData.content_gaps ?? [],
+              composite_score: genData.composite_score ?? null,
+              scored_at: genData.composite_score != null ? new Date().toISOString() : null,
+            })
+            .select("id")
+            .single();
           if (saveError) {
             console.error("bulk create: failed to save page for keyword", kw, saveError);
             await supabase.rpc("refund_failed_generation", {
               p_amount: 2, p_endpoint: "/generate-page", p_business_id: selectedBusinessId,
             });
             return false;
+          }
+          // If Railway didn't return a score (transient failure), score now and update
+          if (genData.composite_score == null && savedRow?.id) {
+            try {
+              const scoreResult = await nlp.scorePage({
+                keyword: kw.trim(),
+                location: location.trim(),
+                page_content: genData.content_html,
+                business_name: b.business_name,
+                gbp_category: b.gbp_category,
+                address: b.address,
+                serp_analysis: genData.serp_analysis as any,
+              });
+              if (scoreResult?.composite_score != null) {
+                await supabase.from("generated_pages").update({
+                  composite_score: scoreResult.composite_score,
+                  composite_status: scoreResult.composite_status,
+                  scored_at: new Date().toISOString(),
+                }).eq("id", savedRow.id);
+              }
+            } catch {
+              // Non-fatal — page saved without score
+            }
           }
           await supabase.from("token_usage").insert({
             ...genData.token_usage,
