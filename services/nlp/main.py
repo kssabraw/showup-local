@@ -427,6 +427,89 @@ def _linkify_phones(html: str, phone: Optional[str] = None) -> str:
     return "".join(result)
 
 
+_RDFA_TYPE_MAP: Dict[str, str] = {
+    "LOCATION":      "Place",
+    "ORGANIZATION":  "Organization",
+    "PERSON":        "Person",
+    "EVENT":         "Event",
+    "WORK_OF_ART":   "CreativeWork",
+    "CONSUMER_GOOD": "Product",
+}
+# Tags whose text content must not be modified
+_RDFA_SKIP_OPEN  = re.compile(r'^<(a|script|style|code|pre|title|head|link|meta)[\s>/]', re.IGNORECASE)
+_RDFA_SKIP_CLOSE = re.compile(r'^</(a|script|style|code|pre|title|head)>', re.IGNORECASE)
+
+
+def _apply_rdfa_markup(html: str, entities: list) -> str:
+    """Wrap first occurrence of each KG entity in an RDFa span with sameAs link.
+
+    Format:
+      <span vocab="https://schema.org/" typeof="Place" property="name" content="Anaheim">
+        <link property="sameAs" href="https://www.google.com/search?kgmid=/m/0r5yc"/>
+        Anaheim
+      </span>
+
+    Only entities that have a Knowledge Graph mid are marked up.
+    Longest entity names are processed first to avoid substring conflicts.
+    Each entity is marked only on its first occurrence.
+    Text inside <a>, <script>, <style>, <code>, <pre> tags is left untouched.
+    """
+    import html as _html_mod
+
+    kg_entities = sorted(
+        [e for e in entities if e.get("mid")],
+        key=lambda e: len(e["name"]),
+        reverse=True,  # longest first — prevents "Orange" matching inside "Orange County"
+    )
+    if not kg_entities:
+        return html
+
+    marked: set = set()
+
+    # Split into alternating [text, tag, text, tag, …] segments
+    segments = re.split(r'(<[^>]*>)', html)
+    in_skip = 0
+    result: list = []
+
+    for i, seg in enumerate(segments):
+        if i % 2 == 1:  # HTML tag
+            if _RDFA_SKIP_OPEN.match(seg):
+                in_skip += 1
+            elif _RDFA_SKIP_CLOSE.match(seg):
+                in_skip = max(0, in_skip - 1)
+            result.append(seg)
+            continue
+
+        # Text segment
+        if in_skip or not seg:
+            result.append(seg)
+            continue
+
+        text = seg
+        for entity in kg_entities:
+            name = entity["name"]
+            if name in marked:
+                continue
+            mid          = entity["mid"]
+            schema_type  = _RDFA_TYPE_MAP.get(entity.get("entity_type", ""), "Thing")
+            kg_url       = f"https://www.google.com/search?kgmid={mid}"
+            pat          = re.compile(r'\b' + re.escape(name) + r'\b', re.IGNORECASE)
+            m            = pat.search(text)
+            if m:
+                rdfa = (
+                    f'<span vocab="https://schema.org/" typeof="{schema_type}" '
+                    f'property="name" content="{_html_mod.escape(name)}">'
+                    f'<link property="sameAs" href="{kg_url}"/>'
+                    f'{m.group()}</span>'
+                )
+                text = text[:m.start()] + rdfa + text[m.end():]
+                marked.add(name)
+
+        result.append(text)
+
+    return "".join(result)
+
+
 # ── Step 2: ScrapeOwl — fetch raw HTML for each URL ──────────────────────────
 
 async def _scrape_one(url: str, client: httpx.AsyncClient, render_js: bool = False) -> Optional[str]:
@@ -724,6 +807,7 @@ async def get_google_entities(
             etype = entity.get("type", "UNKNOWN")
             salience = entity.get("salience", 0.0)
             mention_count = len(entity.get("mentions", []))
+            mid = entity.get("metadata", {}).get("mid", "")
             if not name:
                 continue
             key = (name.lower(), etype)
@@ -733,6 +817,8 @@ async def get_google_entities(
                 entity_data[key]["pages"].add(page_idx)
                 entity_data[key]["name"] = name
                 entity_data[key]["entity_type"] = etype
+                if mid and not entity_data[key].get("mid"):
+                    entity_data[key]["mid"] = mid
                 seen_this_page.add(key)
 
     results = []
@@ -747,6 +833,7 @@ async def get_google_entities(
         results.append({
             "name": data["name"],
             "entity_type": data["entity_type"],
+            "mid": data.get("mid", ""),
             "mean_salience": round(mean_salience, 4),
             "page_spread": page_count,
             "page_spread_pct": round(page_count / total_pages, 2),
@@ -2777,6 +2864,8 @@ EXISTING PAGE (use as reference — preserve accurate facts, fix everything else
 
     content_html, schema_json = _extract_reopt_parts(raw)
     content_html = _linkify_phones(content_html, phone)
+    inline_entities = (serp_analysis_dict or {}).get("google_entities", [])
+    content_html = _apply_rdfa_markup(content_html, inline_entities)
 
     return content_html, schema_json, page_title, token_rec
 
@@ -4367,8 +4456,10 @@ ICP: {icp}
             content_html = raw
             schema_json  = ""
 
-        # Linkify phone numbers in generated HTML
+        # Linkify phone numbers + RDFa entity markup
         content_html = _linkify_phones(content_html, body.phone)
+        google_entities = (serp_analysis_dict or {}).get("google_entities", [])
+        content_html = _apply_rdfa_markup(content_html, google_entities)
 
         # ── Score the generated page (single pass) ───────────────────────────────
         # Structural requirements (keywords, entities, FAQ, geo, AEO) are covered
@@ -4560,8 +4651,10 @@ EXISTING PAGE CONTENT (extract accurate business facts from this — do NOT inve
             content_html = raw
             schema_json  = None
 
-        # Linkify phone numbers in reoptimized HTML
+        # Linkify phone numbers + RDFa entity markup
         content_html = _linkify_phones(content_html, body.phone)
+        reopt_entities = (body.serp_analysis or {}).get("google_entities", [])
+        content_html = _apply_rdfa_markup(content_html, reopt_entities)
 
         # ── Auto-retry: one scoring pass + one reoptimize pass if score < 90 ──
         # Reoptimize already has deficiency context so one retry is enough.
