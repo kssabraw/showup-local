@@ -11,6 +11,7 @@ import {
   Newspaper,
   ShieldCheck,
   ScanSearch,
+  BookMarked,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCredits } from "@/hooks/useCredits";
@@ -26,6 +27,7 @@ interface SidebarProps {
 const navItems = [
   { id: "dashboard",       label: "Dashboard",       icon: LayoutDashboard },
   { id: "content",         label: "Content",         icon: FileText },
+  { id: "saved-pages",     label: "Saved Pages",     icon: BookMarked },
   { id: "planning",        label: "Planning",        icon: ClipboardList },
   { id: "score-my-page",   label: "Score My Page",   icon: ScanSearch },
   { id: "press-releases",  label: "Press Releases",  icon: Newspaper },

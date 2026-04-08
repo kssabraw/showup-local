@@ -33,7 +33,10 @@ const DashboardView = ({ onNavigate }: Props) => {
           </>
         ) : (
           <>
-            <div className="bg-card rounded-xl border border-border p-5 hover:shadow-md transition-shadow">
+            <button
+              onClick={() => onNavigate("saved-pages")}
+              className="bg-card rounded-xl border border-border p-5 hover:shadow-md transition-shadow text-left w-full"
+            >
               <div className="flex items-center justify-between mb-3">
                 <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Total Content</span>
                 <FileText className="w-4 h-4 text-accent" />
@@ -41,7 +44,7 @@ const DashboardView = ({ onNavigate }: Props) => {
               <p className={`text-2xl font-display font-bold ${stats?.totalContent === 0 ? "text-muted-foreground" : "text-foreground"}`}>
                 {stats?.totalContent ?? 0}
               </p>
-            </div>
+            </button>
 
             <div className="bg-card rounded-xl border border-border p-5 hover:shadow-md transition-shadow">
               <div className="flex items-center justify-between mb-3">
