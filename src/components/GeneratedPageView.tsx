@@ -202,7 +202,7 @@ export default function GeneratedPageView({
       setAutoScoring(false);
     });
   }, []);  // eslint-disable-line react-hooks/exhaustive-deps
-  const [activeTab, setActiveTab] = useState<"preview" | "raw-text" | "html" | "schema" | "social" | "related">("preview");
+  const [activeTab, setActiveTab] = useState<"preview" | "raw-text" | "html" | "social" | "related">("preview");
   // Related pages state
   const [relatedLoading, setRelatedLoading] = useState(false);
   const [relatedItems, setRelatedItems] = useState<RelatedPageItem[] | null>(null);
@@ -541,7 +541,7 @@ export default function GeneratedPageView({
 
       {/* Tabs */}
       <div className="flex gap-2 border-b border-border flex-wrap">
-        {(["preview", "raw-text", "html", "schema", "social", "related"] as const).map(tab => (
+        {(["preview", "raw-text", "html", "social", "related"] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -691,25 +691,6 @@ export default function GeneratedPageView({
         </div>
       )}
 
-      {/* Schema tab */}
-      {activeTab === "schema" && (
-        <div className="space-y-3">
-          {schemaJson ? (
-            <>
-              <div className="flex justify-end">
-                <Button variant="outline" size="sm" onClick={copySchema}>
-                  {copiedSchema ? <><Check className="w-4 h-4 mr-1" /> Copied</> : <><Copy className="w-4 h-4 mr-1" /> Copy Schema</>}
-                </Button>
-              </div>
-              <pre className="bg-muted rounded-xl border border-border p-4 text-xs overflow-x-auto whitespace-pre-wrap font-mono text-foreground max-h-[600px] overflow-y-auto">
-                {schemaJson}
-              </pre>
-            </>
-          ) : (
-            <p className="text-sm text-muted-foreground">No schema was generated for this page.</p>
-          )}
-        </div>
-      )}
 
       {/* Social Posts tab */}
       {activeTab === "social" && (
