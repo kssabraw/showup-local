@@ -160,7 +160,7 @@ export default function GeneratedPageView({
   const [copiedRichText, setCopiedRichText] = useState(false);
   const [showCostBreakdown, setShowCostBreakdown] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [saved, setSaved] = useState(!!savedPageIdProp);
   const [saveError, setSaveError] = useState("");
 
   // Rich-text div ref — set innerHTML via effect to avoid React reconciliation issues

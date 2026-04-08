@@ -456,6 +456,31 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             setView({ kind: "form" });
             return;
           }
+          // Auto-save immediately so navigating away doesn't lose the page
+          let autoSavedId: string | null = null;
+          try {
+            const { data: savedRow } = await supabase
+              .from("generated_pages")
+              .insert({
+                business_id: selectedBusinessId,
+                keyword: kw.trim(),
+                location: location.trim(),
+                mode: "generate",
+                page_title: genData.page_title ?? null,
+                content_html: genData.content_html,
+                schema_json: genData.schema_json ?? null,
+                composite_score: genData.composite_score ?? null,
+                content_gaps: genData.content_gaps ?? [],
+              })
+              .select("id")
+              .single();
+            if (savedRow?.id) {
+              autoSavedId = savedRow.id;
+              invalidateSavedPages();
+            }
+          } catch {
+            // Non-fatal — user can still manually save from the view
+          }
           setView({
             kind: "generated",
             mode: "generate",
@@ -468,6 +493,7 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
             isNew: true,
             serpAnalysis: genData.serp_analysis ?? undefined,
             initialScore: genData.composite_score ?? null,
+            savedPageId: autoSavedId,
           });
           return;
         }
@@ -879,9 +905,35 @@ const NewContentView = ({ onBack, defaultLocation = "", initialKeyword, initialL
         onSerpAnalysis={saveAnalysisToSupabase}
         initialScoreResult={view.initialScoreResult}
         onBack={() => setView({ kind: "form" })}
-        onGenerated={(result, mode, prevScore) =>
-          setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "", htmlCssNotes: result.html_css_notes, tokenUsage: result.token_usage, costBreakdown: result.cost_breakdown ?? {}, isNew: true, prevScore })
-        }
+        onGenerated={async (result, mode, prevScore) => {
+          // Auto-save reoptimized page immediately
+          let autoSavedId: string | null = null;
+          try {
+            const { data: savedRow } = await supabase
+              .from("generated_pages")
+              .insert({
+                business_id: selectedBusinessId,
+                keyword: keyword.trim(),
+                location: location.trim(),
+                mode,
+                page_title: result.page_title ?? null,
+                content_html: result.content_html,
+                schema_json: result.schema_json ?? null,
+                composite_score: result.composite_score ?? null,
+                composite_status: result.composite_status ?? null,
+                content_gaps: [],
+              })
+              .select("id")
+              .single();
+            if (savedRow?.id) {
+              autoSavedId = savedRow.id;
+              invalidateSavedPages();
+            }
+          } catch {
+            // Non-fatal
+          }
+          setView({ kind: "generated", mode, contentHtml: result.content_html, schemaJson: result.schema_json, pageTitle: result.page_title ?? "", htmlCssNotes: result.html_css_notes, tokenUsage: result.token_usage, costBreakdown: result.cost_breakdown ?? {}, isNew: true, prevScore, savedPageId: autoSavedId });
+        }}
         // Note: reoptimize flow doesn't produce content_gaps (it fixes existing content)
         onCreateNew={handleCreateNewPage}
         relatedPagePanel={relatedPagePanel}
