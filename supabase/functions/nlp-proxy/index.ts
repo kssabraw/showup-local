@@ -63,7 +63,7 @@ serve(async (req: Request) => {
   // Only allow POST to known endpoints
   const allowedEndpoints = [
     "/analyze", "/analyze-business", "/analyze-brand-voice",
-    "/score-page", "/generate-page", "/reoptimize-page",
+    "/score-page", "/generate-page", "/reoptimize-page", "/reoptimize-section",
     "/find-page-for-keyword", "/related-pages", "/check-rankability",
     "/plan-pages", "/health", "/generate-social-posts",
     "/generate-press-release",

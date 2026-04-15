@@ -3,6 +3,7 @@ import type {
   ScoreResult,
   GeneratePageResult,
   ReoptimizeResult,
+  ReoptimizeSectionResult,
   RelatedPageItem,
   RankabilityResult,
   StreamEvent,
@@ -260,6 +261,23 @@ export const nlp = {
     },
     signal?: AbortSignal,
   ) => nlpStreamDirect<ReoptimizeResult>("/reoptimize-page", body, signal),
+
+  /** Rewrite a single HTML section to fix a specific SEO deficiency. No credits deducted. */
+  reoptimizeSection: (
+    body: {
+      section_html: string;
+      engine: string;
+      issues?: string[];
+      recommendations?: string[];
+      keyword: string;
+      location: string;
+      business_name: string;
+      gbp_category: string;
+      address?: string;
+      phone?: string;
+    },
+    signal?: AbortSignal,
+  ) => nlpPostDirect<ReoptimizeSectionResult>("/reoptimize-section", body, signal),
 
   findPageForKeyword: (
     body: { website_url: string; keyword: string; location: string },

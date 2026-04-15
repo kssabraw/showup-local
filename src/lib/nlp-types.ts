@@ -138,6 +138,13 @@ export interface ReoptimizeResult {
   html_css_notes?: string[];
   page_title?: string;
   cost_breakdown?: CostBreakdown;
+  /** Extracted main-content HTML of the original page — used for section-level diff in Improve Mode */
+  original_html?: string;
+}
+
+export interface ReoptimizeSectionResult {
+  section_html: string;
+  token_usage: TokenUsage;
 }
 
 // ── Scoring ───────────────────────────────────────────────────────────────────

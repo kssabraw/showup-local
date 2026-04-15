@@ -4587,6 +4587,14 @@ async def reoptimize_page(request: Request, body: ReoptimizePageRequest):
         # informed by the deficiency analysis.
         existing_page_text = BeautifulSoup(existing_html, "html.parser").get_text(separator="\n", strip=True)
 
+        # Extract main content HTML for section-level diff display in Improve Mode.
+        # Strip nav/header/footer noise then grab article/main/body in that order.
+        _orig_soup = BeautifulSoup(existing_html, "html.parser")
+        for _tag in _orig_soup.find_all(['nav', 'header', 'footer', 'script', 'style', 'aside', 'noscript']):
+            _tag.decompose()
+        _main_el = (_orig_soup.find('article') or _orig_soup.find('main') or _orig_soup.find('body'))
+        original_content_html = str(_main_el)[:30000] if _main_el else ""
+
         # Parse existing page zones and compute delta-based SERP context
         page_zones = _parse_page_zones(existing_html)
         serp_ctx = _reopt_serp_context(page_zones, body.serp_analysis)
@@ -4736,10 +4744,111 @@ EXISTING PAGE CONTENT (extract accurate business facts from this — do NOT inve
                 "page_title": page_title,
                 "token_usage": token_rec,
                 "html_css_notes": [],
+                "original_html": original_content_html,
             },
         })
 
     return await _sse_stream(_worker)
+
+
+# ── /reoptimize-section ────────────────────────────────────────────────────────
+
+class ReoptimizeSectionRequest(BaseModel):
+    section_html: str
+    engine: str
+    issues: List[str] = []
+    recommendations: List[str] = []
+    keyword: str
+    location: str
+    business_name: str
+    gbp_category: str
+    address: Optional[str] = None
+    phone: Optional[str] = None
+
+
+class ReoptimizeSectionResponse(BaseModel):
+    section_html: str
+    token_usage: dict
+
+
+_SECTION_ENGINE_LABELS = {
+    "organic_ranking":       "Organic Ranking",
+    "gbp_maps":              "GBP / Maps Relevance",
+    "entity_establishment":  "Entity Establishment",
+    "icp_alignment":         "ICP Alignment",
+    "aeo_llm_retrieval":     "AEO / LLM Retrieval",
+    "geographic_legitimacy": "Geographic Legitimacy",
+    "nearme_intent":         "Hyperlocal / Near-Me Intent",
+}
+
+
+@app.post('/reoptimize-section', response_model=ReoptimizeSectionResponse)
+@limiter.limit("20/minute")
+async def reoptimize_section(request: Request, body: ReoptimizeSectionRequest):
+    """Rewrite a single HTML section to fix a specific SEO deficiency. No credits deducted."""
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+
+    # Auth: X-API-Key (proxied) OR JWT (direct) — no credits charged either way
+    api_key = request.headers.get("X-API-Key")
+    if api_key:
+        if not NLP_API_KEY or api_key != NLP_API_KEY:
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    else:
+        await _verify_jwt_get_user(request.headers.get("Authorization", ""))
+
+    import anthropic as _anthropic
+    client = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+    engine_label = _SECTION_ENGINE_LABELS.get(body.engine, body.engine)
+    city = body.location.split(",")[0].strip()
+    issues_text   = "\n".join(f"  - {i}" for i in body.issues)   if body.issues         else "  - General quality improvements needed"
+    recs_text     = "\n".join(f"  - {r}" for r in body.recommendations) if body.recommendations else ""
+
+    user_prompt = f"""DEFICIENCY TO FIX
+Engine: {engine_label}
+Issues:
+{issues_text}
+{f"Recommended changes:{chr(10)}{recs_text}" if recs_text else ""}
+
+BUSINESS CONTEXT
+Business: {body.business_name}
+Category: {body.gbp_category}
+Keyword: {body.keyword}
+City: {city}
+{f"Phone: {body.phone}" if body.phone else ""}
+
+ORIGINAL SECTION HTML:
+{body.section_html[:3000]}
+
+Rewrite this section to fix the listed issues. Preserve all accurate business facts. Return only the HTML for this section — no other text, no code fences."""
+
+    system_prompt = (
+        "You are an SEO content editor specialising in local service businesses. "
+        "You rewrite individual page sections to fix specific SEO deficiencies while preserving factual accuracy. "
+        "Return clean HTML only — no markdown, no code fences, no explanation."
+    )
+
+    try:
+        msg = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=2000,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+    except Exception:
+        logger.exception("Section reoptimize error")
+        raise HTTPException(status_code=502, detail="Section reoptimization temporarily unavailable")
+
+    section_html = msg.content[0].text.strip()
+    if section_html.startswith("```"):
+        section_html = re.sub(r'^```(?:html)?\s*', '', section_html)
+        section_html = re.sub(r'\s*```$', '', section_html.strip())
+
+    token_rec = _token_record("reoptimize-section", "claude-haiku-4-5-20251001",
+                              msg.usage.input_tokens, msg.usage.output_tokens)
+
+    return ReoptimizeSectionResponse(section_html=section_html, token_usage=token_rec)
 
 
 # ── /related-pages ─────────────────────────────────────────────────────────────

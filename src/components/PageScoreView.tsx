@@ -6,6 +6,7 @@ import { nlp, nlpStreamDirect, InsufficientCreditsError, purchaseCreditPack } fr
 import { useCredits, useInvalidateCredits } from "@/hooks/useCredits";
 import type { ScoreResult, ReoptimizeResult, AnalysisResult, EngineScore } from "@/lib/nlp-types";
 import CreditPackModal from "@/components/CreditPackModal";
+import ImproveDiffView from "@/components/ImproveDiffView";
 
 // Re-export for backward compat with callers that destructure the prop shape
 interface GeneratedResult {
@@ -77,6 +78,8 @@ export default function PageScoreView({
   const [error, setError] = useState("");
   const [showCreditModal, setShowCreditModal] = useState(false);
   const [expandedEngines, setExpandedEngines] = useState<Set<string>>(new Set());
+  const [selectedEngineKeys, setSelectedEngineKeys] = useState<Set<string>>(new Set());
+  const [diffData, setDiffData] = useState<{ result: ReoptimizeResult; originalHtml: string } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const { data: credits } = useCredits();
   const invalidateCredits = useInvalidateCredits();
@@ -125,6 +128,7 @@ export default function PageScoreView({
         abortRef.current.signal,
       );
       setScoreResult(data);
+      setSelectedEngineKeys(new Set(data.deficiencies.map(d => d.engine_key)));
       await saveTokenUsage(data.token_usage);
       invalidateCredits();
       if (data.serp_analysis && onSerpAnalysis) {
@@ -139,8 +143,9 @@ export default function PageScoreView({
     }
   };
 
-  const runReoptimize = async () => {
+  const runReoptimize = async (deficienciesToFix?: ScoreResult["deficiencies"]) => {
     if (!scoreResult) return;
+    const deficiencies = deficienciesToFix ?? scoreResult.deficiencies;
     abortRef.current = new AbortController();
     setReoptimizing(true);
     setError("");
@@ -150,9 +155,9 @@ export default function PageScoreView({
         {
           keyword,
           location,
-          existing_page_html: "",   // backend will re-fetch from page_url via score-page HTML
+          existing_page_html: "",   // backend re-fetches from page_url
           existing_page_url: pageUrl,
-          deficiencies: scoreResult.deficiencies,
+          deficiencies,
           business_name: businessName,
           gbp_category: gbpCategory,
           address,
@@ -166,7 +171,11 @@ export default function PageScoreView({
         if ("step" in evt && evt.step === "done" && evt.result) {
           await saveTokenUsage(evt.result.token_usage);
           invalidateCredits();
-          onGenerated(evt.result as GeneratedResult, "reoptimize", scoreResult?.composite_score ?? undefined);
+          // Transition to section diff view instead of navigating away immediately
+          setDiffData({
+            result: evt.result,
+            originalHtml: evt.result.original_html ?? "",
+          });
           return;
         }
       }
@@ -193,6 +202,32 @@ export default function PageScoreView({
       return next;
     });
   };
+
+  // ── Improve Mode diff view ───────────────────────────────────────────────────
+  if (diffData) {
+    return (
+      <ImproveDiffView
+        result={diffData.result}
+        originalHtml={diffData.originalHtml}
+        keyword={keyword}
+        location={location}
+        businessName={businessName}
+        gbpCategory={gbpCategory}
+        address={address}
+        phone={phone}
+        deficiencies={scoreResult?.deficiencies ?? []}
+        prevScore={scoreResult?.composite_score ?? 0}
+        onApply={(contentHtml, schemaJson, pageTitle, tokenUsage) => {
+          onGenerated(
+            { content_html: contentHtml, schema_json: schemaJson, page_title: pageTitle, token_usage: tokenUsage },
+            "reoptimize",
+            scoreResult?.composite_score ?? undefined,
+          );
+        }}
+        onBack={() => setDiffData(null)}
+      />
+    );
+  }
 
   return (
     <>
@@ -282,20 +317,36 @@ export default function PageScoreView({
                 const hasDetails = (eng.issues?.length || 0) + (eng.recommendations?.length || 0) > 0;
                 return (
                   <div key={key}>
-                    <button
-                      className="w-full px-6 py-3 flex items-center gap-3 hover:bg-muted/30 transition-colors text-left"
-                      onClick={() => hasDetails && toggleEngine(key)}
-                    >
-                      <StatusIcon score={eng.score} />
-                      <span className="flex-1 text-sm text-foreground">{label}</span>
-                      <div className="flex items-center gap-2">
-                        <div className="w-24 h-2 bg-muted rounded-full overflow-hidden">
-                          <div className={`h-full rounded-full ${statusBg(eng.score)}`} style={{ width: `${eng.score}%` }} />
+                    <div className="flex items-center">
+                      {eng.score < 80 && (
+                        <label className="pl-4 pr-1 flex items-center cursor-pointer" title="Select to fix">
+                          <input
+                            type="checkbox"
+                            className="rounded border-border"
+                            checked={selectedEngineKeys.has(key)}
+                            onChange={() => setSelectedEngineKeys(prev => {
+                              const next = new Set(prev);
+                              next.has(key) ? next.delete(key) : next.add(key);
+                              return next;
+                            })}
+                          />
+                        </label>
+                      )}
+                      <button
+                        className={`flex-1 px-4 py-3 flex items-center gap-3 hover:bg-muted/30 transition-colors text-left ${eng.score >= 80 ? "pl-6" : ""}`}
+                        onClick={() => hasDetails && toggleEngine(key)}
+                      >
+                        <StatusIcon score={eng.score} />
+                        <span className="flex-1 text-sm text-foreground">{label}</span>
+                        <div className="flex items-center gap-2">
+                          <div className="w-24 h-2 bg-muted rounded-full overflow-hidden">
+                            <div className={`h-full rounded-full ${statusBg(eng.score)}`} style={{ width: `${eng.score}%` }} />
+                          </div>
+                          <span className={`text-sm font-semibold w-8 text-right ${statusColor(eng.score)}`}>{eng.score}</span>
+                          {hasDetails && (expanded ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />)}
                         </div>
-                        <span className={`text-sm font-semibold w-8 text-right ${statusColor(eng.score)}`}>{eng.score}</span>
-                        {hasDetails && (expanded ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />)}
-                      </div>
-                    </button>
+                      </button>
+                    </div>
                     {expanded && hasDetails && (
                       <div className="px-6 pb-4 space-y-3 bg-muted/20">
                         {eng.issues?.length > 0 && (
@@ -325,29 +376,42 @@ export default function PageScoreView({
             </div>
           </div>
 
-          {/* Reoptimize CTA */}
+          {/* Improve Mode CTA */}
           {error && (
             <div className="bg-destructive/10 border border-destructive/20 rounded-lg px-4 py-3 text-sm text-destructive">{error}</div>
           )}
           <div className="bg-card rounded-xl border border-border p-6 space-y-3">
             {scoreResult.deficiencies.length > 0 ? (
               <>
-                <p className="text-sm text-muted-foreground">
-                  Reoptimize this page to fix the SEO issues above and incorporate missing SERP signals.
-                </p>
+                <div>
+                  <p className="text-sm font-medium text-foreground">Improve This Page</p>
+                  <p className="text-sm text-muted-foreground mt-0.5">
+                    Select engines above to fix, or use Fix All. Changes are shown section-by-section for your review before applying.
+                  </p>
+                </div>
                 <Button
                   className="w-full bg-accent text-accent-foreground hover:opacity-90 font-semibold py-6"
-                  onClick={runReoptimize}
+                  onClick={() => runReoptimize(scoreResult.deficiencies)}
                   disabled={reoptimizing || (credits !== undefined && (credits?.balance ?? 0) < 2)}
                   title={(credits?.balance ?? 0) < 2 ? "Insufficient credits" : undefined}
                 >
                   {reoptimizing
                     ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Rewriting page…</>
-                    : <>Reoptimize This Page <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span></>}
+                    : <>Fix All Issues <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span></>}
                 </Button>
+                {selectedEngineKeys.size > 0 && selectedEngineKeys.size < scoreResult.deficiencies.length && (
+                  <Button
+                    variant="outline"
+                    className="w-full font-semibold py-6"
+                    onClick={() => runReoptimize(scoreResult.deficiencies.filter(d => selectedEngineKeys.has(d.engine_key)))}
+                    disabled={reoptimizing || (credits !== undefined && (credits?.balance ?? 0) < 2)}
+                  >
+                    Fix Selected ({selectedEngineKeys.size}) <span className="ml-2 text-xs opacity-70 font-normal">2 credits</span>
+                  </Button>
+                )}
                 {reoptimizing && (
                   <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
-                    <span className="opacity-70">Usually 2-4 minutes</span>
+                    <span className="opacity-70">Usually 2–4 minutes</span>
                     <button onClick={cancelOperation} className="hover:text-destructive transition-colors">Cancel</button>
                   </div>
                 )}
