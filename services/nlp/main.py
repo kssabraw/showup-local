@@ -2113,6 +2113,74 @@ async def analyze_brand_voice_with_anthropic(page_contents: List[str], business_
     }
 
 
+def _build_brand_voice_text(brand_voice: Optional[dict]) -> str:
+    """Render brand voice + writer guide as a plain-text block for the system prompt.
+
+    Voice selection: defaults to the **current** voice (what the site already
+    sounds like). Only switches to the recommended voice when the user
+    explicitly accepted it (`recommended_accepted == True`). When the chosen
+    voice is missing (e.g. no website, so current_voice is null) we fall back
+    to the other so we still inject something useful.
+    """
+    if not brand_voice:
+        return ""
+    bv = brand_voice
+    if bv.get("recommended_accepted") is True:
+        voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
+    else:
+        voice = bv.get("current_voice") or bv.get("recommended_voice") or {}
+    guide = bv.get("writer_execution_guide") or {}
+    if not voice and not guide:
+        return ""
+
+    lines = ["BRAND VOICE (match this exactly):"]
+    if voice.get("tone"):
+        lines.append(f"  Tone: {voice['tone']}")
+    if voice.get("personality"):
+        lines.append(f"  Personality: {', '.join(voice['personality'])}")
+
+    ws = voice.get("writing_style") or {}
+    style_parts: List[str] = []
+    if ws.get("sentence_length"): style_parts.append(f"{ws['sentence_length']} sentences")
+    if ws.get("person"):          style_parts.append(str(ws['person']))
+    if ws.get("formality"):       style_parts.append(f"{ws['formality']} formality")
+    if ws.get("jargon_level"):    style_parts.append(f"jargon: {ws['jargon_level']}")
+    if style_parts:
+        lines.append(f"  Writing style: {', '.join(style_parts)}")
+
+    vocab = voice.get("vocabulary") or {}
+    if vocab.get("use"):
+        lines.append(f"  Words/phrases to use: {', '.join(vocab['use'])}")
+    if vocab.get("avoid"):
+        lines.append(f"  Words/phrases to avoid: {', '.join(vocab['avoid'])}")
+    if voice.get("messaging_themes"):
+        lines.append(f"  Messaging themes: {'; '.join(voice['messaging_themes'])}")
+    if voice.get("sample_phrases"):
+        lines.append(f"  Sample phrases (mirror this style): {'; '.join(voice['sample_phrases'])}")
+    if voice.get("content_generation_instructions"):
+        lines.append(f"  Writer instructions: {voice['content_generation_instructions']}")
+
+    # Writer execution guide — only the high-signal subset, rendered as bullets.
+    # Strategic content (how_to_think_before_writing, common_failure_modes,
+    # before_after_*) is omitted to keep the prompt block compact.
+    if isinstance(guide, dict) and guide:
+        if guide.get("default_writing_formula"):
+            lines.append(f"  Default writing formula: {guide['default_writing_formula']}")
+        for key, label in (
+            ("non_negotiable_rules", "Non-negotiable rules"),
+            ("sentence_style_do",    "Sentence style — DO"),
+            ("sentence_style_dont",  "Sentence style — DON'T"),
+            ("quick_cheat_sheet",    "Quick cheat sheet"),
+        ):
+            items = guide.get(key) or []
+            if items:
+                lines.append(f"  {label}:")
+                for item in items:
+                    lines.append(f"    - {item}")
+
+    return "\n".join(lines)
+
+
 @app.post('/analyze-brand-voice', response_model=BrandVoiceResponse, dependencies=[Depends(verify_api_key)])
 @limiter.limit("5/minute")
 async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
@@ -4277,36 +4345,9 @@ async def generate_page(request: Request, body: GeneratePageRequest):
 
         icp = body.icp_type or "General Homeowner"
 
-        # Build brand voice block
-        brand_voice_text = ""
-        if body.brand_voice:
-            bv = body.brand_voice
-            # Use recommended_accepted voice if user accepted one, otherwise fall back to recommended, then current
-            accepted = bv.get("recommended_accepted")
-            if accepted == "recommended":
-                voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
-            elif accepted == "current":
-                voice = bv.get("current_voice") or {}
-            else:
-                voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
-            guide = bv.get("writer_execution_guide", "")
-            if voice or guide:
-                lines = ["BRAND VOICE (match this exactly):"]
-                if voice.get("tone"):
-                    lines.append(f"  Tone: {voice['tone']}")
-                if voice.get("personality"):
-                    lines.append(f"  Personality: {', '.join(voice['personality'])}")
-                ws = voice.get("writing_style", {})
-                if ws:
-                    lines.append(f"  Writing style: {ws.get('sentence_length','')} sentences, {ws.get('person','')} person, {ws.get('formality','')} formality")
-                vocab = voice.get("vocabulary", {})
-                if vocab.get("use"):
-                    lines.append(f"  Words/phrases to use: {', '.join(vocab['use'])}")
-                if vocab.get("avoid"):
-                    lines.append(f"  Words/phrases to avoid: {', '.join(vocab['avoid'])}")
-                if guide:
-                    lines.append(f"  Writer instructions: {guide}")
-                brand_voice_text = "\n".join(lines)
+        # Build brand voice block — defaults to the current voice; switches to
+        # recommended only when the user explicitly accepted it.
+        brand_voice_text = _build_brand_voice_text(body.brand_voice)
 
         # Build ICP block
         icp_text = ""
@@ -5114,35 +5155,12 @@ async def generate_social_posts(request: Request, body: SocialPostsRequest):
                     lines.append(f"    Hooks: {'; '.join(hooks[:2])}")
             icp_text = "\n".join(lines)
 
-    # Build brand voice block
-    brand_voice_text = ""
-    if body.brand_voice:
-        bv = body.brand_voice
-        accepted = bv.get("recommended_accepted")
-        if accepted == "recommended":
-            voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
-        elif accepted == "current":
-            voice = bv.get("current_voice") or {}
-        else:
-            voice = bv.get("recommended_voice") or bv.get("current_voice") or {}
-        guide = bv.get("writer_execution_guide", "")
-        if voice or guide:
-            lines = ["\nBRAND VOICE (match this exactly):"]
-            if voice.get("tone"):
-                lines.append(f"  Tone: {voice['tone']}")
-            if voice.get("personality"):
-                lines.append(f"  Personality: {', '.join(voice['personality'])}")
-            ws = voice.get("writing_style", {})
-            if ws:
-                lines.append(f"  Style: {ws.get('sentence_length','')} sentences, {ws.get('person','')} person, {ws.get('formality','')} formality")
-            vocab = voice.get("vocabulary", {})
-            if vocab.get("use"):
-                lines.append(f"  Words/phrases to use: {', '.join(vocab['use'])}")
-            if vocab.get("avoid"):
-                lines.append(f"  Words/phrases to avoid: {', '.join(vocab['avoid'])}")
-            if guide:
-                lines.append(f"  Writer instructions: {guide}")
-            brand_voice_text = "\n".join(lines)
+    # Build brand voice block — defaults to the current voice; switches to
+    # recommended only when the user explicitly accepted it. The leading
+    # newline separates this block from preceding text in the inline prompt.
+    brand_voice_text = _build_brand_voice_text(body.brand_voice)
+    if brand_voice_text:
+        brand_voice_text = "\n" + brand_voice_text
 
     # Build SEO signals block from serp_analysis — entities + top keywords, used naturally
     seo_signals_text = ""
