@@ -98,7 +98,6 @@ const LocationsView = ({ onSelectBusiness }: { onSelectBusiness: (id: string) =>
         google_maps_uri: d.google_maps_uri || b.google_maps_uri,
         hours: d.hours ?? b.hours,
         reviews: (Array.isArray(d.reviews) && d.reviews.length > 0) ? d.reviews : b.reviews,
-        analysis_status: null, // clear failed status
       };
       await supabase.from("business_profiles").update(updates).eq("id", b.id);
       setBusinesses((prev) => prev.map((x) => x.id === b.id ? { ...x, ...updates } : x));
