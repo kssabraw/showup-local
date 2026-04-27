@@ -1888,69 +1888,132 @@ async def analyze_brand_voice_with_anthropic(page_contents: List[str], business_
         return {}
 
     import anthropic
-    import json as json_lib
 
     has_content = bool(page_contents)
     content_text = "\n\n---\n\n".join(page_contents) if page_contents else ""
 
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-    def _parse(message: any) -> dict:
-        text = message.content[0].text.strip()
-        if text.startswith("```"):
-            text = re.sub(r'^```(?:json)?\s*', '', text)
-            text = re.sub(r'\s*```$', '', text.strip())
-        try:
-            return json_lib.loads(text)
-        except json_lib.JSONDecodeError:
-            # Fall back to extracting the largest {...} block — handles prose
-            # wrappers and minor truncation by trimming back to the last brace.
-            start = text.find('{')
-            end = text.rfind('}')
-            if start != -1 and end > start:
-                return json_lib.loads(text[start:end + 1])
-            raise
+    # Tool definitions force structured JSON output — Anthropic validates against
+    # the schema server-side, so we can't hit a JSON parse error from unescaped
+    # quotes / stray characters in string values (the Call 1 failure mode).
+    VOICE_TOOL = {
+        "name": "submit_brand_voice",
+        "description": "Submit the analyzed brand voice profile.",
+        "input_schema": {
+            "type": "object",
+            "required": [
+                "personality", "tone", "writing_style", "vocabulary",
+                "messaging_themes", "sample_phrases", "content_generation_instructions",
+            ],
+            "properties": {
+                "personality": {
+                    "type": "array",
+                    "description": "3 personality traits.",
+                    "items": {"type": "string"},
+                },
+                "tone": {
+                    "type": "string",
+                    "description": "1-2 sentence description of the overall tone.",
+                },
+                "writing_style": {
+                    "type": "object",
+                    "required": ["sentence_length", "person", "jargon_level", "formality"],
+                    "properties": {
+                        "sentence_length": {"type": "string", "description": "short / medium / long / mixed"},
+                        "person":          {"type": "string", "description": "first person / second person / third person / mixed"},
+                        "jargon_level":    {"type": "string", "description": "low / medium / high — brief explanation"},
+                        "formality":       {"type": "string", "description": "casual / professional / formal"},
+                    },
+                },
+                "vocabulary": {
+                    "type": "object",
+                    "required": ["use", "avoid"],
+                    "properties": {
+                        "use":   {"type": "array", "description": "5 words/phrases to use.",   "items": {"type": "string"}},
+                        "avoid": {"type": "array", "description": "3 words/phrases to avoid.", "items": {"type": "string"}},
+                    },
+                },
+                "messaging_themes": {
+                    "type": "array",
+                    "description": "3 messaging themes.",
+                    "items": {"type": "string"},
+                },
+                "sample_phrases": {
+                    "type": "array",
+                    "description": "3 sample phrases that exemplify this voice.",
+                    "items": {"type": "string"},
+                },
+                "content_generation_instructions": {
+                    "type": "string",
+                    "description": "2-3 sentences of concrete guidance for writing content that matches this brand voice.",
+                },
+            },
+        },
+    }
 
-    VOICE_SCHEMA = """{
-  "personality": ["<trait 1>", "<trait 2>", "<trait 3>"],
-  "tone": "<1-2 sentence description of the overall tone>",
-  "writing_style": {
-    "sentence_length": "<short / medium / long / mixed>",
-    "person": "<first person / second person / third person / mixed>",
-    "jargon_level": "<low / medium / high — brief explanation>",
-    "formality": "<casual / professional / formal>"
-  },
-  "vocabulary": {
-    "use": ["<word or phrase>", "<word or phrase>", "<word or phrase>", "<word or phrase>", "<word or phrase>"],
-    "avoid": ["<word or phrase>", "<word or phrase>", "<word or phrase>"]
-  },
-  "messaging_themes": ["<theme 1>", "<theme 2>", "<theme 3>"],
-  "sample_phrases": ["<phrase>", "<phrase>", "<phrase>"],
-  "content_generation_instructions": "<2-3 sentences of concrete guidance for writing content that matches this brand voice>"
-}"""
+    GUIDE_TOOL = {
+        "name": "submit_writer_execution_guide",
+        "description": "Submit the writer execution guide derived from the recommended brand voice.",
+        "input_schema": {
+            "type": "object",
+            "required": [
+                "how_to_think_before_writing", "core_writing_objective", "default_writing_formula",
+                "non_negotiable_rules", "sentence_style_do", "sentence_style_dont",
+                "rewriting_framework", "before_after_weak", "before_after_strong",
+                "seo_aeo_instructions", "ai_writing_rules", "common_failure_modes",
+                "quick_cheat_sheet",
+            ],
+            "properties": {
+                "how_to_think_before_writing": {"type": "string", "description": "Role and mindset the writer should assume."},
+                "core_writing_objective":      {"type": "string", "description": "What every piece of content must achieve."},
+                "default_writing_formula":     {"type": "string", "description": "e.g. Problem → Consequence → Solution → Outcome — include a concrete example sentence."},
+                "non_negotiable_rules":        {"type": "array",  "description": "5 non-negotiable rules.",                                       "items": {"type": "string"}},
+                "sentence_style_do":           {"type": "array",  "description": "3 DO examples.",                                                "items": {"type": "string"}},
+                "sentence_style_dont":         {"type": "array",  "description": "3 DON'T examples.",                                             "items": {"type": "string"}},
+                "rewriting_framework":         {"type": "array",  "description": "3 rewrite examples (generic→specific, feature→outcome, soft→direct).", "items": {"type": "string"}},
+                "before_after_weak":           {"type": "string", "description": "A weak copy example."},
+                "before_after_strong":         {"type": "string", "description": "The improved version of the weak example."},
+                "seo_aeo_instructions":        {"type": "string", "description": "Guidance for answer-first, scannable content for SEO and AI retrieval."},
+                "ai_writing_rules":            {"type": "string", "description": "Instructions for maintaining voice when using AI tools."},
+                "common_failure_modes":        {"type": "array",  "description": "3 failure modes paired with fixes.",                            "items": {"type": "string"}},
+                "quick_cheat_sheet":           {"type": "array",  "description": "5 quick rules.",                                                "items": {"type": "string"}},
+            },
+        },
+    }
+
+    def _extract_tool_input(message: any, tool_name: str) -> dict:
+        """Pull the structured `input` dict out of a tool_use response block."""
+        for block in message.content:
+            if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == tool_name:
+                return dict(block.input)
+        raise ValueError(f"No tool_use block named {tool_name!r} in response")
 
     if not has_content:
         # ── No-website path: skip current voice, generate recommended + guide from category ──
         logger.info(f"Brand voice: no website content for {business_name} — using category-based inference")
 
-        prompt_recommended_no_site = f"""Business: {business_name}
-GBP Category: {gbp_category}
-
-No website is available for this business. Based solely on the business name and category, recommend a high-performing brand voice that would work well for a local {gbp_category or 'service'} business. Draw on best practices for this business type.
-
-Return a JSON object with exactly this structure:
-{VOICE_SCHEMA}"""
+        prompt_recommended_no_site = (
+            f"Business: {business_name}\n"
+            f"GBP Category: {gbp_category}\n\n"
+            f"No website is available for this business. Based solely on the business name and category, "
+            f"recommend a high-performing brand voice that would work well for a local "
+            f"{gbp_category or 'service'} business. Draw on best practices for this business type.\n\n"
+            f"Call the submit_brand_voice tool with the recommended brand voice."
+        )
 
         try:
             msg_rec = await client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=2048,
-                system="You are a senior brand strategist and direct-response copywriter for local service businesses. Recommend a high-performing brand voice based on business type. Return only valid JSON, no markdown, no explanation.",
+                tools=[VOICE_TOOL],
+                tool_choice={"type": "tool", "name": "submit_brand_voice"},
+                system="You are a senior brand strategist and direct-response copywriter for local service businesses. Recommend a high-performing brand voice based on business type.",
                 messages=[{'role': 'user', 'content': prompt_recommended_no_site}],
             )
             u_rec = msg_rec.usage
             logger.info(f"Brand voice (no-site recommended) — input: {u_rec.input_tokens}, output: {u_rec.output_tokens}")
-            recommended_voice = _parse(msg_rec)
+            recommended_voice = _extract_tool_input(msg_rec, "submit_brand_voice")
             current_voice = None  # No website — current voice cannot be analyzed
         except Exception as e:
             logger.error(f"Brand voice no-site recommended error: {e}")
@@ -1958,26 +2021,27 @@ Return a JSON object with exactly this structure:
             current_voice = None
     else:
         # ── Website path: Call 1 — Current voice (purely descriptive) ────────────────────────────
-        prompt_current = f"""Business: {business_name}
-
-Website copy (service, location, and core business pages only):
-{content_text[:8000]}
-
-Describe the brand voice EXACTLY as it currently exists on this website. Be objective and descriptive — report what you observe, do not prescribe or improve anything.
-
-Return a JSON object with exactly this structure:
-{VOICE_SCHEMA}"""
+        prompt_current = (
+            f"Business: {business_name}\n\n"
+            f"Website copy (service, location, and core business pages only):\n"
+            f"{content_text[:8000]}\n\n"
+            f"Describe the brand voice EXACTLY as it currently exists on this website. "
+            f"Be objective and descriptive — report what you observe, do not prescribe or improve anything.\n\n"
+            f"Call the submit_brand_voice tool with what you observe."
+        )
 
         try:
             msg1 = await client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=2048,
-                system="You are a brand analyst. Describe brand voice objectively based on evidence from the website copy. Do not prescribe or recommend — only describe what you observe. Return only valid JSON, no markdown, no explanation.",
+                tools=[VOICE_TOOL],
+                tool_choice={"type": "tool", "name": "submit_brand_voice"},
+                system="You are a brand analyst. Describe brand voice objectively based on evidence from the website copy. Do not prescribe or recommend — only describe what you observe.",
                 messages=[{'role': 'user', 'content': prompt_current}],
             )
             u1 = msg1.usage
             logger.info(f"Brand voice call 1 (current) — input: {u1.input_tokens}, output: {u1.output_tokens}, est. cost: ${(u1.input_tokens * 0.0000008) + (u1.output_tokens * 0.000004):.5f}")
-            current_voice = _parse(msg1)
+            current_voice = _extract_tool_input(msg1, "submit_brand_voice")
         except Exception as e:
             logger.error(f"Brand voice call 1 error: {e}")
             current_voice = None
@@ -1985,69 +2049,58 @@ Return a JSON object with exactly this structure:
         # ── Call 2: Recommended voice (aspirational) ──────────────────────────────
         cv_personality = ', '.join((current_voice or {}).get('personality', []))
         cv_tone = (current_voice or {}).get('tone', '')
-        prompt_recommended = f"""Business: {business_name}
-
-Current brand voice:
-- Personality: {cv_personality}
-- Tone: {cv_tone}
-
-Website copy (service, location, and core business pages only):
-{content_text[:8000]}
-
-Based on the current brand voice and business type, recommend an elevated brand voice that would better serve this business. Do NOT simply mirror the existing copy — improve weak or generic messaging.
-
-Return a JSON object with exactly this structure:
-{VOICE_SCHEMA}"""
+        prompt_recommended = (
+            f"Business: {business_name}\n\n"
+            f"Current brand voice:\n"
+            f"- Personality: {cv_personality}\n"
+            f"- Tone: {cv_tone}\n\n"
+            f"Website copy (service, location, and core business pages only):\n"
+            f"{content_text[:8000]}\n\n"
+            f"Based on the current brand voice and business type, recommend an elevated brand voice that "
+            f"would better serve this business. Do NOT simply mirror the existing copy — improve weak or "
+            f"generic messaging.\n\n"
+            f"Call the submit_brand_voice tool with the recommended brand voice."
+        )
 
         try:
             msg2 = await client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=2048,
-                system="You are a senior brand strategist and direct-response copywriter for local service businesses. Recommend an elevated, optimized brand voice. Return only valid JSON, no markdown, no explanation.",
+                tools=[VOICE_TOOL],
+                tool_choice={"type": "tool", "name": "submit_brand_voice"},
+                system="You are a senior brand strategist and direct-response copywriter for local service businesses. Recommend an elevated, optimized brand voice.",
                 messages=[{'role': 'user', 'content': prompt_recommended}],
             )
             u2 = msg2.usage
             logger.info(f"Brand voice call 2 (recommended) — input: {u2.input_tokens}, output: {u2.output_tokens}, est. cost: ${(u2.input_tokens * 0.0000008) + (u2.output_tokens * 0.000004):.5f}")
-            recommended_voice = _parse(msg2)
+            recommended_voice = _extract_tool_input(msg2, "submit_brand_voice")
         except Exception as e:
             logger.error(f"Brand voice call 2 error: {e}")
             recommended_voice = {}
 
     # ── Call 3 (shared): Writer Execution Guide (based on recommended voice) ────────────
-    prompt_guide = f"""Business: {business_name}
-Recommended brand voice summary: {recommended_voice.get('tone', '')}
-Personality: {', '.join(recommended_voice.get('personality', []))}
-
-{"Website copy:" if has_content else "No website available — write the guide based on the recommended voice and business category."}
-{content_text[:6000]}
-
-Return a JSON object with exactly this structure:
-{{
-  "how_to_think_before_writing": "<role and mindset the writer should assume>",
-  "core_writing_objective": "<what every piece of content must achieve>",
-  "default_writing_formula": "<e.g. Problem → Consequence → Solution → Outcome — include a concrete example sentence>",
-  "non_negotiable_rules": ["<rule 1>", "<rule 2>", "<rule 3>", "<rule 4>", "<rule 5>"],
-  "sentence_style_do": ["<DO example 1>", "<DO example 2>", "<DO example 3>"],
-  "sentence_style_dont": ["<DON'T example 1>", "<DON'T example 2>", "<DON'T example 3>"],
-  "rewriting_framework": ["<generic → specific example>", "<feature → outcome example>", "<soft → direct example>"],
-  "before_after_weak": "<a weak copy example>",
-  "before_after_strong": "<the improved version>",
-  "seo_aeo_instructions": "<guidance for answer-first, scannable content for SEO and AI retrieval>",
-  "ai_writing_rules": "<instructions for maintaining voice when using AI tools>",
-  "common_failure_modes": ["<failure mode 1 and fix>", "<failure mode 2 and fix>", "<failure mode 3 and fix>"],
-  "quick_cheat_sheet": ["<rule 1>", "<rule 2>", "<rule 3>", "<rule 4>", "<rule 5>"]
-}}"""
+    guide_lead = "Website copy:" if has_content else "No website available — write the guide based on the recommended voice and business category."
+    prompt_guide = (
+        f"Business: {business_name}\n"
+        f"Recommended brand voice summary: {recommended_voice.get('tone', '')}\n"
+        f"Personality: {', '.join(recommended_voice.get('personality', []))}\n\n"
+        f"{guide_lead}\n"
+        f"{content_text[:6000]}\n\n"
+        f"Call the submit_writer_execution_guide tool with the writer execution guide."
+    )
 
     try:
         msg3 = await client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=3000,
-            system="You are a senior brand strategist and direct-response copywriter building brand voice systems for local service businesses. Return only valid JSON, no markdown, no explanation.",
+            tools=[GUIDE_TOOL],
+            tool_choice={"type": "tool", "name": "submit_writer_execution_guide"},
+            system="You are a senior brand strategist and direct-response copywriter building brand voice systems for local service businesses.",
             messages=[{'role': 'user', 'content': prompt_guide}],
         )
         u3 = msg3.usage
         logger.info(f"Brand voice call 3 (guide) — input: {u3.input_tokens}, output: {u3.output_tokens}, est. cost: ${(u3.input_tokens * 0.0000008) + (u3.output_tokens * 0.000004):.5f}")
-        guide = _parse(msg3)
+        guide = _extract_tool_input(msg3, "submit_writer_execution_guide")
     except Exception as e:
         logger.error(f"Brand voice call 3 error: {e}")
         guide = {}
@@ -2098,9 +2151,17 @@ async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
 
         async def _scrapeowl_extract(pages: List[dict], render_js: bool) -> List[str]:
             """Fetch pages via ScrapeOwl and extract text content."""
+            # ScrapeOwl plan caps concurrency at 10 — bound below that to leave
+            # headroom for any other in-flight scrape calls in the same process.
+            sem = asyncio.Semaphore(8)
+
+            async def _bounded(p: dict, sc_client: httpx.AsyncClient) -> Optional[str]:
+                async with sem:
+                    return await _scrape_one(p['url'], sc_client, render_js=render_js)
+
             async with httpx.AsyncClient() as sc:
                 htmls = await asyncio.gather(
-                    *[_scrape_one(p['url'], sc, render_js=render_js) for p in pages],
+                    *[_bounded(p, sc) for p in pages],
                     return_exceptions=True,
                 )
             results = []
