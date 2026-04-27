@@ -2181,6 +2181,48 @@ def _build_brand_voice_text(brand_voice: Optional[dict]) -> str:
     return "\n".join(lines)
 
 
+def _build_icp_text(detected_icp: Optional[dict], max_segments: int = 3) -> str:
+    """Render the detected ICP as a plain-text block for the system prompt.
+
+    Reads the schema produced by analyze_business_website_with_anthropic:
+    segments[].label, demographics{description,situation},
+    psychographics{trigger,fears,motivations,buying_behavior},
+    messaging{tone,hooks,trust_signals}. The primary segment is listed first.
+    Returns "" when ICP is empty so callers can safely f-string the result.
+    """
+    if not detected_icp:
+        return ""
+    segments = detected_icp.get("segments") or []
+    if not segments:
+        return ""
+
+    # Primary first, then remaining in original order, capped at max_segments.
+    ordered = sorted(segments, key=lambda s: 0 if s.get("primary") else 1)
+
+    lines = ["TARGET CUSTOMER PROFILES (write to these pain points and motivations):"]
+    for seg in ordered[:max_segments]:
+        label = seg.get("label") or "Customer"
+        marker = " — PRIMARY" if seg.get("primary") else ""
+        lines.append(f"  [{label}{marker}]")
+
+        demo = seg.get("demographics") or {}
+        if demo.get("description"): lines.append(f"    Demographics: {demo['description']}")
+        if demo.get("situation"):   lines.append(f"    Situation: {demo['situation']}")
+
+        psy = seg.get("psychographics") or {}
+        if psy.get("trigger"):         lines.append(f"    Search trigger: {psy['trigger']}")
+        if psy.get("fears"):           lines.append(f"    Fears (address these): {'; '.join(psy['fears'])}")
+        if psy.get("motivations"):     lines.append(f"    Motivations (emphasise these): {'; '.join(psy['motivations'])}")
+        if psy.get("buying_behavior"): lines.append(f"    Buying behaviour: {psy['buying_behavior']}")
+
+        msg = seg.get("messaging") or {}
+        if msg.get("tone"):          lines.append(f"    Messaging tone: {msg['tone']}")
+        if msg.get("hooks"):          lines.append(f"    Headline hooks: {'; '.join(msg['hooks'])}")
+        if msg.get("trust_signals"):  lines.append(f"    Trust signals: {'; '.join(msg['trust_signals'])}")
+
+    return "\n".join(lines)
+
+
 @app.post('/analyze-brand-voice', response_model=BrandVoiceResponse, dependencies=[Depends(verify_api_key)])
 @limiter.limit("5/minute")
 async def analyze_brand_voice(request: Request, body: BrandVoiceRequest):
@@ -4271,7 +4313,6 @@ class GeneratePageRequest(BaseModel):
     hours: Optional[str] = None
     gbp_description: Optional[str] = None
     differentiators: Optional[List[dict]] = None
-    icp_type: Optional[str] = None
     brand_voice: Optional[dict] = None
     detected_icp: Optional[dict] = None
     reviews: Optional[List[dict]] = None
@@ -4343,33 +4384,15 @@ async def generate_page(request: Request, body: GeneratePageRequest):
                     "\n".join(f'  ★{r.get("rating")} — {r.get("reviewer","")}: "{r.get("text","")}" ({r.get("date","")})'
                               for r in qualifying)
 
-        icp = body.icp_type or "General Homeowner"
-
         # Build brand voice block — defaults to the current voice; switches to
         # recommended only when the user explicitly accepted it.
         brand_voice_text = _build_brand_voice_text(body.brand_voice)
 
-        # Build ICP block
-        icp_text = ""
-        if body.detected_icp:
-            segments = body.detected_icp.get("segments", [])
-            if segments:
-                lines = ["TARGET CUSTOMER PROFILES (write to these):"]
-                for seg in segments[:3]:  # cap at 3 segments
-                    name = seg.get("name", "")
-                    desc = seg.get("description", "")
-                    msg_data = seg.get("messaging", {})
-                    tone = msg_data.get("tone", "")
-                    hooks = msg_data.get("hooks", [])
-                    pain = msg_data.get("trust_signals", [])
-                    lines.append(f"  [{name}] {desc}")
-                    if tone:
-                        lines.append(f"    Messaging tone: {tone}")
-                    if hooks:
-                        lines.append(f"    Headline hooks: {'; '.join(hooks[:2])}")
-                    if pain:
-                        lines.append(f"    Trust signals: {'; '.join(pain[:2])}")
-                icp_text = "\n".join(lines)
+        # Build ICP block from the detailed Claude-generated profile (segments,
+        # demographics, psychographics, messaging). Keyword-based ICP labelling
+        # for CTA tone alignment lives separately in _detect_icp_from_keyword
+        # and is injected by _build_seo_checklist().
+        icp_text = _build_icp_text(body.detected_icp)
 
         # Scrape the business website for factual context (certifications, services, team info).
         # Strategy: ScrapeOwl no-JS → ScrapeOwl JS (if thin) → direct httpx (if ScrapeOwl unavailable).
@@ -4509,7 +4532,6 @@ Hours: {body.hours or "Not provided"}
 Primary keyword: {body.keyword}
 Target city: {city}
 Full location: {body.location}
-ICP: {icp}
 
 {brand_voice_text}
 {icp_text}
@@ -5136,24 +5158,12 @@ async def generate_social_posts(request: Request, body: SocialPostsRequest):
         diff_text = "\nDIFFERENTIATORS (weave these in naturally — include the mechanism, not just the claim):\n" + \
             "\n".join(f"  - {d.get('claim','')} (mechanism: {d.get('mechanism','')})" for d in body.differentiators)
 
-    # Build ICP block
-    icp_text = ""
-    if body.detected_icp:
-        segments = body.detected_icp.get("segments", [])
-        if segments:
-            lines = ["\nTARGET CUSTOMER PROFILES (write to these pain points and motivations):"]
-            for seg in segments[:2]:
-                name = seg.get("name", "")
-                desc = seg.get("description", "")
-                msg = seg.get("messaging", {})
-                tone = msg.get("tone", "")
-                hooks = msg.get("hooks", [])
-                lines.append(f"  [{name}] {desc}")
-                if tone:
-                    lines.append(f"    Tone: {tone}")
-                if hooks:
-                    lines.append(f"    Hooks: {'; '.join(hooks[:2])}")
-            icp_text = "\n".join(lines)
+    # Build ICP block. Cap at 2 segments — social posts are short and need a
+    # tighter focus than a full content page. Leading newline separates the
+    # block from preceding inline text in the prompt template.
+    icp_text = _build_icp_text(body.detected_icp, max_segments=2)
+    if icp_text:
+        icp_text = "\n" + icp_text
 
     # Build brand voice block — defaults to the current voice; switches to
     # recommended only when the user explicitly accepted it. The leading
