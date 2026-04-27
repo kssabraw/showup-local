@@ -1900,7 +1900,16 @@ async def analyze_brand_voice_with_anthropic(page_contents: List[str], business_
         if text.startswith("```"):
             text = re.sub(r'^```(?:json)?\s*', '', text)
             text = re.sub(r'\s*```$', '', text.strip())
-        return json_lib.loads(text)
+        try:
+            return json_lib.loads(text)
+        except json_lib.JSONDecodeError:
+            # Fall back to extracting the largest {...} block — handles prose
+            # wrappers and minor truncation by trimming back to the last brace.
+            start = text.find('{')
+            end = text.rfind('}')
+            if start != -1 and end > start:
+                return json_lib.loads(text[start:end + 1])
+            raise
 
     VOICE_SCHEMA = """{
   "personality": ["<trait 1>", "<trait 2>", "<trait 3>"],
@@ -1935,7 +1944,7 @@ Return a JSON object with exactly this structure:
         try:
             msg_rec = await client.messages.create(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=1024,
+                max_tokens=2048,
                 system="You are a senior brand strategist and direct-response copywriter for local service businesses. Recommend a high-performing brand voice based on business type. Return only valid JSON, no markdown, no explanation.",
                 messages=[{'role': 'user', 'content': prompt_recommended_no_site}],
             )
@@ -1945,7 +1954,8 @@ Return a JSON object with exactly this structure:
             current_voice = None  # No website — current voice cannot be analyzed
         except Exception as e:
             logger.error(f"Brand voice no-site recommended error: {e}")
-            raise
+            recommended_voice = {}
+            current_voice = None
     else:
         # ── Website path: Call 1 — Current voice (purely descriptive) ────────────────────────────
         prompt_current = f"""Business: {business_name}
@@ -1961,7 +1971,7 @@ Return a JSON object with exactly this structure:
         try:
             msg1 = await client.messages.create(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=1024,
+                max_tokens=2048,
                 system="You are a brand analyst. Describe brand voice objectively based on evidence from the website copy. Do not prescribe or recommend — only describe what you observe. Return only valid JSON, no markdown, no explanation.",
                 messages=[{'role': 'user', 'content': prompt_current}],
             )
@@ -1970,14 +1980,16 @@ Return a JSON object with exactly this structure:
             current_voice = _parse(msg1)
         except Exception as e:
             logger.error(f"Brand voice call 1 error: {e}")
-            raise
+            current_voice = None
 
         # ── Call 2: Recommended voice (aspirational) ──────────────────────────────
+        cv_personality = ', '.join((current_voice or {}).get('personality', []))
+        cv_tone = (current_voice or {}).get('tone', '')
         prompt_recommended = f"""Business: {business_name}
 
 Current brand voice:
-- Personality: {', '.join(current_voice.get('personality', []))}
-- Tone: {current_voice.get('tone', '')}
+- Personality: {cv_personality}
+- Tone: {cv_tone}
 
 Website copy (service, location, and core business pages only):
 {content_text[:8000]}
@@ -1990,7 +2002,7 @@ Return a JSON object with exactly this structure:
         try:
             msg2 = await client.messages.create(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=1024,
+                max_tokens=2048,
                 system="You are a senior brand strategist and direct-response copywriter for local service businesses. Recommend an elevated, optimized brand voice. Return only valid JSON, no markdown, no explanation.",
                 messages=[{'role': 'user', 'content': prompt_recommended}],
             )
