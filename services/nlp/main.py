@@ -4300,6 +4300,483 @@ async def score_page(request: Request, body: ScorePageRequest):
     )
 
 
+# ── /augment-page ─────────────────────────────────────────────────────────────
+# Patches an existing page with missing SEO signals (entities, related keywords,
+# quadgrams, geographic modifiers, reviews) without rewriting unchanged content.
+# Strict content preservation — sentences are rewritten only when needed to
+# weave in target signals; structure, voice, and facts are kept intact.
+
+_READABLE_KEEP_TAGS = {
+    "main", "article", "section", "header", "footer", "aside",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "p", "ul", "ol", "li", "dl", "dt", "dd", "blockquote",
+    "table", "thead", "tbody", "tr", "th", "td", "caption",
+    "strong", "em", "b", "i", "a", "br", "hr",
+}
+_READABLE_DROP_TAGS = {
+    "script", "style", "link", "noscript", "iframe", "embed", "object",
+    "video", "audio", "source", "canvas", "svg", "picture", "img", "figure",
+    "figcaption", "form", "button", "input", "select", "textarea", "label",
+    "nav", "menu",
+}
+
+
+def _strip_readable_html(html: str) -> tuple[str, str, str]:
+    """Extract user-facing content from a scraped page.
+
+    Returns (body_html, title, meta_description) — body_html is clean semantic
+    markup with all classes, IDs, styles, comments, and non-content elements
+    stripped. Headings, paragraphs, lists, tables, blockquotes, and links
+    (with href only) are preserved.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    title_el = soup.find("title")
+    title = title_el.get_text(" ", strip=True) if title_el else ""
+
+    meta_desc = ""
+    md_el = soup.find("meta", attrs={"name": "description"})
+    if md_el and md_el.get("content"):
+        meta_desc = md_el["content"].strip()
+
+    # Drop non-content elements entirely.
+    for tag in soup(list(_READABLE_DROP_TAGS)):
+        tag.decompose()
+    # Drop HTML comments.
+    from bs4 import Comment
+    for c in soup.find_all(string=lambda t: isinstance(t, Comment)):
+        c.extract()
+
+    # Prefer <main> or <article>; fall back to <body>.
+    root = soup.find("main") or soup.find("article") or soup.find("body") or soup
+
+    # Unwrap any tag we don't keep (preserves children).
+    for tag in root.find_all(True):
+        if tag.name not in _READABLE_KEEP_TAGS:
+            tag.unwrap()
+
+    # Strip every attribute except href on <a>.
+    for tag in root.find_all(True):
+        if tag.name == "a":
+            href = tag.get("href")
+            tag.attrs = {"href": href} if href else {}
+        else:
+            tag.attrs = {}
+
+    # Serialize the cleaned root's children. Avoid the wrapper itself.
+    body_html = "".join(str(c) for c in root.children).strip()
+    # Collapse runs of empty whitespace lines.
+    body_html = re.sub(r'\n\s*\n\s*\n+', '\n\n', body_html)
+    return body_html, title, meta_desc
+
+
+def _zone_text_from_clean_html(clean_body: str, title: str) -> dict:
+    """Extract per-zone lowercase text from the cleaned body for gap detection."""
+    soup = BeautifulSoup(clean_body, "html.parser")
+    h1 = soup.find("h1")
+    return {
+        "title":     (title or "").lower(),
+        "h1":        (h1.get_text(" ", strip=True).lower() if h1 else ""),
+        "h2_h3":     " ".join(el.get_text(" ", strip=True).lower() for el in soup.find_all(["h2", "h3"])),
+        "paragraphs": " ".join(el.get_text(" ", strip=True).lower() for el in soup.find_all("p")) or
+                      soup.get_text(" ", strip=True).lower(),
+    }
+
+
+def _compute_augment_manifest(
+    clean_body: str,
+    title: str,
+    serp_analysis: Optional[dict],
+    has_testimonials_on_page: bool,
+    reviews_available: int,
+) -> dict:
+    """Build a structured list of exactly what to add and where.
+
+    Output shape:
+    {
+      "missing_keywords":  [{"term", "zone", "score"}, ...],
+      "missing_entities":  [{"name", "zone", "salience"}, ...],
+      "missing_quadgrams": [{"phrase"}, ...],
+      "needs_testimonials": bool,
+      "reviews_available":  int,
+    }
+    """
+    manifest = {
+        "missing_keywords":   [],
+        "missing_entities":   [],
+        "missing_quadgrams":  [],
+        "needs_testimonials": (not has_testimonials_on_page) and reviews_available > 0,
+        "reviews_available":  reviews_available,
+    }
+    if not serp_analysis:
+        return manifest
+
+    zones = _zone_text_from_clean_html(clean_body, title)
+    full_text = " ".join(zones.values())
+
+    rk = serp_analysis.get("related_keywords", {}) or {}
+    zt = serp_analysis.get("zone_targets", {}) or {}
+    for zone_key in ("title", "h1", "h2_h3", "paragraphs"):
+        terms  = (rk.get(zone_key) or [])[:12]
+        target = (zt.get(zone_key) or {}).get("target", 0) or 0
+        if not terms or not target:
+            continue
+        zone_text = zones[zone_key]
+        already   = sum(1 for t in terms if t["term"].lower() in zone_text)
+        gap       = max(0, target - already)
+        if gap <= 0:
+            continue
+        for t in terms:
+            if t["term"].lower() in zone_text:
+                continue
+            manifest["missing_keywords"].append({
+                "term":  t["term"],
+                "zone":  zone_key,
+                "score": t.get("score", 0),
+            })
+            if sum(1 for x in manifest["missing_keywords"] if x["zone"] == zone_key) >= gap:
+                break
+
+    entities = sorted(serp_analysis.get("google_entities", []) or [],
+                       key=lambda e: e.get("page_spread", 0), reverse=True)[:15]
+    if entities:
+        for zone_key in ("title", "h1", "h2_h3", "paragraphs"):
+            entity_target = (zt.get(zone_key) or {}).get("entity_target", 0) or 0
+            if not entity_target:
+                continue
+            zone_text = zones[zone_key]
+            already   = sum(1 for e in entities if e["name"].lower() in zone_text)
+            gap       = max(0, entity_target - already)
+            if gap <= 0:
+                continue
+            for e in entities:
+                if e["name"].lower() in zone_text:
+                    continue
+                manifest["missing_entities"].append({
+                    "name":     e["name"],
+                    "zone":     zone_key,
+                    "salience": e.get("mean_salience", 0),
+                })
+                if sum(1 for x in manifest["missing_entities"] if x["zone"] == zone_key) >= gap:
+                    break
+
+    for q in (serp_analysis.get("top_quadgrams") or [])[:10]:
+        if q["phrase"].lower() not in full_text:
+            manifest["missing_quadgrams"].append({"phrase": q["phrase"]})
+
+    return manifest
+
+
+def _build_reviews_block(reviews: List[dict]) -> Optional[str]:
+    """Render a verbatim testimonials section from GBP reviews. Returns None if empty."""
+    import html as _html
+    qualifying = [r for r in (reviews or []) if (r.get("rating") or 0) >= 4][:5]
+    if not qualifying:
+        return None
+    items = []
+    for r in qualifying:
+        rating = r.get("rating", 5)
+        reviewer = (r.get("reviewer") or "").strip()
+        text = (r.get("text") or "").strip()
+        date = (r.get("date") or "").strip()
+        # First name + last initial only (privacy).
+        if reviewer:
+            parts = reviewer.split()
+            if len(parts) >= 2 and parts[-1]:
+                reviewer = f"{parts[0]} {parts[-1][0]}."
+        cite_bits = " — ".join(b for b in [reviewer, f"{rating}★", date] if b)
+        items.append(
+            f"<blockquote><p>{_html.escape(text)}</p>"
+            f"<p><em>{_html.escape(cite_bits)}</em></p></blockquote>"
+        )
+    return "<section><h2>What Our Patients Say</h2>" + "\n".join(items) + "</section>"
+
+
+_AUGMENT_SYSTEM_PROMPT = (
+    "You augment an existing local-business page with missing SEO signals. "
+    "Your prime directive is content preservation: the user's voice, structure, "
+    "section ordering, and factual claims must be kept. You may rewrite an "
+    "individual sentence to weave in a missing keyword, entity, or quadgram, "
+    "but change as few words as possible — never remove information, change "
+    "meaning, reorder sections, or invent facts that are not provided.\n\n"
+    "Output rules:\n"
+    "1. Return clean semantic HTML in the augmented_body_html field — no class, "
+    "id, style, or data-* attributes. Allowed tags: section, article, header, "
+    "footer, aside, h1-h6, p, ul, ol, li, dl, dt, dd, blockquote, table, thead, "
+    "tbody, tr, th, td, strong, em, a (with href), br, hr.\n"
+    "2. Insert the provided reviews block (if any) verbatim — do not modify the "
+    "review text, ratings, or dates.\n"
+    "3. For missing keywords/entities/quadgrams, weave them into the indicated "
+    "zone (title, h1, h2_h3, or paragraphs). For paragraphs zone, prefer "
+    "rewriting an existing sentence over appending a new one.\n"
+    "4. For geographic gaps (neighborhoods, ZIPs, streets, landmarks), add a "
+    "single natural sentence in the body — do not invent any geographic name "
+    "that wasn't supplied in the manifest.\n"
+    "5. Do not fabricate reviews, response times, certifications, prices, or "
+    "guarantees not present in the original page or the supplied data.\n"
+    "6. Track every change you make in applied_changes — every weave, every "
+    "insertion, every heading rewrite."
+)
+
+
+_AUGMENT_TOOL = {
+    "name": "submit_augmented_page",
+    "description": "Submit the augmented page content and a structured changelog.",
+    "input_schema": {
+        "type": "object",
+        "required": ["augmented_title", "augmented_meta_description",
+                     "augmented_body_html", "applied_changes"],
+        "properties": {
+            "augmented_title":            {"type": "string", "description": "Rewritten <title> content (40-60 chars ideal)."},
+            "augmented_meta_description": {"type": "string", "description": "Rewritten meta description (140-160 chars ideal)."},
+            "augmented_body_html":        {"type": "string", "description": "Clean semantic HTML for the body content."},
+            "applied_changes": {
+                "type": "object",
+                "required": ["entities_added", "related_keywords_added",
+                             "quadgrams_added", "testimonials_added",
+                             "geographic_signals_added", "title_rewritten",
+                             "meta_description_rewritten", "headings_rewritten"],
+                "properties": {
+                    "entities_added": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["name", "zone"],
+                            "properties": {
+                                "name": {"type": "string"},
+                                "zone": {"type": "string", "description": "title | h1 | h2_h3 | paragraphs"},
+                                "mentions": {"type": "integer"},
+                            },
+                        },
+                    },
+                    "related_keywords_added": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["term", "zone"],
+                            "properties": {
+                                "term": {"type": "string"},
+                                "zone": {"type": "string"},
+                            },
+                        },
+                    },
+                    "quadgrams_added": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["phrase"],
+                            "properties": {"phrase": {"type": "string"}},
+                        },
+                    },
+                    "testimonials_added":      {"type": "integer"},
+                    "geographic_signals_added": {
+                        "type": "object",
+                        "properties": {
+                            "neighborhoods": {"type": "integer"},
+                            "zips":          {"type": "integer"},
+                            "streets":       {"type": "integer"},
+                            "landmarks":     {"type": "integer"},
+                        },
+                    },
+                    "title_rewritten":            {"type": "boolean"},
+                    "meta_description_rewritten": {"type": "boolean"},
+                    "headings_rewritten": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["tag", "original", "new"],
+                            "properties": {
+                                "tag":      {"type": "string"},
+                                "original": {"type": "string"},
+                                "new":      {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+
+
+class AugmentPageRequest(BaseModel):
+    keyword: str
+    location: str
+    location_code: Optional[int] = None
+    page_url: str
+    business_name: str
+    gbp_category: str
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    reviews: Optional[List[dict]] = None
+    serp_analysis: Optional[dict] = None  # cached SERP analysis from a prior /score-page call
+
+
+class AugmentPageResponse(BaseModel):
+    augmented_title: str
+    augmented_meta_description: str
+    augmented_body_html: str
+    applied_changes: dict
+    token_usage: dict
+    serp_analysis: Optional[dict] = None
+    analysis_cost: Optional[dict] = None
+
+
+@app.post('/augment-page', response_model=AugmentPageResponse)
+@limiter.limit("10/minute")
+async def augment_page(request: Request, body: AugmentPageRequest):
+    # Dual auth: X-API-Key (proxied) OR Authorization Bearer JWT (direct).
+    api_key = request.headers.get("X-API-Key")
+    if api_key:
+        if not NLP_API_KEY or api_key != NLP_API_KEY:
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    else:
+        user_id = await _verify_jwt_get_user(request.headers.get("Authorization", ""))
+        ok = await _deduct_credits_direct(user_id, 1, "/augment-page", "Page augmentation")
+        if not ok:
+            raise HTTPException(
+                status_code=402,
+                detail=json.dumps({"error": "Insufficient credits", "credits_required": 1, "code": "INSUFFICIENT_CREDITS"}),
+            )
+
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+
+    _block_ssrf(body.page_url)
+    async with httpx.AsyncClient() as _fc:
+        page_html = await _scrape_one(body.page_url, _fc, render_js=False)
+        if not page_html:
+            page_html = await _scrape_one(body.page_url, _fc, render_js=True)
+    if not page_html:
+        raise HTTPException(status_code=422, detail="Could not fetch the provided page URL. Check that it is correct and publicly accessible.")
+
+    clean_body, original_title, original_meta = _strip_readable_html(page_html)
+
+    # SERP analysis (cached or inline).
+    inline_serp: Optional[AnalysisResponse] = None
+    serp_analysis_dict: Optional[dict] = body.serp_analysis
+    if not serp_analysis_dict:
+        logger.info(f"augment-page: no serp_analysis provided — running inline for '{body.keyword}'")
+        try:
+            inline_serp = await _run_serp_analysis(body.keyword, body.location, body.location_code)
+            serp_analysis_dict = inline_serp.model_dump()
+        except Exception as e:
+            logger.warning(f"augment-page: inline SERP analysis failed ({e})")
+            raise HTTPException(status_code=503, detail="Could not fetch competitor data. Please try again.")
+
+    # Detect whether the page already has a testimonials/reviews section — we
+    # only auto-insert the reviews block if it doesn't.
+    body_lower = clean_body.lower()
+    has_testimonials_on_page = any(
+        marker in body_lower
+        for marker in ("testimonial", "patient review", "client review", "what our patients say",
+                        "what our clients say", "review", "★")
+    )
+
+    qualifying_reviews_count = sum(1 for r in (body.reviews or []) if (r.get("rating") or 0) >= 4)
+    manifest = _compute_augment_manifest(
+        clean_body, original_title, serp_analysis_dict,
+        has_testimonials_on_page=has_testimonials_on_page,
+        reviews_available=qualifying_reviews_count,
+    )
+
+    reviews_block = None
+    if manifest["needs_testimonials"]:
+        reviews_block = _build_reviews_block(body.reviews or [])
+
+    # Geographic context — let Claude weave these in only from the supplied list.
+    address_zip = ""
+    if body.address:
+        m = re.search(r'\b(\d{5})\b', body.address)
+        if m:
+            address_zip = m.group(1)
+    city = body.location.split(",")[0].strip()
+
+    # ── Build user prompt ──────────────────────────────────────────────────────
+    import json as _json
+    manifest_block = _json.dumps({
+        "missing_keywords":   manifest["missing_keywords"],
+        "missing_entities":   manifest["missing_entities"],
+        "missing_quadgrams":  manifest["missing_quadgrams"],
+    }, indent=2)
+
+    parts = [
+        f"Business: {body.business_name}",
+        f"Category: {body.gbp_category}",
+        f"Target keyword: {body.keyword}",
+        f"Target city: {city}",
+        f"Address: {body.address or 'not provided'}{f' (ZIP {address_zip})' if address_zip else ''}",
+        f"Phone: {body.phone or 'not provided'}",
+        "",
+        "ORIGINAL TITLE:",
+        original_title or "(missing)",
+        "",
+        "ORIGINAL META DESCRIPTION:",
+        original_meta or "(missing)",
+        "",
+        "ORIGINAL BODY HTML (this is what visitors read — preserve voice, facts, structure):",
+        clean_body,
+        "",
+        "GAP MANIFEST (weave these in at the indicated zones):",
+        manifest_block,
+    ]
+    if reviews_block:
+        parts += [
+            "",
+            "TESTIMONIALS BLOCK (insert this verbatim as a new <section> in the body — do not modify):",
+            reviews_block,
+        ]
+    parts += [
+        "",
+        f"Call submit_augmented_page with the rewritten title, meta description, "
+        f"augmented body HTML, and a complete applied_changes log."
+    ]
+    user_prompt = "\n".join(parts)
+
+    import anthropic as _anthropic
+    aclient = _anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+    msg = None
+    for attempt in range(2):
+        try:
+            msg = await aclient.messages.create(
+                model=GENERATION_MODEL,
+                max_tokens=8192,
+                tools=[_AUGMENT_TOOL],
+                tool_choice={"type": "tool", "name": "submit_augmented_page"},
+                system=[{"type": "text", "text": _AUGMENT_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+            break
+        except Exception as e:
+            logger.exception(f"augment-page Claude error on attempt {attempt + 1}")
+            if attempt == 1:
+                raise HTTPException(status_code=502, detail="Augmentation service temporarily unavailable. Please try again.")
+
+    if msg is None:
+        raise HTTPException(status_code=502, detail="Augmentation service returned no response.")
+
+    payload = None
+    for block in msg.content:
+        if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == "submit_augmented_page":
+            payload = dict(block.input)
+            break
+    if payload is None:
+        raise HTTPException(status_code=502, detail="Augmentation service returned an invalid response.")
+
+    token_rec = _token_record("augment-page", GENERATION_MODEL, msg.usage.input_tokens, msg.usage.output_tokens)
+
+    return AugmentPageResponse(
+        augmented_title=payload.get("augmented_title", original_title),
+        augmented_meta_description=payload.get("augmented_meta_description", original_meta),
+        augmented_body_html=payload.get("augmented_body_html", clean_body),
+        applied_changes=payload.get("applied_changes", {}),
+        token_usage=token_rec,
+        serp_analysis=serp_analysis_dict if inline_serp else None,
+        analysis_cost=inline_serp.analysis_cost if inline_serp else None,
+    )
+
+
 # ── /generate-page ────────────────────────────────────────────────────────────
 
 class GeneratePageRequest(BaseModel):

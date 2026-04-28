@@ -172,6 +172,32 @@ export interface ScoreResult {
   analysis_cost?: Record<string, number>;
 }
 
+export interface AppliedChanges {
+  entities_added: Array<{ name: string; zone: string; mentions?: number }>;
+  related_keywords_added: Array<{ term: string; zone: string }>;
+  quadgrams_added: Array<{ phrase: string }>;
+  testimonials_added: number;
+  geographic_signals_added: {
+    neighborhoods?: number;
+    zips?: number;
+    streets?: number;
+    landmarks?: number;
+  };
+  title_rewritten: boolean;
+  meta_description_rewritten: boolean;
+  headings_rewritten: Array<{ tag: string; original: string; new: string }>;
+}
+
+export interface AugmentPageResult {
+  augmented_title: string;
+  augmented_meta_description: string;
+  augmented_body_html: string;
+  applied_changes: AppliedChanges;
+  token_usage: TokenUsage;
+  serp_analysis?: AnalysisResult;
+  analysis_cost?: Record<string, number>;
+}
+
 // ── Related pages ─────────────────────────────────────────────────────────────
 
 export interface RelatedPageItem {

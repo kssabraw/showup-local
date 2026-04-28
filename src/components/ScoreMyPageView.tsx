@@ -1,13 +1,13 @@
 import { useState, useRef } from "react";
 import { Button } from "@/components/ui/button";
-import { Loader2, CheckCircle, AlertTriangle, XCircle, ChevronDown, ChevronUp, RotateCcw } from "lucide-react";
+import { Loader2, CheckCircle, AlertTriangle, XCircle, ChevronDown, ChevronUp, RotateCcw, Sparkles, Copy, Check } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { nlp, InsufficientCreditsError, purchaseCreditPack } from "@/lib/nlp-client";
 import { useCredits, useInvalidateCredits } from "@/hooks/useCredits";
 import { useBusinessProfiles } from "@/hooks/useBusinessProfiles";
 import { LocationAutocomplete } from "@/components/LocationAutocomplete";
 import CreditPackModal from "@/components/CreditPackModal";
-import type { ScoreResult } from "@/lib/nlp-types";
+import type { ScoreResult, AugmentPageResult } from "@/lib/nlp-types";
 
 const ENGINE_LABELS: Record<string, string> = {
   organic_ranking: "Organic Ranking",
@@ -55,6 +55,11 @@ export default function ScoreMyPageView() {
   const [scoredUrl, setScoredUrl] = useState("");
   const [expandedEngines, setExpandedEngines] = useState<Set<string>>(new Set());
   const [showCreditModal, setShowCreditModal] = useState(false);
+
+  const [augmenting, setAugmenting] = useState(false);
+  const [augmentResult, setAugmentResult] = useState<AugmentPageResult | null>(null);
+  const [augmentError, setAugmentError] = useState("");
+  const [copied, setCopied] = useState<string>("");
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -118,6 +123,58 @@ export default function ScoreMyPageView() {
     setScoredUrl("");
     setExpandedEngines(new Set());
     setError("");
+    setAugmentResult(null);
+    setAugmentError("");
+  };
+
+  const handleAugment = async () => {
+    if (!selectedBusiness || !scoreResult) return;
+    abortRef.current = new AbortController();
+    setAugmenting(true);
+    setAugmentError("");
+    setAugmentResult(null);
+    try {
+      const data = await nlp.augmentPage(
+        {
+          keyword: keyword.trim(),
+          location: location.trim(),
+          location_code: locationCode ?? undefined,
+          page_url: scoredUrl,
+          business_name: selectedBusiness.business_name,
+          gbp_category: selectedBusiness.gbp_category,
+          address: selectedBusiness.address || undefined,
+          phone: selectedBusiness.phone || undefined,
+          reviews: Array.isArray(selectedBusiness.reviews)
+            ? (selectedBusiness.reviews as unknown[])
+            : undefined,
+          serp_analysis: scoreResult.serp_analysis,
+        },
+        abortRef.current.signal,
+      );
+      setAugmentResult(data);
+      invalidateCredits();
+      await supabase.from("token_usage").insert({
+        ...data.token_usage,
+        business_id: selectedBusinessId,
+        keyword: keyword.trim(),
+      });
+    } catch (e: unknown) {
+      if ((e as Error).name === "AbortError") return;
+      if (e instanceof InsufficientCreditsError) { setShowCreditModal(true); return; }
+      setAugmentError((e as Error).message || "Augmentation failed. Please try again.");
+    } finally {
+      setAugmenting(false);
+    }
+  };
+
+  const copyToClipboard = async (text: string, key: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(key);
+      setTimeout(() => setCopied(""), 1500);
+    } catch {
+      // ignore clipboard failures
+    }
   };
 
   const toggleEngine = (key: string) => {
@@ -378,9 +435,200 @@ export default function ScoreMyPageView() {
                 </div>
               </div>
             )}
+
+            {/* Augment CTA */}
+            {scoreResult.composite_score < 95 && !augmentResult && (
+              <div className="bg-card rounded-xl border border-border p-6">
+                <div className="flex items-start gap-4">
+                  <div className="flex-1">
+                    <h2 className="text-sm font-semibold text-foreground flex items-center gap-1.5">
+                      <Sparkles className="w-4 h-4 text-accent" />
+                      Augment This Page
+                    </h2>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Patch the missing entities, related keywords, quadgrams, and geographic
+                      modifiers into the page — preserving your existing voice and structure.
+                      Costs 1 additional credit.
+                    </p>
+                  </div>
+                  <Button
+                    onClick={handleAugment}
+                    disabled={augmenting}
+                    className="shrink-0"
+                  >
+                    {augmenting
+                      ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Augmenting…</>
+                      : <><Sparkles className="w-4 h-4 mr-2" />Augment Page</>}
+                  </Button>
+                </div>
+                {augmentError && (
+                  <p className="text-xs text-destructive mt-3">{augmentError}</p>
+                )}
+              </div>
+            )}
+
+            {/* Augment result */}
+            {augmentResult && (
+              <div className="space-y-4">
+                {/* Title */}
+                <div className="bg-card rounded-xl border border-border overflow-hidden">
+                  <div className="px-6 py-3 border-b border-border flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-foreground">Title</h3>
+                    <button
+                      onClick={() => copyToClipboard(augmentResult.augmented_title, "title")}
+                      className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+                    >
+                      {copied === "title"
+                        ? <><Check className="w-3.5 h-3.5" />Copied</>
+                        : <><Copy className="w-3.5 h-3.5" />Copy</>}
+                    </button>
+                  </div>
+                  <textarea
+                    value={augmentResult.augmented_title}
+                    readOnly
+                    rows={2}
+                    className="w-full px-6 py-3 text-sm bg-background text-foreground font-mono resize-none focus:outline-none"
+                  />
+                </div>
+
+                {/* Meta description */}
+                <div className="bg-card rounded-xl border border-border overflow-hidden">
+                  <div className="px-6 py-3 border-b border-border flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-foreground">Meta Description</h3>
+                    <button
+                      onClick={() => copyToClipboard(augmentResult.augmented_meta_description, "meta")}
+                      className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+                    >
+                      {copied === "meta"
+                        ? <><Check className="w-3.5 h-3.5" />Copied</>
+                        : <><Copy className="w-3.5 h-3.5" />Copy</>}
+                    </button>
+                  </div>
+                  <textarea
+                    value={augmentResult.augmented_meta_description}
+                    readOnly
+                    rows={3}
+                    className="w-full px-6 py-3 text-sm bg-background text-foreground font-mono resize-none focus:outline-none"
+                  />
+                </div>
+
+                {/* Body HTML */}
+                <div className="bg-card rounded-xl border border-border overflow-hidden">
+                  <div className="px-6 py-3 border-b border-border flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-foreground">Body HTML</h3>
+                    <button
+                      onClick={() => copyToClipboard(augmentResult.augmented_body_html, "body")}
+                      className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+                    >
+                      {copied === "body"
+                        ? <><Check className="w-3.5 h-3.5" />Copied</>
+                        : <><Copy className="w-3.5 h-3.5" />Copy</>}
+                    </button>
+                  </div>
+                  <textarea
+                    value={augmentResult.augmented_body_html}
+                    readOnly
+                    rows={20}
+                    className="w-full px-6 py-3 text-xs bg-background text-foreground font-mono resize-y focus:outline-none"
+                  />
+                </div>
+
+                {/* Applied changes summary */}
+                <div className="bg-card rounded-xl border border-border p-6">
+                  <h3 className="text-sm font-semibold text-foreground mb-3">Applied Changes</h3>
+                  <AppliedChangesSummary changes={augmentResult.applied_changes} />
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
     </>
   );
+}
+
+function AppliedChangesSummary({ changes }: { changes: AugmentPageResult["applied_changes"] }) {
+  const lines: React.ReactNode[] = [];
+
+  const ents = changes.entities_added ?? [];
+  if (ents.length > 0) {
+    const names = ents.slice(0, 8).map(e => e.name).join(", ");
+    const more  = ents.length > 8 ? `, +${ents.length - 8} more` : "";
+    lines.push(
+      <li key="ents">
+        <span className="font-semibold">{ents.length} entit{ents.length === 1 ? "y" : "ies"} added</span>
+        {names && <>: <span className="text-muted-foreground">{names}{more}</span></>}
+      </li>
+    );
+  }
+
+  const kws = changes.related_keywords_added ?? [];
+  if (kws.length > 0) {
+    const names = kws.slice(0, 8).map(k => k.term).join(", ");
+    const more  = kws.length > 8 ? `, +${kws.length - 8} more` : "";
+    lines.push(
+      <li key="kws">
+        <span className="font-semibold">{kws.length} related keyword{kws.length === 1 ? "" : "s"} added</span>
+        : <span className="text-muted-foreground">{names}{more}</span>
+      </li>
+    );
+  }
+
+  const qgs = changes.quadgrams_added ?? [];
+  if (qgs.length > 0) {
+    const names = qgs.slice(0, 5).map(q => `"${q.phrase}"`).join(", ");
+    const more  = qgs.length > 5 ? `, +${qgs.length - 5} more` : "";
+    lines.push(
+      <li key="qgs">
+        <span className="font-semibold">{qgs.length} quadgram{qgs.length === 1 ? "" : "s"} added</span>
+        : <span className="text-muted-foreground">{names}{more}</span>
+      </li>
+    );
+  }
+
+  if ((changes.testimonials_added ?? 0) > 0) {
+    lines.push(
+      <li key="reviews">
+        <span className="font-semibold">{changes.testimonials_added} testimonial{changes.testimonials_added === 1 ? "" : "s"} added</span>
+      </li>
+    );
+  }
+
+  const geo = changes.geographic_signals_added || {};
+  const geoBits: string[] = [];
+  if ((geo.neighborhoods ?? 0) > 0) geoBits.push(`${geo.neighborhoods} neighborhood${geo.neighborhoods === 1 ? "" : "s"}`);
+  if ((geo.zips ?? 0) > 0)         geoBits.push(`${geo.zips} ZIP${geo.zips === 1 ? "" : "s"}`);
+  if ((geo.streets ?? 0) > 0)      geoBits.push(`${geo.streets} street${geo.streets === 1 ? "" : "s"}`);
+  if ((geo.landmarks ?? 0) > 0)    geoBits.push(`${geo.landmarks} landmark${geo.landmarks === 1 ? "" : "s"}`);
+  if (geoBits.length > 0) {
+    lines.push(
+      <li key="geo">
+        <span className="font-semibold">Geographic signals added</span>
+        : <span className="text-muted-foreground">{geoBits.join(", ")}</span>
+      </li>
+    );
+  }
+
+  if (changes.title_rewritten) {
+    lines.push(<li key="title"><span className="font-semibold">Title rewritten</span></li>);
+  }
+  if (changes.meta_description_rewritten) {
+    lines.push(<li key="meta"><span className="font-semibold">Meta description rewritten</span></li>);
+  }
+
+  const headings = changes.headings_rewritten ?? [];
+  for (let i = 0; i < headings.length; i++) {
+    const h = headings[i];
+    lines.push(
+      <li key={`h${i}`}>
+        <span className="font-semibold">{h.tag.toUpperCase()} rewritten</span>
+        : <span className="text-muted-foreground">"{h.original}" → "{h.new}"</span>
+      </li>
+    );
+  }
+
+  if (lines.length === 0) {
+    return <p className="text-xs text-muted-foreground">No changes applied — page already covered the gaps.</p>;
+  }
+  return <ul className="space-y-1.5 text-xs text-foreground list-disc list-inside">{lines}</ul>;
 }

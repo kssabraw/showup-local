@@ -1,6 +1,7 @@
 import type {
   AnalysisResult,
   ScoreResult,
+  AugmentPageResult,
   GeneratePageResult,
   ReoptimizeResult,
   ReoptimizeSectionResult,
@@ -231,6 +232,22 @@ export const nlp = {
     },
     signal?: AbortSignal,
   ) => nlpPostDirect<ScoreResult>("/score-page", body, signal),
+
+  augmentPage: (
+    body: {
+      keyword: string;
+      location: string;
+      location_code?: number | null;
+      page_url: string;
+      business_name: string;
+      gbp_category: string;
+      address?: string;
+      phone?: string;
+      reviews?: unknown[];
+      serp_analysis?: AnalysisResult;
+    },
+    signal?: AbortSignal,
+  ) => nlpPostDirect<AugmentPageResult>("/augment-page", body, signal),
 
   generatePage: (
     body: {
