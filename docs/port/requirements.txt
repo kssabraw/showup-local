@@ -4,5 +4,9 @@ beautifulsoup4>=4.12
 lxml>=5.0
 anthropic>=0.40
 pydantic>=2.0
+# SERP analysis pipeline (serp_analysis.py) only:
+scikit-learn>=1.3
+nltk>=3.8
+numpy>=1.24
 # optional — only if you enable the rate limiter on the router
 slowapi>=0.1.9

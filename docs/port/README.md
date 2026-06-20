@@ -11,7 +11,47 @@ full spec/behavior; this directory is the working code.
 - `PageScoreView.tsx` — React UI for the score breakdown + improve CTA. PRD: [`../SCORE_MY_PAGE_PRD.md`](../SCORE_MY_PAGE_PRD.md)
 - `content_planning.py` — Content Planning engine (derive related keywords + site page-gap check). PRD: [`../CONTENT_PLANNING_PRD.md`](../CONTENT_PLANNING_PRD.md)
 - `PlanningView.tsx` — React UI for the grouped exists/missing gap report. PRD: [`../CONTENT_PLANNING_PRD.md`](../CONTENT_PLANNING_PRD.md)
+- `serp_analysis.py` — SERP analysis pipeline (DataForSEO → ScrapeOwl → TF-IDF/quadgrams/Google entities). PRD: [`../SERP_ANALYSIS_PRD.md`](../SERP_ANALYSIS_PRD.md)
 - `requirements.txt` — Python deps (shared by the backend modules).
+
+## SERP Analysis quick start
+
+This is the shared upstream that produces the `serp_analysis` dict consumed by
+`score_page.py` and the page generator. It's the most expensive op (DataForSEO +
+ScrapeOwl + Google NLP) — **cache results keyed on (keyword, location)**.
+
+```bash
+pip install -r requirements.txt
+export DATAFORSEO_LOGIN=... DATAFORSEO_PASSWORD=... SCRAPEOWL_API_KEY=... GOOGLE_NLP_API_KEY=...
+```
+```python
+from fastapi import FastAPI
+from serp_analysis import router as serp_router
+app = FastAPI(); app.include_router(serp_router)   # exposes POST /analyze
+```
+Or call it directly:
+```python
+from serp_analysis import run_serp_analysis
+
+resp = await run_serp_analysis("emergency plumber anaheim", "Anaheim, California, United States")
+serp_dict = resp.model_dump()      # feed to scoring / generation; cache this
+```
+
+Wire it into Score My Page as the inline provider (so scoring runs analysis when
+no cached `serp_analysis` is supplied):
+```python
+import score_page, serp_analysis
+
+async def _provider(keyword, location, location_code):
+    resp = await serp_analysis.run_serp_analysis(keyword, location, location_code)
+    return resp.model_dump()
+
+score_page.SERP_ANALYSIS_PROVIDER = _provider
+```
+
+**Heads up:** requires `scikit-learn`, `nltk`, `numpy` (NLTK `stopwords`/`punkt`/
+`punkt_tab` are downloaded on import). Degrades gracefully: no Google NLP key →
+entities skipped; no DataForSEO creds → pass `urls=[...]` to analyze specific pages.
 
 ## Content Planning quick start
 
