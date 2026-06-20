@@ -1,0 +1,8 @@
+fastapi>=0.110
+httpx>=0.27
+beautifulsoup4>=4.12
+lxml>=5.0
+anthropic>=0.40
+pydantic>=2.0
+# optional — only if you enable the rate limiter on the router
+slowapi>=0.1.9
