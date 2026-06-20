@@ -7,7 +7,48 @@ full spec/behavior; this directory is the working code.
 - `brand_voice.py` — Brand Voice engine (discovery, scraping, 3 LLM calls, render). PRD: [`../BRAND_VOICE_PRD.md`](../BRAND_VOICE_PRD.md)
 - `icp_creator.py` — ICP Creator (page discovery + classification, 1 ICP LLM call, render). PRD: [`../ICP_CREATOR_PRD.md`](../ICP_CREATOR_PRD.md)
 - `ClientDashboard.tsx` — React UI to view/edit Brand Voice + ICP per client. PRD: [`../CLIENT_DASHBOARD_PRD.md`](../CLIENT_DASHBOARD_PRD.md)
-- `requirements.txt` — Python deps (shared by the two backend modules).
+- `score_page.py` — Score My Page engine (7 LLM engines + 1 deterministic). PRD: [`../SCORE_MY_PAGE_PRD.md`](../SCORE_MY_PAGE_PRD.md)
+- `PageScoreView.tsx` — React UI for the score breakdown + improve CTA. PRD: [`../SCORE_MY_PAGE_PRD.md`](../SCORE_MY_PAGE_PRD.md)
+- `requirements.txt` — Python deps (shared by the backend modules).
+
+## Score My Page quick start
+
+```python
+from fastapi import FastAPI
+from score_page import router as score_router
+app = FastAPI(); app.include_router(score_router)   # exposes POST /score-page
+```
+Or call it directly:
+```python
+from score_page import run_score_page, ScorePageRequest
+
+resp = await run_score_page(ScorePageRequest(
+    keyword="emergency plumber anaheim",
+    location="Anaheim, California, United States",
+    page_url="https://example.com/emergency-plumber",   # or page_content="<html>…"
+    business_name="Example Plumbing", gbp_category="Plumber",
+    serp_analysis=serp_dict,                              # optional but recommended
+))
+print(resp.composite_score, resp.composite_status, resp.deficiencies)
+```
+
+Frontend (`PageScoreView.tsx`) — inject an `api` adapter:
+```tsx
+import PageScoreView, { PageScoreApi } from "./PageScoreView";
+
+const api: PageScoreApi = {
+  scorePage: (input, signal) =>
+    fetch(`${NLP}/score-page`, { method: "POST", headers: { "Content-Type": "application/json", "X-API-Key": KEY }, body: JSON.stringify(input), signal }).then((r) => r.json()),
+  reoptimize: (deficiencies, signal) => runMyReoptimizer(deficiencies, signal),  // optional — omit to hide Improve CTA
+};
+
+<PageScoreView keyword={kw} location={loc} pageUrl={url} businessName={name} gbpCategory={cat} address={addr} serpAnalysis={serp} api={api} onBack={back} onCreateNew={createNew} />;
+```
+
+**Heads up (see PRD §1.4 / §2):** `serp_analysis` is optional — without it the
+deterministic engine returns a neutral 50 and the rubric context is empty. Provide
+it from your SERP pipeline (or set `SERP_ANALYSIS_PROVIDER` in `score_page.py` to
+run it inline) for accurate scoring. Use a **Sonnet-class** model, not Haiku.
 
 ## Client Dashboard (frontend) quick start
 
