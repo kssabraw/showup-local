@@ -9,7 +9,48 @@ full spec/behavior; this directory is the working code.
 - `ClientDashboard.tsx` — React UI to view/edit Brand Voice + ICP per client. PRD: [`../CLIENT_DASHBOARD_PRD.md`](../CLIENT_DASHBOARD_PRD.md)
 - `score_page.py` — Score My Page engine (7 LLM engines + 1 deterministic). PRD: [`../SCORE_MY_PAGE_PRD.md`](../SCORE_MY_PAGE_PRD.md)
 - `PageScoreView.tsx` — React UI for the score breakdown + improve CTA. PRD: [`../SCORE_MY_PAGE_PRD.md`](../SCORE_MY_PAGE_PRD.md)
+- `content_planning.py` — Content Planning engine (derive related keywords + site page-gap check). PRD: [`../CONTENT_PLANNING_PRD.md`](../CONTENT_PLANNING_PRD.md)
+- `PlanningView.tsx` — React UI for the grouped exists/missing gap report. PRD: [`../CONTENT_PLANNING_PRD.md`](../CONTENT_PLANNING_PRD.md)
 - `requirements.txt` — Python deps (shared by the backend modules).
+
+## Content Planning quick start
+
+```python
+from fastapi import FastAPI
+from content_planning import router as planning_router
+app = FastAPI(); app.include_router(planning_router)   # exposes POST /related-pages
+```
+Or call it directly:
+```python
+from content_planning import run_related_pages, RelatedPagesRequest
+
+resp = await run_related_pages(RelatedPagesRequest(
+    keyword="tree service",
+    location="Anaheim, California, United States",
+    business_name="Example Tree Co", gbp_category="Tree service",
+    website="https://example.com",       # omit → all items "missing"
+))
+for it in resp.items:
+    print(it.group, it.status, it.keyword, it.url)
+```
+
+Frontend (`PlanningView.tsx`) — inject an `api` adapter and pass the businesses list:
+```tsx
+import PlanningView, { PlanningApi } from "./PlanningView";
+
+const api: PlanningApi = {
+  relatedPages: (input) =>
+    fetch(`${NLP}/related-pages`, { method: "POST", headers: { "Content-Type": "application/json", "X-API-Key": KEY }, body: JSON.stringify(input) }).then((r) => r.json()),
+  checkRankability: (input) =>     // optional — omit to hide the Rankability action
+    fetch(`${NLP}/check-rankability`, { method: "POST", headers: { "Content-Type": "application/json", "X-API-Key": KEY }, body: JSON.stringify(input) }).then((r) => r.json()),
+};
+
+<PlanningView businesses={businesses} api={api} onCreatePage={(kw, loc) => goToGenerate(kw, loc)} />;
+```
+
+**Heads up (see PRD §1.4):** the per-keyword **rankability check** is a separate
+DataForSEO-Maps engine — not included here. Omit `checkRankability` to hide it, or
+wire it to your own. Page matching uses a built-in English stopword set (no NLTK).
 
 ## Score My Page quick start
 
