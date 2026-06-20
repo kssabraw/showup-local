@@ -1,14 +1,46 @@
-# Brand Voice Engine — portable port
+# ShowUP Local — portable ports
 
-A self-contained port of ShowUP Local's brand voice pipeline. See
-[`../BRAND_VOICE_PRD.md`](../BRAND_VOICE_PRD.md) for the full spec/behavior;
-this directory is the working code.
+Self-contained ports of two ShowUP Local pipelines. See the matching PRDs for
+full spec/behavior; this directory is the working code.
 
 ## Files
-- `brand_voice.py` — the entire engine (discovery, scraping, 3 LLM calls, render).
-- `requirements.txt` — Python deps.
+- `brand_voice.py` — Brand Voice engine (discovery, scraping, 3 LLM calls, render). PRD: [`../BRAND_VOICE_PRD.md`](../BRAND_VOICE_PRD.md)
+- `icp_creator.py` — ICP Creator (page discovery + classification, 1 ICP LLM call, render). PRD: [`../ICP_CREATOR_PRD.md`](../ICP_CREATOR_PRD.md)
+- `requirements.txt` — Python deps (shared by both).
 
-## Quick start
+> Both files are standalone and **duplicate** the shared page-discovery /
+> classification / SSRF helpers so each can be dropped in on its own. If you use
+> both, factor those helpers into a shared module to dedupe.
+
+## ICP Creator quick start
+
+```python
+from fastapi import FastAPI
+from icp_creator import router as icp_router
+app = FastAPI(); app.include_router(icp_router)   # exposes POST /analyze-business
+```
+Or call it directly:
+```python
+from icp_creator import run_business_analysis, BusinessAnalysisRequest, build_icp_text, build_differentiators_text
+
+resp = await run_business_analysis(BusinessAnalysisRequest(
+    website_url="https://example.com", business_name="Example Plumbing",
+    gbp_category="Plumber", gbp_categories=["Plumber", "Drainage service"],
+))
+detected_icp = resp.detected_icp            # persist on your business record
+differentiators = resp.differentiators
+icp_block = build_icp_text(detected_icp)    # prepend to your generator's prompt
+diff_block = build_differentiators_text(differentiators)
+```
+**Heads up (see PRD §1.3):** shipped behavior analyzes pages by **URL only**
+(title/h1 are blank). For better differentiators, implement the `_ENRICH_PAGES`
+hook in `icp_creator.py` to fetch real titles/H1s before the LLM call.
+
+---
+
+## Brand Voice — files
+
+## Brand Voice quick start
 
 ```bash
 pip install -r requirements.txt
