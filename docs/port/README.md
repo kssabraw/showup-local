@@ -6,7 +6,58 @@ full spec/behavior; this directory is the working code.
 ## Files
 - `brand_voice.py` — Brand Voice engine (discovery, scraping, 3 LLM calls, render). PRD: [`../BRAND_VOICE_PRD.md`](../BRAND_VOICE_PRD.md)
 - `icp_creator.py` — ICP Creator (page discovery + classification, 1 ICP LLM call, render). PRD: [`../ICP_CREATOR_PRD.md`](../ICP_CREATOR_PRD.md)
-- `requirements.txt` — Python deps (shared by both).
+- `ClientDashboard.tsx` — React UI to view/edit Brand Voice + ICP per client. PRD: [`../CLIENT_DASHBOARD_PRD.md`](../CLIENT_DASHBOARD_PRD.md)
+- `requirements.txt` — Python deps (shared by the two backend modules).
+
+## Client Dashboard (frontend) quick start
+
+`ClientDashboard.tsx` is a React + TypeScript component (deps: `react`,
+`lucide-react`, Tailwind). It's backend-agnostic — you inject an `api` adapter
+that wires its buttons to your analysis endpoints + persistence.
+
+```tsx
+import ClientDashboard, { ClientDashboardApi } from "./ClientDashboard";
+
+const api: ClientDashboardApi = {
+  runIcpAnalysis: (c) =>
+    fetch(`${NLP}/analyze-business`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-API-Key": KEY },
+      body: JSON.stringify({
+        website_url: c.website ?? undefined,
+        business_name: c.business_name,
+        gbp_category: c.gbp_category,
+        gbp_categories: c.gbp_categories ?? [],
+      }),
+    }).then((r) => r.json()),
+
+  scanBrandVoice: (c) =>
+    fetch(`${NLP}/analyze-brand-voice`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-API-Key": KEY },
+      body: JSON.stringify({
+        website_url: c.website ?? undefined,
+        business_name: c.business_name,
+        gbp_category: c.gbp_category ?? "",
+      }),
+    }).then((r) => r.json()),
+
+  saveClient: (id, patch) => db.update("clients", id, patch),   // your DB write
+  refreshFromSource: (c) => fetchFromGBP(c.gbp_place_id),       // optional
+};
+
+<ClientDashboard
+  client={client}
+  api={api}
+  onBack={() => navigate(-1)}
+  onChange={(updated) => setClient(updated)}
+  onError={(title, msg) => toast({ title, description: msg })}
+/>;
+```
+
+The component returns the same response shapes the two Python modules produce, so
+they slot together. The Tailwind classes use shadcn-style tokens (`bg-card`,
+`text-accent`, …) — remap to your design system if you don't use shadcn.
 
 > Both files are standalone and **duplicate** the shared page-discovery /
 > classification / SSRF helpers so each can be dropped in on its own. If you use
