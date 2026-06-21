@@ -1,7 +1,12 @@
 # ShowUP Local — portable ports
 
-Self-contained ports of two ShowUP Local pipelines. See the matching PRDs for
+Self-contained ports of the ShowUP Local modules. See the matching PRDs for
 full spec/behavior; this directory is the working code.
+
+> **Start with [`SYSTEM_OVERVIEW.md`](SYSTEM_OVERVIEW.md)** — the orchestrator
+> doc that explains how every module fits together, the shared data model,
+> external services, and the recommended build order. Read it before the
+> per-module PRDs.
 
 ## Files
 - `brand_voice.py` — Brand Voice engine (discovery, scraping, 3 LLM calls, render). PRD: [`../BRAND_VOICE_PRD.md`](../BRAND_VOICE_PRD.md)
